@@ -33,11 +33,12 @@ from tests.unit.egress.test_policy_projection import (
     FixtureTokenCounter,
     egress_request,
     fixture_enforcer,
+    fixture_store,
     l1_payload,
 )
 
 
-def maximum_l2_state(tmp_path: Path) -> UsageSnapshot:
+def maximum_l2_state() -> UsageSnapshot:
     quote = sized_quote(tokens=512, byte_count=8192)
     state: UsageSnapshot | None = None
     stages = (
@@ -56,16 +57,14 @@ def maximum_l2_state(tmp_path: Path) -> UsageSnapshot:
             claim_excerpts,
             toc_count=2,
         )
-        for call_index, stage in enumerate(stages):
+        for stage in stages:
             reservation = prepare_for_payload(
-                tmp_path / f"online-{claim_index}-{call_index}",
                 payload,
                 stage=stage,
             )
             state = apply_reservation(state, reservation)
 
     judge = prepare_judge(
-        tmp_path / "judge",
         tuple(distinct_excerpt(100 + index, quote) for index in range(5)),
         level=TaskLevel.L2,
     )
@@ -74,8 +73,8 @@ def maximum_l2_state(tmp_path: Path) -> UsageSnapshot:
     return state
 
 
-def test_exact_maximum_l2_evaluation_envelope_is_accepted(tmp_path: Path) -> None:
-    state = maximum_l2_state(tmp_path)
+def test_exact_maximum_l2_evaluation_envelope_is_accepted() -> None:
+    state = maximum_l2_state()
 
     assert len(state.disclosures) == 17
     assert state.root_unique_tokens == 8_704
@@ -95,12 +94,9 @@ def test_exact_maximum_l2_evaluation_envelope_is_accepted(tmp_path: Path) -> Non
     }
 
 
-def test_maximum_envelope_rejects_an_extra_excerpt_or_toc_node(
-    tmp_path: Path,
-) -> None:
-    state = maximum_l2_state(tmp_path / "base")
+def test_maximum_envelope_rejects_an_extra_excerpt_or_toc_node() -> None:
+    state = maximum_l2_state()
     extra_excerpt = prepare_for_payload(
-        tmp_path / "extra-excerpt",
         l2_claim_payload(
             "claim-0",
             (distinct_excerpt(250, "extra"),),
@@ -111,7 +107,6 @@ def test_maximum_envelope_rejects_an_extra_excerpt_or_toc_node(
     assert excerpt_error.value.code == "root_unique_excerpts_exceeded"
 
     extra_toc = prepare_for_payload(
-        tmp_path / "extra-toc",
         l2_claim_payload("claim-0", (), toc_count=1),
     )
     with pytest.raises(EgressPolicyViolation) as toc_error:
@@ -127,14 +122,13 @@ def test_maximum_envelope_rejects_an_extra_excerpt_or_toc_node(
     ],
 )
 def test_maximum_component_rejects_one_extra_token_or_byte(
-    tmp_path: Path,
     quote: str,
     code: str,
 ) -> None:
     payload = l2_claim_payload("claim-0", (distinct_excerpt(1, quote),))
 
     with pytest.raises(EgressPolicyViolation) as caught:
-        prepare_for_payload(tmp_path, payload)
+        prepare_for_payload(payload)
 
     assert caught.value.code == code
 
@@ -161,11 +155,10 @@ def test_payload_rejects_one_extra_field_with_stable_validation_code() -> None:
     ],
 )
 def test_reservation_contract_forbids_caller_supplied_derived_facts(
-    tmp_path: Path,
     field: str,
 ) -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
     fields = reservation.model_dump()
@@ -179,12 +172,11 @@ def test_reservation_contract_forbids_caller_supplied_derived_facts(
 
 @pytest.mark.parametrize(("field", "value"), [("token_count", 1), ("byte_count", 1)])
 def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
-    tmp_path: Path,
     field: str,
     value: int,
 ) -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
     altered_fact = reservation.disclosures[0].model_copy(update={field: value})
@@ -196,6 +188,7 @@ def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
             altered,
             EgressPolicy.load(),
             FixtureTokenCounter(),
+            fixture_store(),
             clock=lambda: NOW,
         )
 
@@ -207,11 +200,10 @@ def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
     ["policy_hash", "cap_snapshot", "atomic_claim_id", "toc_delta"],
 )
 def test_apply_rejects_model_copy_injection_of_removed_derived_facts(
-    tmp_path: Path,
     field: str,
 ) -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
     altered = reservation.model_copy(update={field: "forged"})
@@ -222,9 +214,9 @@ def test_apply_rejects_model_copy_injection_of_removed_derived_facts(
     assert caught.value.code == "reservation_primitive_invalid"
 
 
-def test_apply_reauthorizes_tampered_route_with_trusted_clock(tmp_path: Path) -> None:
+def test_apply_reauthorizes_tampered_route_with_trusted_clock() -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
     other_route = ProviderRouteBinding(
@@ -243,10 +235,8 @@ def test_apply_reauthorizes_tampered_route_with_trusted_clock(tmp_path: Path) ->
     assert caught.value.code == "route_unauthorized"
 
 
-def test_cross_provider_resend_is_one_root_unique_and_two_transmissions(
-    tmp_path: Path,
-) -> None:
-    first_request = egress_request(tmp_path / "first")
+def test_cross_provider_resend_is_one_root_unique_and_two_transmissions() -> None:
+    first_request = egress_request()
     first = fixture_enforcer().prepare(first_request, FixtureTokenCounter())
     second_route = ProviderRouteBinding(
         provider_id="provider-b",
@@ -257,7 +247,7 @@ def test_cross_provider_resend_is_one_root_unique_and_two_transmissions(
     class ProviderBCounter(FixtureTokenCounter):
         provider_id = "provider-b"
 
-    second_request = egress_request(tmp_path / "second", route=second_route)
+    second_request = egress_request(route=second_route)
     second = fixture_enforcer().prepare(second_request, ProviderBCounter())
 
     state = apply_reservation(None, first)

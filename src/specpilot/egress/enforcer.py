@@ -19,12 +19,13 @@ from specpilot.contracts.egress import (
     ReservationRequest,
     RouteUsage,
     RunUsage,
+    SourceManifestResolver,
     StageUsage,
     TaskLevel,
     TokenCounter,
     UsageSnapshot,
 )
-from specpilot.contracts.manifests import ProviderUse
+from specpilot.contracts.manifests import ProviderUse, SourceManifest
 from specpilot.egress.policy import (
     EgressPolicy,
     disclosure_id,
@@ -62,9 +63,11 @@ class EgressPolicyEnforcer:
         self,
         policy: EgressPolicy | None = None,
         *,
+        manifests: SourceManifestResolver,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._policy = policy or EgressPolicy.load()
+        self._manifests = manifests
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def prepare(
@@ -142,11 +145,9 @@ class EgressPolicyEnforcer:
         if request.route.use != expected_use:
             _reject("stage_route_mismatch", "payload does not match route use")
         _validate_version_binding(request)
+        stored_source = self._stored_source_manifest(request)
         authorization_time = self._authorization_time()
-        if not request.source_manifest.authorizes(
-            request.route,
-            at=authorization_time,
-        ):
+        if not stored_source.authorizes(request.route, at=authorization_time):
             _reject("route_unauthorized", "source manifest does not authorize route")
         _verify_counter(counter, request)
 
@@ -210,6 +211,27 @@ class EgressPolicyEnforcer:
             atomic_claim_id=claim_id,
         )
 
+    def _stored_source_manifest(self, request: EgressRequest) -> SourceManifest:
+        """Resolve the manifest from the store; never authorize on the request copy.
+
+        A caller can build a self-consistent ``SourceManifest`` that says
+        ``authorized=True`` and was never written to the store, so content
+        addressing alone does not establish that a compliance decision exists.
+        """
+        try:
+            stored = self._manifests.read_source(request.version.source_manifest_id)
+        except Exception as error:
+            raise EgressPolicyViolation(
+                "source_manifest_unresolvable",
+                "authorized source manifest could not be read from the store",
+            ) from error
+        if stored != request.source_manifest:
+            _reject(
+                "source_manifest_untrusted",
+                "request source manifest is not the stored manifest for that ID",
+            )
+        return stored
+
     def _authorization_time(self) -> datetime:
         try:
             checked_at = self._clock()
@@ -235,15 +257,16 @@ def apply_reservation(
     request: ReservationRequest,
     policy: EgressPolicy,
     counter: TokenCounter,
+    manifests: SourceManifestResolver,
     *,
     clock: Callable[[], datetime] | None = None,
 ) -> UsageSnapshot:
-    """Apply using server-owned policy, counter, and authorization clock."""
-    return EgressPolicyEnforcer(policy, clock=clock).apply_reservation(
-        existing_usage,
-        request,
-        counter,
-    )
+    """Apply using server-owned policy, manifest store, counter, and clock."""
+    return EgressPolicyEnforcer(
+        policy,
+        manifests=manifests,
+        clock=clock,
+    ).apply_reservation(existing_usage, request, counter)
 
 
 def _apply_usage(

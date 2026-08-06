@@ -17,6 +17,7 @@
 - Any unreadable ledger, ambiguous reservation state, policy mismatch, token-counter failure, or manifest mismatch fails closed before network I/O.
 - Default online caps are copied from product-plan v5: L1 unique 5 excerpts/2,560 tokens and L2 run unique 12 excerpts/6,144 tokens; every excerpt is at most 512 model tokens and 8 KiB UTF-8; L2 is additionally limited to 4 excerpts/2,048 tokens per atomic claim.
 - Online transmitted caps reserve four stage fan-outs; judge transmitted caps reserve two. Evaluation-root transmitted caps are L1 15,360 tokens/240 KiB and L2 29,696 tokens/464 KiB.
+- No provider route is authorized by a `SourceManifest` object supplied on the request. Content addressing proves a manifest is internally consistent, not that a compliance decision was ever recorded, so the enforcer resolves every manifest through a `SourceManifestResolver` it owns — the same way it owns the policy, the token counter contract, and the authorization clock.
 - CI and fixture smoke output contain no recall, accuracy, F1, or other quality-looking metric.
 
 ---
@@ -363,9 +364,9 @@ git commit -m "feat: add immutable source manifest chain"
 - Test: `tests/unit/egress/test_maximum_legal_envelope.py`
 
 **Interfaces:**
-- Produces: `EgressPolicyEnforcer.prepare(request: EgressRequest, counter: TokenCounter) -> ReservationRequest`.
+- Produces: `EgressPolicyEnforcer(policy, *, manifests: SourceManifestResolver, clock)` with `prepare(request: EgressRequest, counter: TokenCounter) -> ReservationRequest`.
 - Produces: `disclosure_id(corpus_manifest_id, content_hash, quote_hash, normalized_excerpt_span) -> str`.
-- Consumes: an authorized source-manifest/route binding from Task 4 and a mandatory model-compatible token counter.
+- Consumes: a **stored** source manifest resolved by ID through Task 4's store, and a mandatory model-compatible token counter. The manifest carried on the request is compared against the stored one and is never itself the basis of the decision.
 
 - [ ] **Step 1: Write failing field-allowlist and local-object tests**
 

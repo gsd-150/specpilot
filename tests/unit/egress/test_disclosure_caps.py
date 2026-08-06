@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 import pytest
 
@@ -33,6 +32,7 @@ from tests.unit.egress.test_policy_projection import (
     egress_request,
     excerpt,
     fixture_enforcer,
+    fixture_store,
     l1_payload,
     online_route,
     version_metadata,
@@ -59,6 +59,7 @@ def apply_reservation(
         reservation,
         EgressPolicy.load(),
         counter or FixtureTokenCounter(),
+        fixture_store(),
         clock=lambda: NOW,
     )
 
@@ -99,13 +100,12 @@ def l2_claim_payload(
 
 
 def prepare_for_payload(
-    tmp_path: Path,
     payload: L2AtomicClaimPayload | L2DesignPayload,
     *,
     stage: EgressStage = EgressStage.EVIDENCE,
     run_id: str = "run-1",
 ):
-    request = egress_request(tmp_path, payload=l1_payload())
+    request = egress_request(payload=l1_payload())
     request = request.model_copy(
         update={
             "payload": payload.model_copy(update={"version": request.version}),
@@ -126,7 +126,6 @@ def judge_route() -> ProviderRouteBinding:
 
 
 def prepare_judge(
-    tmp_path: Path,
     excerpts: tuple[EvidenceExcerpt, ...],
     *,
     level: TaskLevel = TaskLevel.L2,
@@ -137,7 +136,7 @@ def prepare_judge(
         scoring_points=(ScoringPoint(point_id="p1", text="Correctness"),),
         gold_excerpts=excerpts,
     )
-    source = authorized_manifest(tmp_path / "judge-manifests", route=route)
+    source = authorized_manifest(route=route)
     request_version = version_metadata(source_manifest_id=source.manifest_id)
     request = EgressRequest(
         evaluation_root_id="case-1",
@@ -196,7 +195,6 @@ def test_disclosure_identity_includes_normalized_span() -> None:
     ],
 )
 def test_excerpt_rejects_one_token_or_byte_beyond_individual_cap(
-    tmp_path: Path,
     quote: str,
     code: str,
 ) -> None:
@@ -204,18 +202,16 @@ def test_excerpt_rejects_one_token_or_byte_beyond_individual_cap(
 
     with pytest.raises(EgressPolicyViolation) as caught:
         fixture_enforcer().prepare(
-            egress_request(tmp_path, payload=payload),
+            egress_request(payload=payload),
             FixtureTokenCounter(),
         )
 
     assert caught.value.code == code
 
 
-def test_duplicate_is_unique_once_but_every_retry_is_transmitted(
-    tmp_path: Path,
-) -> None:
+def test_duplicate_is_unique_once_but_every_retry_is_transmitted() -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
 
@@ -232,11 +228,9 @@ def test_duplicate_is_unique_once_but_every_retry_is_transmitted(
     )
 
 
-def test_same_disclosure_id_with_inconsistent_size_fails_closed(
-    tmp_path: Path,
-) -> None:
+def test_same_disclosure_id_with_inconsistent_size_fails_closed() -> None:
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path),
+        egress_request(),
         FixtureTokenCounter(),
     )
     state = apply_reservation(None, reservation)
@@ -249,13 +243,13 @@ def test_same_disclosure_id_with_inconsistent_size_fails_closed(
     assert caught.value.code == "reservation_accounting_mismatch"
 
 
-def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None:
+def test_l1_online_unique_and_transmitted_caps_are_exact() -> None:
     quote = sized_quote(tokens=512, byte_count=8192)
     payload = l1_payload(
         evidence_excerpts=tuple(distinct_excerpt(i + 1, quote) for i in range(5))
     )
     reservation = fixture_enforcer().prepare(
-        egress_request(tmp_path, payload=payload),
+        egress_request(payload=payload),
         FixtureTokenCounter(),
     )
     state: UsageSnapshot | None = None
@@ -272,7 +266,6 @@ def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None
 
     extra = fixture_enforcer().prepare(
         egress_request(
-            tmp_path / "extra",
             payload=l1_payload(
                 evidence_excerpts=(distinct_excerpt(10, "one token"),)
             ),
@@ -285,9 +278,7 @@ def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None
     assert unique.value.code == "online_unique_excerpts_exceeded"
 
 
-def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact(
-    tmp_path: Path,
-) -> None:
+def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact() -> None:
     quote = sized_quote(tokens=512, byte_count=8192)
     state: UsageSnapshot | None = None
     for claim_index in range(3):
@@ -299,7 +290,7 @@ def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact(
         )
         state = apply_reservation(
             state,
-            prepare_for_payload(tmp_path / str(claim_index), payload),
+            prepare_for_payload(payload),
         )
 
     assert state is not None
@@ -311,7 +302,6 @@ def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact(
     assert all(claim.unique_bytes == 32768 for claim in run.claim_usage)
 
     fifth_for_claim = prepare_for_payload(
-        tmp_path / "claim-overflow",
         l2_claim_payload("claim-0", (distinct_excerpt(20, quote),)),
     )
     with pytest.raises(EgressPolicyViolation) as per_claim:
@@ -319,7 +309,6 @@ def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact(
     assert per_claim.value.code == "claim_unique_excerpts_exceeded"
 
     fourth_claim = prepare_for_payload(
-        tmp_path / "fourth-claim",
         l2_claim_payload("claim-3", (distinct_excerpt(1, quote),)),
     )
     with pytest.raises(EgressPolicyViolation) as claim_count:
@@ -327,10 +316,9 @@ def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact(
     assert claim_count.value.code == "claim_count_exceeded"
 
 
-def test_judge_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None:
+def test_judge_unique_and_transmitted_caps_are_exact() -> None:
     quote = sized_quote(tokens=512, byte_count=8192)
     reservation = prepare_judge(
-        tmp_path,
         tuple(distinct_excerpt(100 + i, quote) for i in range(5)),
     )
 
@@ -345,7 +333,6 @@ def test_judge_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None:
     assert transmitted.value.code == "judge_transmitted_tokens_exceeded"
 
     extra = prepare_judge(
-        tmp_path / "extra",
         (distinct_excerpt(200, "one token"),),
     )
     with pytest.raises(EgressPolicyViolation) as unique:
@@ -353,17 +340,14 @@ def test_judge_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None:
     assert unique.value.code == "judge_unique_excerpts_exceeded"
 
 
-def test_toc_is_bounded_cumulatively_per_run(tmp_path: Path) -> None:
+def test_toc_is_bounded_cumulatively_per_run() -> None:
     first = prepare_for_payload(
-        tmp_path / "first",
         l2_claim_payload("claim-1", (), toc_count=12),
     )
     second = prepare_for_payload(
-        tmp_path / "second",
         l2_claim_payload("claim-1", (), toc_count=12),
     )
     overflow = prepare_for_payload(
-        tmp_path / "overflow",
         l2_claim_payload("claim-1", (), toc_count=1),
     )
 
@@ -376,8 +360,8 @@ def test_toc_is_bounded_cumulatively_per_run(tmp_path: Path) -> None:
     assert caught.value.code == "toc_run_exceeded"
 
 
-def test_judge_payload_cannot_be_sent_to_online_stage_or_route(tmp_path: Path) -> None:
-    reservation = prepare_judge(tmp_path, ())
+def test_judge_payload_cannot_be_sent_to_online_stage_or_route() -> None:
+    reservation = prepare_judge(())
     invalid = reservation.model_copy(
         update={"stage": EgressStage.EVIDENCE, "route": online_route()}
     )

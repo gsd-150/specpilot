@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +35,11 @@ from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
 NOW = datetime(2026, 8, 6, 4, tzinfo=UTC)
 CORPUS_MANIFEST_ID = "c" * 64
+# Resolved because ManifestStore walks path components with O_NOFOLLOW and macOS
+# hands out /var/folders/..., where /var is a symlink to /private/var.
+_FIXTURE_MANIFEST_DIR = Path(
+    tempfile.mkdtemp(prefix="specpilot-fixture-manifests-")
+).resolve()
 
 
 class FixtureTokenCounter:
@@ -54,16 +60,25 @@ def online_route() -> ProviderRouteBinding:
     )
 
 
+def fixture_store() -> ManifestStore:
+    """One create-only store shared by these fixtures.
+
+    Manifests are content-addressed and the store has a byte-identical replay
+    path, so a shared directory is safe and lets ``fixture_enforcer`` resolve
+    every manifest the fixtures legitimately created.
+    """
+    return ManifestStore(_FIXTURE_MANIFEST_DIR)
+
+
 def fixture_enforcer() -> EgressPolicyEnforcer:
-    return EgressPolicyEnforcer(clock=lambda: NOW)
+    return EgressPolicyEnforcer(manifests=fixture_store(), clock=lambda: NOW)
 
 
 def authorized_manifest(
-    directory: Path,
     *,
     route: ProviderRouteBinding | None = None,
 ) -> SourceManifest:
-    store = ManifestStore(directory)
+    store = fixture_store()
     initial = store.create_source(SourceManifestDraft(**initial_fields()))
     binding = route or online_route()
     return store.create_successor(
@@ -135,14 +150,13 @@ def l1_payload(**overrides: object) -> L1OnlinePayload:
 
 
 def egress_request(
-    tmp_path: Path,
     *,
     payload: L1OnlinePayload | None = None,
     manifest: SourceManifest | None = None,
     route: ProviderRouteBinding | None = None,
 ) -> EgressRequest:
     binding = route or online_route()
-    source = manifest or authorized_manifest(tmp_path / "manifests", route=binding)
+    source = manifest or authorized_manifest(route=binding)
     request_version = version_metadata(source_manifest_id=source.manifest_id)
     selected_payload = payload or l1_payload()
     selected_payload = selected_payload.model_copy(update={"version": request_version})
@@ -248,9 +262,9 @@ def test_judge_payload_exposes_only_answer_scoring_and_gold_excerpts() -> None:
     assert caught.value.errors()[0]["type"] == "extra_forbidden"
 
 
-def test_prepare_requires_authorized_exact_route_and_counter(tmp_path: Path) -> None:
+def test_prepare_requires_authorized_exact_route_and_counter() -> None:
     enforcer = fixture_enforcer()
-    request = egress_request(tmp_path)
+    request = egress_request()
 
     reservation = enforcer.prepare(request, FixtureTokenCounter())
 
@@ -278,7 +292,6 @@ def test_prepare_requires_authorized_exact_route_and_counter(tmp_path: Path) -> 
 
 @pytest.mark.parametrize("result", [0, -1, RuntimeError("counter failed")])
 def test_prepare_fails_closed_when_counting_is_not_positive(
-    tmp_path: Path,
     result: int | RuntimeError,
 ) -> None:
     class BrokenCounter(FixtureTokenCounter):
@@ -288,24 +301,26 @@ def test_prepare_fails_closed_when_counting_is_not_positive(
             return result
 
     with pytest.raises(TokenAccountingUnavailable) as caught:
-        fixture_enforcer().prepare(egress_request(tmp_path), BrokenCounter())
+        fixture_enforcer().prepare(egress_request(), BrokenCounter())
 
     assert caught.value.code == "token_accounting_unavailable"
 
 
-def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization(
-    tmp_path: Path,
-) -> None:
-    request = egress_request(tmp_path)
+def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization() -> None:
+    request = egress_request()
     expired = EgressPolicyEnforcer(
-        clock=lambda: datetime(2026, 8, 8, tzinfo=UTC)
+        manifests=fixture_store(),
+        clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
     )
 
     with pytest.raises(EgressPolicyViolation) as denied:
         expired.prepare(request, FixtureTokenCounter())
     assert denied.value.code == "route_unauthorized"
 
-    naive = EgressPolicyEnforcer(clock=lambda: datetime(2026, 8, 6, 4))
+    naive = EgressPolicyEnforcer(
+        manifests=fixture_store(),
+        clock=lambda: datetime(2026, 8, 6, 4),
+    )
     with pytest.raises(EgressPolicyViolation) as invalid_clock:
         naive.prepare(request, FixtureTokenCounter())
     assert invalid_clock.value.code == "authorization_clock_invalid"
@@ -327,12 +342,11 @@ def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization(
     ],
 )
 def test_prepare_binds_all_version_and_corpus_facts_to_authorized_source(
-    tmp_path: Path,
     field: str,
     invalid_value: str,
     code: str,
 ) -> None:
-    request = egress_request(tmp_path)
+    request = egress_request()
     changed_version = request.version.model_copy(update={field: invalid_value})
     changed_payload = request.payload.model_copy(update={"version": changed_version})
     changed = request.model_copy(
@@ -345,10 +359,8 @@ def test_prepare_binds_all_version_and_corpus_facts_to_authorized_source(
     assert caught.value.code == code
 
 
-def test_prepare_rejects_payload_version_or_excerpt_corpus_disagreement(
-    tmp_path: Path,
-) -> None:
-    request = egress_request(tmp_path)
+def test_prepare_rejects_payload_version_or_excerpt_corpus_disagreement() -> None:
+    request = egress_request()
     payload_version = request.version.model_copy(
         update={"corpus_manifest_id": "d" * 64}
     )

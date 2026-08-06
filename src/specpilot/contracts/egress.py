@@ -149,6 +149,12 @@ class TokenCounter(Protocol):
     def count_tokens(self, text: str) -> int: ...
 
 
+class SourceManifestResolver(Protocol):
+    """Reads a stored source manifest by ID; never trusts a caller-supplied copy."""
+
+    def read_source(self, manifest_id: str) -> SourceManifest: ...
+
+
 class DisclosureFact(_FrozenModel):
     disclosure_id: Sha256
     corpus_manifest_id: Sha256
