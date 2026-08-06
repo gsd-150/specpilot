@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -52,12 +52,12 @@ def migrated_dsn(ledger_dsn: str) -> Iterator[str]:
 
 
 @pytest.fixture
-async def clean_ledger(migrated_dsn: str) -> AsyncIterator[str]:
+def clean_ledger(migrated_dsn: str) -> Iterator[str]:
+    """Sync on purpose: a TRUNCATE needs no event loop, and the CLI entry point
+    is synchronous, so an async fixture would exclude it."""
     psycopg = pytest.importorskip("psycopg")
-    async with await psycopg.AsyncConnection.connect(
-        migrated_dsn, autocommit=True
-    ) as connection:
-        await connection.execute(
+    with psycopg.connect(migrated_dsn, autocommit=True) as connection:
+        connection.execute(
             "TRUNCATE " + ", ".join(_TABLES) + " RESTART IDENTITY CASCADE"
         )
     yield migrated_dsn

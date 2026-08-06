@@ -527,25 +527,25 @@ git commit -m "feat: route providers through the egress ledger"
 - Produces CLI commands `archive inspect`, `source-manifest create`, `source-manifest authorize-successor`, `egress envelope-smoke`, and `provider route-smoke --fixture-only`.
 - Consumes Tasks 2–7; route smoke may send only synthetic fixture text.
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Assert JSON stdout contains stable IDs/status only, diagnostics go to stderr without source/payload text, invalid authorization evidence exits non-zero, and envelope smoke checks both the maximum valid case and one-over-limit failures.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/cli -q`
 
 Expected: CLI entry point missing.
 
-- [ ] **Step 3: Implement the narrow commands and document the four-part assessment**
+- [x] **Step 3: Implement the narrow commands and document the four-part assessment**
 
 The template requires: source-side terms snapshot/hash and interpretation uncertainty; provider-side retention/training/region/subprocessor snapshot/hash; exact outbound-cap factual premise; explicit author conclusion and bound route/use/expiry. The runbook declares routes A/B/C and forbids calling self-assessment external approval.
 
-- [ ] **Step 4: Perform official-source research and save only permissible snapshots/metadata**
+- [ ] **Step 4: Perform official-source research and save only permissible snapshots/metadata** — OWNER: the author. Deliberately left unchecked. The conclusion in `author_conclusion` is a self-assessment attributed to a named `author_id`; tooling may validate its completeness and route binding but must never write, infer, or upgrade it. Until it exists, the source manifest stays default-deny and no cloud route is reachable, which is the intended resting state.
 
 Use official 3GPP/ETSI/provider pages. Store URLs, access time, response/content hash, a short original summary, and uncertainties; do not copy long copyrighted passages. Create initial source manifests only after safe download/hash processing. Create an authorized successor only if all required evidence exists and the author’s recorded conclusion is yes; otherwise keep default deny and select B/C according to the product plan.
 
-- [ ] **Step 5: Run fixture-only route smoke**
+- [x] **Step 5: Run fixture-only route smoke**
 
 Run: `python -m specpilot.cli provider route-smoke --fixture-only --route main`
 
@@ -553,7 +553,7 @@ Run: `python -m specpilot.cli provider route-smoke --fixture-only --route judge`
 
 Expected: tool calling/structured-output metadata are captured when credentials/routes exist; missing credentials produce a documented blocked result, never a fabricated pass.
 
-- [ ] **Step 6: Commit code and non-sensitive records**
+- [x] **Step 6: Commit code and non-sensitive records**
 
 ```bash
 git add src/specpilot/cli.py docs tests/cli
