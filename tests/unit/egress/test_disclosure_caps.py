@@ -18,18 +18,21 @@ from specpilot.contracts.egress import (
 )
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import (
-    EgressPolicyEnforcer,
     EgressPolicyViolation,
     UsageSnapshot,
-    apply_reservation,
 )
-from specpilot.egress.policy import disclosure_id
+from specpilot.egress.enforcer import (
+    apply_reservation as apply_with_trusted_inputs,
+)
+from specpilot.egress.policy import EgressPolicy, disclosure_id
 from tests.unit.egress.test_policy_projection import (
+    CORPUS_MANIFEST_ID,
     NOW,
     FixtureTokenCounter,
     authorized_manifest,
     egress_request,
     excerpt,
+    fixture_enforcer,
     l1_payload,
     online_route,
     version_metadata,
@@ -46,9 +49,23 @@ def sized_quote(*, tokens: int, byte_count: int | None = None) -> str:
     return " ".join(["x" * first_size, *("x" for _ in range(tokens - 1))])
 
 
+def apply_reservation(
+    existing: UsageSnapshot | None,
+    reservation,
+    counter=None,
+) -> UsageSnapshot:
+    return apply_with_trusted_inputs(
+        existing,
+        reservation,
+        EgressPolicy.load(),
+        counter or FixtureTokenCounter(),
+        clock=lambda: NOW,
+    )
+
+
 def distinct_excerpt(index: int, quote: str = "bounded evidence") -> EvidenceExcerpt:
     return EvidenceExcerpt(
-        corpus_manifest_id=f"{index % 16:x}" * 64,
+        corpus_manifest_id=CORPUS_MANIFEST_ID,
         content_hash=f"{(index + 1) % 16:x}" * 64,
         quote=quote,
         quote_hash=hashlib.sha256(quote.encode("utf-8")).hexdigest(),
@@ -91,13 +108,13 @@ def prepare_for_payload(
     request = egress_request(tmp_path, payload=l1_payload())
     request = request.model_copy(
         update={
-            "payload": payload,
+            "payload": payload.model_copy(update={"version": request.version}),
             "task_level": TaskLevel.L2,
             "stage": stage,
             "run_id": run_id,
         }
     )
-    return EgressPolicyEnforcer().prepare(request, FixtureTokenCounter())
+    return fixture_enforcer().prepare(request, FixtureTokenCounter())
 
 
 def judge_route() -> ProviderRouteBinding:
@@ -120,18 +137,20 @@ def prepare_judge(
         scoring_points=(ScoringPoint(point_id="p1", text="Correctness"),),
         gold_excerpts=excerpts,
     )
+    source = authorized_manifest(tmp_path / "judge-manifests", route=route)
+    request_version = version_metadata(source_manifest_id=source.manifest_id)
     request = EgressRequest(
         evaluation_root_id="case-1",
         run_id="judge-run",
         task_level=level,
+        version=request_version,
         stage=EgressStage.JUDGE,
         route=route,
         model_id="fixture-model-v1",
-        source_manifest=authorized_manifest(tmp_path / "judge-manifests", route=route),
-        requested_at=NOW,
+        source_manifest=source,
         payload=payload,
     )
-    return EgressPolicyEnforcer().prepare(request, FixtureTokenCounter())
+    return fixture_enforcer().prepare(request, FixtureTokenCounter())
 
 
 def test_disclosure_identity_includes_normalized_span() -> None:
@@ -184,7 +203,7 @@ def test_excerpt_rejects_one_token_or_byte_beyond_individual_cap(
     payload = l1_payload(evidence_excerpts=(distinct_excerpt(1, quote),))
 
     with pytest.raises(EgressPolicyViolation) as caught:
-        EgressPolicyEnforcer().prepare(
+        fixture_enforcer().prepare(
             egress_request(tmp_path, payload=payload),
             FixtureTokenCounter(),
         )
@@ -195,7 +214,7 @@ def test_excerpt_rejects_one_token_or_byte_beyond_individual_cap(
 def test_duplicate_is_unique_once_but_every_retry_is_transmitted(
     tmp_path: Path,
 ) -> None:
-    reservation = EgressPolicyEnforcer().prepare(
+    reservation = fixture_enforcer().prepare(
         egress_request(tmp_path),
         FixtureTokenCounter(),
     )
@@ -216,20 +235,18 @@ def test_duplicate_is_unique_once_but_every_retry_is_transmitted(
 def test_same_disclosure_id_with_inconsistent_size_fails_closed(
     tmp_path: Path,
 ) -> None:
-    reservation = EgressPolicyEnforcer().prepare(
+    reservation = fixture_enforcer().prepare(
         egress_request(tmp_path),
         FixtureTokenCounter(),
     )
     state = apply_reservation(None, reservation)
     altered_fact = reservation.disclosures[0].model_copy(update={"token_count": 3})
-    inconsistent = reservation.model_copy(
-        update={"disclosures": (altered_fact,), "transmitted_tokens": 3}
-    )
+    inconsistent = reservation.model_copy(update={"disclosures": (altered_fact,)})
 
     with pytest.raises(EgressPolicyViolation) as caught:
         apply_reservation(state, inconsistent)
 
-    assert caught.value.code == "disclosure_fact_mismatch"
+    assert caught.value.code == "reservation_accounting_mismatch"
 
 
 def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None:
@@ -237,7 +254,7 @@ def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None
     payload = l1_payload(
         evidence_excerpts=tuple(distinct_excerpt(i + 1, quote) for i in range(5))
     )
-    reservation = EgressPolicyEnforcer().prepare(
+    reservation = fixture_enforcer().prepare(
         egress_request(tmp_path, payload=payload),
         FixtureTokenCounter(),
     )
@@ -253,7 +270,7 @@ def test_l1_online_unique_and_transmitted_caps_are_exact(tmp_path: Path) -> None
         apply_reservation(state, reservation)
     assert transmitted.value.code == "online_transmitted_tokens_exceeded"
 
-    extra = EgressPolicyEnforcer().prepare(
+    extra = fixture_enforcer().prepare(
         egress_request(
             tmp_path / "extra",
             payload=l1_payload(

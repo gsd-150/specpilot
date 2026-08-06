@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import NoReturn
 
 from specpilot.contracts.egress import (
+    CapSnapshot,
     CapVector,
     ClaimUsage,
     DisclosureFact,
@@ -23,7 +27,6 @@ from specpilot.contracts.egress import (
 from specpilot.contracts.manifests import ProviderUse
 from specpilot.egress.policy import (
     EgressPolicy,
-    cap_snapshot_hash,
     disclosure_id,
 )
 
@@ -44,20 +47,93 @@ class TokenAccountingUnavailable(EgressPolicyViolation):
         super().__init__(code, message)
 
 
+@dataclass(frozen=True)
+class _DerivedReservation:
+    cap_snapshot: CapSnapshot
+    disclosures: tuple[DisclosureFact, ...]
+    transmitted_tokens: int
+    transmitted_bytes: int
+    toc_delta: int
+    atomic_claim_id: str | None
+
+
 class EgressPolicyEnforcer:
-    def __init__(self, policy: EgressPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: EgressPolicy | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._policy = policy or EgressPolicy.load()
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def prepare(
         self,
         request: EgressRequest,
         counter: TokenCounter,
     ) -> ReservationRequest:
+        derived = self._derive(request, counter)
+        return ReservationRequest(
+            evaluation_root_id=request.evaluation_root_id,
+            run_id=request.run_id,
+            task_level=request.task_level,
+            version=request.version,
+            stage=request.stage,
+            route=request.route,
+            model_id=request.model_id,
+            source_manifest=request.source_manifest,
+            projected_payload=request.payload,
+            disclosures=derived.disclosures,
+        )
+
+    def apply_reservation(
+        self,
+        existing_usage: UsageSnapshot | None,
+        request: ReservationRequest,
+        counter: TokenCounter,
+    ) -> UsageSnapshot:
+        if set(request.__dict__) != set(type(request).model_fields):
+            _reject(
+                "reservation_primitive_invalid",
+                "reservation contains non-contract primitive fields",
+            )
+        canonical_request = EgressRequest(
+            evaluation_root_id=request.evaluation_root_id,
+            run_id=request.run_id,
+            task_level=request.task_level,
+            version=request.version,
+            stage=request.stage,
+            route=request.route,
+            model_id=request.model_id,
+            source_manifest=request.source_manifest,
+            payload=request.projected_payload,
+        )
+        derived = self._derive(canonical_request, counter)
+        if request.disclosures != derived.disclosures:
+            _reject(
+                "reservation_accounting_mismatch",
+                "disclosure facts do not match canonical reservation primitives",
+            )
+        return _apply_usage(
+            existing_usage,
+            request,
+            derived,
+            policy_hash=self._policy.policy_hash,
+        )
+
+    def _derive(
+        self,
+        request: EgressRequest,
+        counter: TokenCounter,
+    ) -> _DerivedReservation:
         payload = request.payload
         inferred_level = _payload_task_level(payload)
         if inferred_level is not None and inferred_level != request.task_level:
             _reject("task_level_mismatch", "task level does not match payload")
         task_level = request.task_level
+        allowed = self._policy.stage_payload_allowlist.get(request.stage.value)
+        if allowed is None or payload.kind not in allowed:
+            _reject("stage_payload_mismatch", "stage does not allow payload kind")
         expected_use = (
             ProviderUse.OFFLINE_JUDGE
             if isinstance(payload, JudgePayload)
@@ -65,12 +141,11 @@ class EgressPolicyEnforcer:
         )
         if request.route.use != expected_use:
             _reject("stage_route_mismatch", "payload does not match route use")
-        allowed = self._policy.stage_payload_allowlist.get(request.stage.value)
-        if allowed is None or payload.kind not in allowed:
-            _reject("stage_payload_mismatch", "stage does not allow payload kind")
+        _validate_version_binding(request)
+        authorization_time = self._authorization_time()
         if not request.source_manifest.authorizes(
             request.route,
-            at=request.requested_at,
+            at=authorization_time,
         ):
             _reject("route_unauthorized", "source manifest does not authorize route")
         _verify_counter(counter, request)
@@ -126,48 +201,74 @@ class EgressPolicyEnforcer:
             if isinstance(payload, L2AtomicClaimPayload)
             else None
         )
-        return ReservationRequest(
-            policy_version=self._policy.schema_version,
-            policy_hash=self._policy.policy_hash,
+        return _DerivedReservation(
             cap_snapshot=snapshot,
-            cap_snapshot_hash=cap_snapshot_hash(snapshot),
-            evaluation_root_id=request.evaluation_root_id,
-            run_id=request.run_id,
-            task_level=task_level,
-            stage=request.stage,
-            route=request.route,
-            model_id=request.model_id,
-            atomic_claim_id=claim_id,
-            projected_payload=payload,
             disclosures=tuple(disclosures),
             transmitted_tokens=transmitted_tokens,
             transmitted_bytes=transmitted_bytes,
             toc_delta=len(toc_nodes),
+            atomic_claim_id=claim_id,
         )
+
+    def _authorization_time(self) -> datetime:
+        try:
+            checked_at = self._clock()
+        except Exception as error:
+            raise EgressPolicyViolation(
+                "authorization_clock_invalid",
+                "trusted authorization clock failed",
+            ) from error
+        if (
+            not isinstance(checked_at, datetime)
+            or checked_at.tzinfo is None
+            or checked_at.utcoffset() is None
+        ):
+            _reject(
+                "authorization_clock_invalid",
+                "trusted authorization clock must return an aware datetime",
+            )
+        return checked_at.astimezone(UTC)
 
 
 def apply_reservation(
     existing_usage: UsageSnapshot | None,
     request: ReservationRequest,
+    policy: EgressPolicy,
+    counter: TokenCounter,
+    *,
+    clock: Callable[[], datetime] | None = None,
 ) -> UsageSnapshot:
-    """Purely validate and apply one prepared reservation to immutable usage."""
-    _verify_prepared_request(request)
+    """Apply using server-owned policy, counter, and authorization clock."""
+    return EgressPolicyEnforcer(policy, clock=clock).apply_reservation(
+        existing_usage,
+        request,
+        counter,
+    )
+
+
+def _apply_usage(
+    existing_usage: UsageSnapshot | None,
+    request: ReservationRequest,
+    derived: _DerivedReservation,
+    *,
+    policy_hash: str,
+) -> UsageSnapshot:
     if existing_usage is None:
         existing_usage = UsageSnapshot(
             evaluation_root_id=request.evaluation_root_id,
             task_level=request.task_level,
-            policy_hash=request.policy_hash,
+            policy_hash=policy_hash,
         )
     if existing_usage.evaluation_root_id != request.evaluation_root_id:
         _reject("evaluation_root_mismatch", "reservation belongs to another root")
     if existing_usage.task_level != request.task_level:
         _reject("task_level_mismatch", "reservation task level changed within root")
-    if existing_usage.policy_hash != request.policy_hash:
+    if existing_usage.policy_hash != policy_hash:
         _reject("policy_snapshot_mismatch", "policy changed within evaluation root")
 
     existing_by_id = {fact.disclosure_id: fact for fact in existing_usage.disclosures}
     request_by_id: dict[str, DisclosureFact] = {}
-    for fact in request.disclosures:
+    for fact in derived.disclosures:
         known = existing_by_id.get(fact.disclosure_id)
         within_request = request_by_id.get(fact.disclosure_id)
         if (known is not None and known != fact) or (
@@ -191,30 +292,32 @@ def apply_reservation(
         root_ids,
         root_tokens,
         root_bytes,
-        request.cap_snapshot.root_unique,
+        derived.cap_snapshot.root_unique,
         "root_unique",
     )
     root_transmitted_tokens = (
-        existing_usage.root_transmitted_tokens + request.transmitted_tokens
+        existing_usage.root_transmitted_tokens + derived.transmitted_tokens
     )
     root_transmitted_bytes = (
-        existing_usage.root_transmitted_bytes + request.transmitted_bytes
+        existing_usage.root_transmitted_bytes + derived.transmitted_bytes
     )
     _check_transmitted_cap(
         root_transmitted_tokens,
         root_transmitted_bytes,
-        request.cap_snapshot.root_transmitted,
+        derived.cap_snapshot.root_transmitted,
         "root_transmitted",
     )
 
     route_usage = _updated_route_usage(
         existing_usage.route_usage,
         request,
+        derived,
         merged_by_id,
     )
     stage_usage = _updated_stage_usage(
         existing_usage.stage_usage,
         request,
+        derived,
     )
 
     run_usage = existing_usage.run_usage
@@ -236,21 +339,22 @@ def apply_reservation(
             judge_ids,
             judge_unique_tokens,
             judge_unique_bytes,
-            request.cap_snapshot.judge_unique,
+            derived.cap_snapshot.judge_unique,
             "judge_unique",
         )
-        judge_transmitted_tokens += request.transmitted_tokens
-        judge_transmitted_bytes += request.transmitted_bytes
+        judge_transmitted_tokens += derived.transmitted_tokens
+        judge_transmitted_bytes += derived.transmitted_bytes
         _check_transmitted_cap(
             judge_transmitted_tokens,
             judge_transmitted_bytes,
-            request.cap_snapshot.judge_transmitted,
+            derived.cap_snapshot.judge_transmitted,
             "judge_transmitted",
         )
     else:
         run_usage = _updated_online_run_usage(
             run_usage,
             request,
+            derived,
             merged_by_id,
         )
 
@@ -274,78 +378,13 @@ def apply_reservation(
     )
 
 
-def _verify_prepared_request(request: ReservationRequest) -> None:
-    if cap_snapshot_hash(request.cap_snapshot) != request.cap_snapshot_hash:
-        _reject("cap_snapshot_hash_mismatch", "cap snapshot hash is invalid")
-    is_judge_payload = isinstance(request.projected_payload, JudgePayload)
-    if is_judge_payload != (request.stage == EgressStage.JUDGE):
-        _reject("stage_payload_mismatch", "stage and projected payload disagree")
-    expected_use = (
-        ProviderUse.OFFLINE_JUDGE if is_judge_payload else ProviderUse.ONLINE_MAIN
-    )
-    if request.route.use != expected_use:
-        _reject("stage_route_mismatch", "stage and route use disagree")
-    if request.atomic_claim_id is not None and not isinstance(
-        request.projected_payload,
-        L2AtomicClaimPayload,
-    ):
-        _reject("claim_payload_mismatch", "claim id requires atomic claim payload")
-    if isinstance(request.projected_payload, L2AtomicClaimPayload) and (
-        request.atomic_claim_id != request.projected_payload.atomic_claim_id
-    ):
-        _reject("claim_payload_mismatch", "claim id does not match payload")
-    expected_level = _payload_task_level(request.projected_payload)
-    if expected_level is not None and request.task_level != expected_level:
-        _reject("task_level_mismatch", "task level does not match payload")
-    if isinstance(request.projected_payload, JudgePayload):
-        payload_excerpts = request.projected_payload.gold_excerpts
-        payload_toc_count = 0
-    else:
-        payload_excerpts = request.projected_payload.evidence_excerpts
-        payload_toc_count = len(request.projected_payload.toc_nodes)
-    if request.toc_delta != payload_toc_count:
-        _reject("reservation_accounting_mismatch", "TOC delta is inconsistent")
-    if len(payload_excerpts) != len(request.disclosures):
-        _reject(
-            "reservation_accounting_mismatch",
-            "disclosure facts do not match projected excerpts",
-        )
-    for excerpt, fact in zip(payload_excerpts, request.disclosures, strict=True):
-        expected_id = disclosure_id(
-            excerpt.corpus_manifest_id,
-            excerpt.content_hash,
-            excerpt.quote_hash,
-            excerpt.span,
-        )
-        if (
-            fact.disclosure_id != expected_id
-            or fact.corpus_manifest_id != excerpt.corpus_manifest_id
-            or fact.content_hash != excerpt.content_hash
-            or fact.quote_hash != excerpt.quote_hash
-            or fact.span != excerpt.span
-            or fact.byte_count != len(excerpt.quote.encode("utf-8"))
-        ):
-            _reject(
-                "reservation_accounting_mismatch",
-                "disclosure fact is inconsistent with projected excerpt",
-            )
-    if request.transmitted_tokens != sum(
-        fact.token_count for fact in request.disclosures
-    ) or request.transmitted_bytes != sum(
-        fact.byte_count for fact in request.disclosures
-    ):
-        _reject(
-            "reservation_accounting_mismatch",
-            "transmitted totals do not match disclosure facts",
-        )
-
-
 def _updated_route_usage(
     usages: tuple[RouteUsage, ...],
     request: ReservationRequest,
+    derived: _DerivedReservation,
     facts: dict[str, DisclosureFact],
 ) -> tuple[RouteUsage, ...]:
-    request_ids = tuple(fact.disclosure_id for fact in request.disclosures)
+    request_ids = tuple(fact.disclosure_id for fact in derived.disclosures)
     updated = list(usages)
     for index, usage in enumerate(updated):
         if usage.route == request.route:
@@ -376,6 +415,7 @@ def _updated_route_usage(
 def _updated_stage_usage(
     usages: tuple[StageUsage, ...],
     request: ReservationRequest,
+    derived: _DerivedReservation,
 ) -> tuple[StageUsage, ...]:
     updated = list(usages)
     for index, usage in enumerate(updated):
@@ -383,10 +423,10 @@ def _updated_stage_usage(
             updated[index] = usage.model_copy(
                 update={
                     "transmitted_tokens": (
-                        usage.transmitted_tokens + request.transmitted_tokens
+                        usage.transmitted_tokens + derived.transmitted_tokens
                     ),
                     "transmitted_bytes": (
-                        usage.transmitted_bytes + request.transmitted_bytes
+                        usage.transmitted_bytes + derived.transmitted_bytes
                     ),
                     "transmissions": usage.transmissions + 1,
                 }
@@ -396,8 +436,8 @@ def _updated_stage_usage(
         updated.append(
             StageUsage(
                 stage=request.stage,
-                transmitted_tokens=request.transmitted_tokens,
-                transmitted_bytes=request.transmitted_bytes,
+                transmitted_tokens=derived.transmitted_tokens,
+                transmitted_bytes=derived.transmitted_bytes,
                 transmissions=1,
             )
         )
@@ -407,40 +447,44 @@ def _updated_stage_usage(
 def _updated_online_run_usage(
     usages: tuple[RunUsage, ...],
     request: ReservationRequest,
+    derived: _DerivedReservation,
     facts: dict[str, DisclosureFact],
 ) -> tuple[RunUsage, ...]:
     updated = list(usages)
     for index, usage in enumerate(updated):
         if usage.run_id == request.run_id:
-            updated[index] = _apply_to_run(usage, request, facts)
+            updated[index] = _apply_to_run(usage, request, derived, facts)
             break
     else:
-        updated.append(_apply_to_run(RunUsage(run_id=request.run_id), request, facts))
+        updated.append(
+            _apply_to_run(RunUsage(run_id=request.run_id), request, derived, facts)
+        )
     return tuple(updated)
 
 
 def _apply_to_run(
     usage: RunUsage,
     request: ReservationRequest,
+    derived: _DerivedReservation,
     facts: dict[str, DisclosureFact],
 ) -> RunUsage:
-    request_ids = tuple(fact.disclosure_id for fact in request.disclosures)
+    request_ids = tuple(fact.disclosure_id for fact in derived.disclosures)
     claims = usage.claim_usage
-    if request.atomic_claim_id is not None:
+    if derived.atomic_claim_id is not None:
         claims = _updated_claim_usage(
             claims,
-            request.atomic_claim_id,
+            derived.atomic_claim_id,
             request_ids,
             facts,
-            request,
+            derived,
         )
-        if len(claims) > request.cap_snapshot.max_claims_per_run:
+        if len(claims) > derived.cap_snapshot.max_claims_per_run:
             _reject("claim_count_exceeded", "too many atomic claims in one run")
 
     disclosure_ids = _ordered_union(usage.disclosure_ids, request_ids)
     unique_tokens, unique_bytes = _unique_sizes(disclosure_ids, facts)
-    online_cap = request.cap_snapshot.online_unique
-    transmitted_cap = request.cap_snapshot.online_transmitted
+    online_cap = derived.cap_snapshot.online_unique
+    transmitted_cap = derived.cap_snapshot.online_transmitted
     if online_cap is None or transmitted_cap is None:
         _reject("stage_payload_mismatch", "online request lacks online caps")
     _check_unique_cap(
@@ -450,16 +494,16 @@ def _apply_to_run(
         online_cap,
         "online_unique",
     )
-    transmitted_tokens = usage.transmitted_tokens + request.transmitted_tokens
-    transmitted_bytes = usage.transmitted_bytes + request.transmitted_bytes
+    transmitted_tokens = usage.transmitted_tokens + derived.transmitted_tokens
+    transmitted_bytes = usage.transmitted_bytes + derived.transmitted_bytes
     _check_transmitted_cap(
         transmitted_tokens,
         transmitted_bytes,
         transmitted_cap,
         "online_transmitted",
     )
-    toc_nodes = usage.toc_nodes + request.toc_delta
-    if toc_nodes > request.cap_snapshot.toc_per_run:
+    toc_nodes = usage.toc_nodes + derived.toc_delta
+    if toc_nodes > derived.cap_snapshot.toc_per_run:
         _reject("toc_run_exceeded", "TOC cumulative run cap exceeded")
     return RunUsage(
         run_id=usage.run_id,
@@ -478,9 +522,9 @@ def _updated_claim_usage(
     claim_id: str,
     request_ids: tuple[str, ...],
     facts: dict[str, DisclosureFact],
-    request: ReservationRequest,
+    derived: _DerivedReservation,
 ) -> tuple[ClaimUsage, ...]:
-    cap = request.cap_snapshot.claim_unique
+    cap = derived.cap_snapshot.claim_unique
     if cap is None:
         _reject("claim_payload_mismatch", "atomic claim request lacks claim caps")
     updated = list(usages)
@@ -567,6 +611,41 @@ def _payload_task_level(
     if isinstance(payload, JudgePayload):
         return None
     return TaskLevel.L2
+
+
+def _validate_version_binding(request: EgressRequest) -> None:
+    version = request.version
+    source = request.source_manifest
+    if version.source_manifest_id != source.manifest_id:
+        _reject(
+            "source_manifest_mismatch",
+            "version metadata does not identify the authorized source manifest",
+        )
+    if version.document_id != source.document_id:
+        _reject("document_id_mismatch", "document id does not match source manifest")
+    if version.document_version != source.document_version:
+        _reject(
+            "document_version_mismatch",
+            "document version does not match source manifest",
+        )
+    payload = request.payload
+    if not isinstance(payload, JudgePayload) and payload.version != version:
+        _reject(
+            "payload_version_mismatch",
+            "online payload version metadata does not match request metadata",
+        )
+    excerpts = (
+        payload.gold_excerpts
+        if isinstance(payload, JudgePayload)
+        else payload.evidence_excerpts
+    )
+    if any(
+        item.corpus_manifest_id != version.corpus_manifest_id for item in excerpts
+    ):
+        _reject(
+            "corpus_manifest_mismatch",
+            "all excerpts must belong to the request corpus manifest",
+        )
 
 
 def _projected_text(

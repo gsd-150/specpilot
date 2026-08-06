@@ -33,6 +33,7 @@ from specpilot.manifests.store import ManifestStore
 from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
 NOW = datetime(2026, 8, 6, 4, tzinfo=UTC)
+CORPUS_MANIFEST_ID = "c" * 64
 
 
 class FixtureTokenCounter:
@@ -51,6 +52,10 @@ def online_route() -> ProviderRouteBinding:
         endpoint_purpose="evidence-review",
         use=ProviderUse.ONLINE_MAIN,
     )
+
+
+def fixture_enforcer() -> EgressPolicyEnforcer:
+    return EgressPolicyEnforcer(clock=lambda: NOW)
 
 
 def authorized_manifest(
@@ -72,17 +77,39 @@ def authorized_manifest(
     )
 
 
-def version_metadata() -> VersionMetadata:
+def version_metadata(
+    *,
+    source_manifest_id: str = "f" * 64,
+    corpus_manifest_id: str = CORPUS_MANIFEST_ID,
+) -> VersionMetadata:
     return VersionMetadata(
+        source_manifest_id=source_manifest_id,
+        corpus_manifest_id=corpus_manifest_id,
         document_id="iso-9001",
         document_version="2026-edition",
     )
 
 
-def excerpt(text: str = "bounded evidence") -> EvidenceExcerpt:
+def test_version_metadata_carries_source_and_corpus_identity() -> None:
+    version = VersionMetadata(
+        source_manifest_id="a" * 64,
+        corpus_manifest_id="b" * 64,
+        document_id="iso-9001",
+        document_version="2026-edition",
+    )
+
+    assert version.source_manifest_id == "a" * 64
+    assert version.corpus_manifest_id == "b" * 64
+
+
+def excerpt(
+    text: str = "bounded evidence",
+    *,
+    corpus_manifest_id: str = CORPUS_MANIFEST_ID,
+) -> EvidenceExcerpt:
     quote_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return EvidenceExcerpt(
-        corpus_manifest_id="1" * 64,
+        corpus_manifest_id=corpus_manifest_id,
         content_hash="2" * 64,
         quote=text,
         quote_hash=quote_hash,
@@ -115,17 +142,20 @@ def egress_request(
     route: ProviderRouteBinding | None = None,
 ) -> EgressRequest:
     binding = route or online_route()
+    source = manifest or authorized_manifest(tmp_path / "manifests", route=binding)
+    request_version = version_metadata(source_manifest_id=source.manifest_id)
+    selected_payload = payload or l1_payload()
+    selected_payload = selected_payload.model_copy(update={"version": request_version})
     return EgressRequest(
         evaluation_root_id="case-1",
         run_id="run-1",
         task_level=TaskLevel.L1,
+        version=request_version,
         stage="evidence",
         route=binding,
         model_id="fixture-model-v1",
-        source_manifest=manifest
-        or authorized_manifest(tmp_path / "manifests", route=binding),
-        requested_at=NOW,
-        payload=payload or l1_payload(),
+        source_manifest=source,
+        payload=selected_payload,
     )
 
 
@@ -219,16 +249,15 @@ def test_judge_payload_exposes_only_answer_scoring_and_gold_excerpts() -> None:
 
 
 def test_prepare_requires_authorized_exact_route_and_counter(tmp_path: Path) -> None:
-    enforcer = EgressPolicyEnforcer()
+    enforcer = fixture_enforcer()
     request = egress_request(tmp_path)
 
     reservation = enforcer.prepare(request, FixtureTokenCounter())
 
     assert reservation.projected_payload == request.payload
-    assert reservation.transmitted_tokens == 2
-    assert reservation.transmitted_bytes == len(b"bounded evidence")
-    assert reservation.toc_delta == 0
     assert len(reservation.disclosures) == 1
+    assert reservation.disclosures[0].token_count == 2
+    assert reservation.disclosures[0].byte_count == len(b"bounded evidence")
 
     with pytest.raises(TokenAccountingUnavailable) as missing:
         enforcer.prepare(request, None)  # type: ignore[arg-type]
@@ -259,6 +288,89 @@ def test_prepare_fails_closed_when_counting_is_not_positive(
             return result
 
     with pytest.raises(TokenAccountingUnavailable) as caught:
-        EgressPolicyEnforcer().prepare(egress_request(tmp_path), BrokenCounter())
+        fixture_enforcer().prepare(egress_request(tmp_path), BrokenCounter())
 
     assert caught.value.code == "token_accounting_unavailable"
+
+
+def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization(
+    tmp_path: Path,
+) -> None:
+    request = egress_request(tmp_path)
+    expired = EgressPolicyEnforcer(
+        clock=lambda: datetime(2026, 8, 8, tzinfo=UTC)
+    )
+
+    with pytest.raises(EgressPolicyViolation) as denied:
+        expired.prepare(request, FixtureTokenCounter())
+    assert denied.value.code == "route_unauthorized"
+
+    naive = EgressPolicyEnforcer(clock=lambda: datetime(2026, 8, 6, 4))
+    with pytest.raises(EgressPolicyViolation) as invalid_clock:
+        naive.prepare(request, FixtureTokenCounter())
+    assert invalid_clock.value.code == "authorization_clock_invalid"
+
+    fields = request.model_dump()
+    fields["requested_at"] = NOW
+    with pytest.raises(ValidationError) as untrusted_time:
+        EgressRequest.model_validate(fields)
+    assert untrusted_time.value.errors()[0]["type"] == "extra_forbidden"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value", "code"),
+    [
+        ("source_manifest_id", "0" * 64, "source_manifest_mismatch"),
+        ("corpus_manifest_id", "d" * 64, "corpus_manifest_mismatch"),
+        ("document_id", "other-document", "document_id_mismatch"),
+        ("document_version", "other-version", "document_version_mismatch"),
+    ],
+)
+def test_prepare_binds_all_version_and_corpus_facts_to_authorized_source(
+    tmp_path: Path,
+    field: str,
+    invalid_value: str,
+    code: str,
+) -> None:
+    request = egress_request(tmp_path)
+    changed_version = request.version.model_copy(update={field: invalid_value})
+    changed_payload = request.payload.model_copy(update={"version": changed_version})
+    changed = request.model_copy(
+        update={"version": changed_version, "payload": changed_payload}
+    )
+
+    with pytest.raises(EgressPolicyViolation) as caught:
+        fixture_enforcer().prepare(changed, FixtureTokenCounter())
+
+    assert caught.value.code == code
+
+
+def test_prepare_rejects_payload_version_or_excerpt_corpus_disagreement(
+    tmp_path: Path,
+) -> None:
+    request = egress_request(tmp_path)
+    payload_version = request.version.model_copy(
+        update={"corpus_manifest_id": "d" * 64}
+    )
+    mismatched_payload = request.payload.model_copy(update={"version": payload_version})
+
+    with pytest.raises(EgressPolicyViolation) as payload_error:
+        fixture_enforcer().prepare(
+            request.model_copy(update={"payload": mismatched_payload}),
+            FixtureTokenCounter(),
+        )
+    assert payload_error.value.code == "payload_version_mismatch"
+
+    mismatched_excerpt = excerpt(corpus_manifest_id="d" * 64)
+    with pytest.raises(EgressPolicyViolation) as excerpt_error:
+        fixture_enforcer().prepare(
+            request.model_copy(
+                update={
+                    "payload": request.payload.model_copy(
+                        update={"evidence_excerpts": (mismatched_excerpt,)}
+                    )
+                }
+            ),
+            FixtureTokenCounter(),
+        )
+    assert excerpt_error.value.code == "corpus_manifest_mismatch"

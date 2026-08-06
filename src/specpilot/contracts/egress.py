@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 
@@ -10,7 +9,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    field_validator,
     model_validator,
 )
 
@@ -48,6 +46,8 @@ class EgressStage(StrEnum):
 
 
 class VersionMetadata(_FrozenModel):
+    source_manifest_id: Sha256
+    corpus_manifest_id: Sha256
     document_id: Identifier
     document_version: Identifier
 
@@ -134,19 +134,12 @@ class EgressRequest(_FrozenModel):
     evaluation_root_id: Identifier
     run_id: Identifier
     task_level: TaskLevel
+    version: VersionMetadata
     stage: EgressStage
     route: ProviderRouteBinding
     model_id: Identifier
     source_manifest: SourceManifest
-    requested_at: datetime
     payload: EgressPayload
-
-    @field_validator("requested_at")
-    @classmethod
-    def _normalize_requested_at(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("requested_at must be timezone-aware")
-        return value.astimezone(UTC)
 
 
 class TokenCounter(Protocol):
@@ -189,22 +182,16 @@ class CapSnapshot(_FrozenModel):
 
 class ReservationRequest(_FrozenModel):
     schema_version: Literal["egress-reservation/v1"] = "egress-reservation/v1"
-    policy_version: Identifier
-    policy_hash: Sha256
-    cap_snapshot: CapSnapshot
-    cap_snapshot_hash: Sha256
     evaluation_root_id: Identifier
     run_id: Identifier
     task_level: TaskLevel
+    version: VersionMetadata
     stage: EgressStage
     route: ProviderRouteBinding
     model_id: Identifier
-    atomic_claim_id: Identifier | None
+    source_manifest: SourceManifest
     projected_payload: EgressPayload
     disclosures: tuple[DisclosureFact, ...]
-    transmitted_tokens: Annotated[int, Field(ge=0)]
-    transmitted_bytes: Annotated[int, Field(ge=0)]
-    toc_delta: Annotated[int, Field(ge=0)]
 
 
 class StageUsage(_FrozenModel):

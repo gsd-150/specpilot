@@ -13,13 +13,15 @@ from specpilot.contracts.egress import (
 )
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import (
-    EgressPolicyEnforcer,
     EgressPolicyViolation,
     UsageSnapshot,
-    apply_reservation,
+)
+from specpilot.egress.enforcer import (
+    apply_reservation as apply_with_trusted_inputs,
 )
 from specpilot.egress.policy import EgressPolicy
 from tests.unit.egress.test_disclosure_caps import (
+    apply_reservation,
     distinct_excerpt,
     l2_claim_payload,
     prepare_for_payload,
@@ -27,8 +29,10 @@ from tests.unit.egress.test_disclosure_caps import (
     sized_quote,
 )
 from tests.unit.egress.test_policy_projection import (
+    NOW,
     FixtureTokenCounter,
     egress_request,
+    fixture_enforcer,
     l1_payload,
 )
 
@@ -146,33 +150,104 @@ def test_payload_rejects_one_extra_field_with_stable_validation_code() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "increment"),
-    [("transmitted_tokens", 1), ("transmitted_bytes", 1)],
+    "field",
+    [
+        "policy_hash",
+        "cap_snapshot",
+        "transmitted_tokens",
+        "transmitted_bytes",
+        "atomic_claim_id",
+        "toc_delta",
+    ],
 )
-def test_prepared_reservation_rejects_altered_transmission_delta(
+def test_reservation_contract_forbids_caller_supplied_derived_facts(
     tmp_path: Path,
     field: str,
-    increment: int,
 ) -> None:
-    reservation = EgressPolicyEnforcer().prepare(
+    reservation = fixture_enforcer().prepare(
         egress_request(tmp_path),
         FixtureTokenCounter(),
     )
-    altered = reservation.model_copy(
-        update={field: getattr(reservation, field) + increment}
+    fields = reservation.model_dump()
+    fields[field] = 1
+
+    with pytest.raises(ValidationError) as caught:
+        type(reservation).model_validate(fields)
+
+    assert caught.value.errors()[0]["type"] == "extra_forbidden"
+
+
+@pytest.mark.parametrize(("field", "value"), [("token_count", 1), ("byte_count", 1)])
+def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    reservation = fixture_enforcer().prepare(
+        egress_request(tmp_path),
+        FixtureTokenCounter(),
     )
+    altered_fact = reservation.disclosures[0].model_copy(update={field: value})
+    altered = reservation.model_copy(update={"disclosures": (altered_fact,)})
+
+    with pytest.raises(EgressPolicyViolation) as caught:
+        apply_with_trusted_inputs(
+            None,
+            altered,
+            EgressPolicy.load(),
+            FixtureTokenCounter(),
+            clock=lambda: NOW,
+        )
+
+    assert caught.value.code == "reservation_accounting_mismatch"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["policy_hash", "cap_snapshot", "atomic_claim_id", "toc_delta"],
+)
+def test_apply_rejects_model_copy_injection_of_removed_derived_facts(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    reservation = fixture_enforcer().prepare(
+        egress_request(tmp_path),
+        FixtureTokenCounter(),
+    )
+    altered = reservation.model_copy(update={field: "forged"})
 
     with pytest.raises(EgressPolicyViolation) as caught:
         apply_reservation(None, altered)
 
-    assert caught.value.code == "reservation_accounting_mismatch"
+    assert caught.value.code == "reservation_primitive_invalid"
+
+
+def test_apply_reauthorizes_tampered_route_with_trusted_clock(tmp_path: Path) -> None:
+    reservation = fixture_enforcer().prepare(
+        egress_request(tmp_path),
+        FixtureTokenCounter(),
+    )
+    other_route = ProviderRouteBinding(
+        provider_id="provider-b",
+        endpoint_purpose="evidence-review",
+        use=ProviderUse.ONLINE_MAIN,
+    )
+    altered = reservation.model_copy(update={"route": other_route})
+
+    class ProviderBCounter(FixtureTokenCounter):
+        provider_id = "provider-b"
+
+    with pytest.raises(EgressPolicyViolation) as caught:
+        apply_reservation(None, altered, ProviderBCounter())
+
+    assert caught.value.code == "route_unauthorized"
 
 
 def test_cross_provider_resend_is_one_root_unique_and_two_transmissions(
     tmp_path: Path,
 ) -> None:
     first_request = egress_request(tmp_path / "first")
-    first = EgressPolicyEnforcer().prepare(first_request, FixtureTokenCounter())
+    first = fixture_enforcer().prepare(first_request, FixtureTokenCounter())
     second_route = ProviderRouteBinding(
         provider_id="provider-b",
         endpoint_purpose="evidence-review",
@@ -183,10 +258,10 @@ def test_cross_provider_resend_is_one_root_unique_and_two_transmissions(
         provider_id = "provider-b"
 
     second_request = egress_request(tmp_path / "second", route=second_route)
-    second = EgressPolicyEnforcer().prepare(second_request, ProviderBCounter())
+    second = fixture_enforcer().prepare(second_request, ProviderBCounter())
 
     state = apply_reservation(None, first)
-    state = apply_reservation(state, second)
+    state = apply_reservation(state, second, ProviderBCounter())
 
     assert len(state.disclosures) == 1
     assert len(state.route_usage) == 2
