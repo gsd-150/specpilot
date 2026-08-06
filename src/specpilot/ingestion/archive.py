@@ -8,6 +8,7 @@ import stat
 import tempfile
 import zipfile
 from pathlib import Path, PureWindowsPath
+from typing import BinaryIO
 
 from specpilot.contracts.archive import (
     ArchivePolicy,
@@ -32,13 +33,17 @@ _NESTED_ARCHIVE_SUFFIXES = {
 }
 
 
-def _hash_file(path: Path) -> tuple[str, int]:
+def _snapshot_archive(path: Path, snapshot: BinaryIO) -> tuple[str, int]:
     digest = hashlib.sha256()
     byte_count = 0
     with path.open("rb") as source:
         while chunk := source.read(_COPY_CHUNK_BYTES):
             digest.update(chunk)
             byte_count += len(chunk)
+            snapshot.write(chunk)
+    snapshot.flush()
+    os.fsync(snapshot.fileno())
+    snapshot.seek(0)
     return digest.hexdigest(), byte_count
 
 
@@ -59,6 +64,8 @@ def _validate_member_path(member_name: str) -> str:
 
 
 def _validate_member_type(member: zipfile.ZipInfo) -> None:
+    if member.create_system == 0 and member.external_attr & 0x18:
+        _reject(ArchiveRejectionCode.SPECIAL_FILE)
     unix_mode = member.external_attr >> 16
     file_type = stat.S_IFMT(unix_mode)
     if file_type == stat.S_IFLNK:
@@ -143,39 +150,40 @@ def extract_expected_docx(
     policy: ArchivePolicy,
 ) -> ExtractionResult:
     """Preflight and atomically extract one expected DOCX from an outer ZIP."""
-    archive_sha256, archive_bytes = _hash_file(archive_path)
-    try:
-        with zipfile.ZipFile(archive_path, "r") as archive:
-            member = _preflight_members(archive.infolist(), policy)
-            docx_sha256, byte_count = _extract_member(
-                archive,
-                member,
-                destination,
-                policy,
+    with tempfile.TemporaryFile(mode="w+b") as snapshot:
+        archive_sha256, archive_bytes = _snapshot_archive(archive_path, snapshot)
+        try:
+            with zipfile.ZipFile(snapshot, "r") as archive:
+                member = _preflight_members(archive.infolist(), policy)
+                docx_sha256, byte_count = _extract_member(
+                    archive,
+                    member,
+                    destination,
+                    policy,
+                )
+        except zipfile.BadZipFile as error:
+            unsafe_error = UnsafeArchiveError(ArchiveRejectionCode.INVALID_ZIP)
+            quarantine_archive(
+                snapshot,
+                quarantine_dir,
+                archive_sha256=archive_sha256,
+                archive_bytes=archive_bytes,
+                rejection_code=unsafe_error.code,
             )
-    except zipfile.BadZipFile as error:
-        unsafe_error = UnsafeArchiveError(ArchiveRejectionCode.INVALID_ZIP)
-        quarantine_archive(
-            archive_path,
-            quarantine_dir,
-            archive_sha256=archive_sha256,
-            archive_bytes=archive_bytes,
-            rejection_code=unsafe_error.code,
-        )
-        raise unsafe_error from error
-    except UnsafeArchiveError as error:
-        quarantine_archive(
-            archive_path,
-            quarantine_dir,
-            archive_sha256=archive_sha256,
-            archive_bytes=archive_bytes,
-            rejection_code=error.code,
-        )
-        raise
+            raise unsafe_error from error
+        except UnsafeArchiveError as error:
+            quarantine_archive(
+                snapshot,
+                quarantine_dir,
+                archive_sha256=archive_sha256,
+                archive_bytes=archive_bytes,
+                rejection_code=error.code,
+            )
+            raise
 
-    return ExtractionResult(
-        archive_sha256=archive_sha256,
-        docx_sha256=docx_sha256,
-        byte_count=byte_count,
-        member_name=member.filename,
-    )
+        return ExtractionResult(
+            archive_sha256=archive_sha256,
+            docx_sha256=docx_sha256,
+            byte_count=byte_count,
+            member_name=member.filename,
+        )

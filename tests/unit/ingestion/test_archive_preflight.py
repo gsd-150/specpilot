@@ -127,3 +127,68 @@ def test_safe_expected_member_is_extracted_under_the_expected_name(
     assert result.member_name == "incoming/expected.docx"
     assert result.docx_sha256 == hashlib.sha256(payload).hexdigest()
     assert result.byte_count == len(payload)
+
+
+def test_dos_directory_attribute_is_not_accepted_as_a_regular_member(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "submission.zip"
+    member = zipfile.ZipInfo("expected.docx")
+    member.create_system = 0
+    member.external_attr = 0x10
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(member, b"not a regular member")
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        extract_expected_docx(
+            archive_path,
+            tmp_path / "corpus",
+            tmp_path / "quarantine",
+            policy(),
+        )
+
+    assert raised.value.code is ArchiveRejectionCode.SPECIAL_FILE
+    assert not (tmp_path / "corpus").exists()
+
+
+def test_archive_path_mutation_cannot_change_bytes_after_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_payload = b"original payload"
+    replacement_payload = b"replacement data"
+    archive_path = tmp_path / "submission.zip"
+    replacement_path = tmp_path / "replacement.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("expected.docx", original_payload)
+    original_archive_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    with zipfile.ZipFile(replacement_path, "w") as archive:
+        archive.writestr("expected.docx", replacement_payload)
+
+    original_init = zipfile.ZipFile.__init__
+    mutated = False
+
+    def mutating_init(
+        instance: zipfile.ZipFile,
+        file: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal mutated
+        if not mutated:
+            archive_path.write_bytes(replacement_path.read_bytes())
+            mutated = True
+        original_init(instance, file, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "__init__", mutating_init)
+
+    result = extract_expected_docx(
+        archive_path,
+        tmp_path / "corpus",
+        tmp_path / "quarantine",
+        policy(),
+    )
+
+    assert result.archive_sha256 == original_archive_sha256
+    assert (tmp_path / "corpus" / "expected.docx").read_bytes() == original_payload
+    assert result.docx_sha256 == hashlib.sha256(original_payload).hexdigest()

@@ -15,6 +15,7 @@ from specpilot.contracts.archive import (
     UnsafeArchiveError,
 )
 from specpilot.ingestion.archive import extract_expected_docx
+from specpilot.ingestion.quarantine import quarantine_archive
 
 _SENSITIVE_PAYLOAD = b"<document><secret>do not log me</secret></document>"
 
@@ -101,3 +102,76 @@ def test_quarantine_replay_is_idempotent_for_identical_archive(
     ]
     assert stored_archive.stat().st_mtime_ns == fixed_timestamp_ns
     assert record_path.stat().st_mtime_ns == fixed_timestamp_ns
+
+
+def test_quarantine_refuses_a_preexisting_archive_symlink(tmp_path: Path) -> None:
+    archive = build_rejected_archive(tmp_path)
+    archive_bytes = archive.read_bytes()
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    record_dir = tmp_path / "quarantine" / archive_sha256
+    record_dir.mkdir(parents=True)
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"do not touch")
+    victim.chmod(0o644)
+    (record_dir / "archive.zip").symlink_to(victim)
+
+    with pytest.raises(FileExistsError):
+        quarantine_archive(
+            archive,
+            tmp_path / "quarantine",
+            archive_sha256=archive_sha256,
+            archive_bytes=len(archive_bytes),
+            rejection_code=ArchiveRejectionCode.UNEXPECTED_MEMBER,
+        )
+
+    assert victim.read_bytes() == b"do not touch"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+
+def test_quarantine_refuses_a_partial_existing_archive(tmp_path: Path) -> None:
+    archive = build_rejected_archive(tmp_path)
+    archive_bytes = archive.read_bytes()
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    record_dir = tmp_path / "quarantine" / archive_sha256
+    record_dir.mkdir(parents=True)
+    stored_archive = record_dir / "archive.zip"
+    stored_archive.write_bytes(b"partial")
+    stored_archive.chmod(0o600)
+
+    with pytest.raises(FileExistsError):
+        quarantine_archive(
+            archive,
+            tmp_path / "quarantine",
+            archive_sha256=archive_sha256,
+            archive_bytes=len(archive_bytes),
+            rejection_code=ArchiveRejectionCode.UNEXPECTED_MEMBER,
+        )
+
+    assert stored_archive.read_bytes() == b"partial"
+
+
+def test_quarantine_publishes_private_files_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = build_rejected_archive(tmp_path)
+    archive_bytes = archive.read_bytes()
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    published_modes: list[int] = []
+    original_link = os.link
+
+    def recording_link(source: Path, destination: Path) -> None:
+        published_modes.append(stat.S_IMODE(source.stat().st_mode))
+        original_link(source, destination)
+
+    monkeypatch.setattr("specpilot.ingestion.quarantine.os.link", recording_link)
+
+    quarantine_archive(
+        archive,
+        tmp_path / "quarantine",
+        archive_sha256=archive_sha256,
+        archive_bytes=len(archive_bytes),
+        rejection_code=ArchiveRejectionCode.UNEXPECTED_MEMBER,
+    )
+
+    assert published_modes == [0o600, 0o600]

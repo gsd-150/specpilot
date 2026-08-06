@@ -197,11 +197,10 @@ def test_extracted_file_is_fsynced_before_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = build_zip(tmp_path, [("expected.docx", b"payload")])
-    fsynced_descriptors: list[int] = []
+    fsynced_sizes: list[int] = []
 
     def recording_fsync(file_descriptor: int) -> None:
-        os.fstat(file_descriptor)
-        fsynced_descriptors.append(file_descriptor)
+        fsynced_sizes.append(os.fstat(file_descriptor).st_size)
 
     monkeypatch.setattr("specpilot.ingestion.archive.os.fsync", recording_fsync)
 
@@ -212,7 +211,7 @@ def test_extracted_file_is_fsynced_before_publish(
         policy(),
     )
 
-    assert len(fsynced_descriptors) == 1
+    assert len(b"payload") in fsynced_sizes
 
 
 def test_existing_destination_symlink_is_not_replaced_or_followed(
