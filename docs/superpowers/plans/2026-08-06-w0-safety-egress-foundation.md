@@ -577,25 +577,25 @@ Do not commit real DOCX/ZIP files, full terms pages, credentials, account-specif
 - Produces internal services `postgres`, `qdrant`, `mcp`, `api`, and one-shot `fixture-init`; W0 API/MCP are health/transport skeletons, not claimed L1/L2 completion.
 - Consumes Tasks 1–8.
 
-- [ ] **Step 1: Write failing fixture smoke test**
+- [x] **Step 1: Write failing fixture smoke test**
 
 Assert the synthetic fixture passes archive/OOXML inspection, manifest creation, policy projection, fake-provider reservation/send, and sanitized trace creation. Assert a malicious fixture triggers quarantine and a policy violation triggers a no-send Verifier-style event. Do not calculate or print any quality metric.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/smoke/test_fixture_pipeline.py -q`
 
 Expected: missing composed fixture path.
 
-- [ ] **Step 3: Implement minimal fixture pipeline and Compose health dependencies**
+- [x] **Step 3: Implement minimal fixture pipeline and Compose health dependencies**
 
 Keep PostgreSQL/Qdrant/MCP on an internal network with no host port mapping. Demo profile may publish API/web later; real profile defaults to localhost/private binding. The ingestion image runs unprivileged, `network_mode: none`, read-only root filesystem, read-only input mount, writable output/quarantine mounts, dropped capabilities, and bounded memory/PIDs.
 
-- [ ] **Step 4: Add CI jobs**
+- [x] **Step 4: Add CI jobs**
 
 Run Ruff, mypy, unit tests, PostgreSQL integration tests, fixture smoke, and Docker image build. CI must not download BGE-M3, call a live model, require a key, access real source files, or display accuracy-like metrics.
 
-- [ ] **Step 5: Verify the complete W0 gate**
+- [x] **Step 5: Verify the complete W0 gate**
 
 Run: `make check`
 
@@ -611,7 +611,7 @@ Run: `python -m pytest tests/smoke/test_fixture_pipeline.py -q`
 
 Expected: all local verification exits 0; unsafe fixtures exist only in quarantine; no service logs secrets/source/payload text; internal services publish no host ports.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add compose.yaml docker .github/workflows/ci.yml tests/smoke Makefile

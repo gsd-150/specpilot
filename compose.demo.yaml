@@ -1,0 +1,28 @@
+# Demo-only host exposure. Must be passed explicitly:
+#
+#   docker compose -f compose.yaml -f compose.demo.yaml --profile demo up --wait
+#
+# Two things are needed to reach the API from the host, and both live here on
+# purpose:
+#
+#   1. A published port, bound to loopback only.
+#   2. A routable network. In compose.yaml the API sits on `internal: true`,
+#      which has no route off the bridge -- a published port there produces a
+#      binding that silently never carries traffic. Attaching the demo network
+#      is what makes the publish real.
+#
+# Keeping both in one explicitly-passed file means the real profile cannot
+# expose the API by accident, and cannot be made to by a one-line edit in
+# compose.yaml.
+
+networks:
+  demo:
+    driver: bridge
+
+services:
+  api:
+    networks:
+      - internal
+      - demo
+    ports:
+      - "127.0.0.1:8000:8000"

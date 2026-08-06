@@ -1,0 +1,133 @@
+# SpecPilot W0 service skeleton.
+#
+# Port policy: this file publishes nothing. Not one service, not one port.
+# Publishing lives only in compose.demo.yaml, which has to be passed explicitly:
+#
+#   docker compose -f compose.yaml -f compose.demo.yaml --profile demo up --wait
+#
+# An earlier version used a second service with `extends` to hold the demo port.
+# That silently published it in the real profile too, because `extends` inherits
+# the base service's `profiles` list. The invariant is now textual and easy to
+# check: no `ports:` key appears anywhere below.
+#
+# W0 status: api and mcp are health skeletons. Neither serves an L1 or L2
+# capability yet; the five MCP tools arrive in W3.
+
+name: specpilot
+
+networks:
+  internal:
+    internal: true
+  egress:
+    # Only services that legitimately talk outward join this. In W0 nothing
+    # does: the fixture route never leaves the machine.
+    driver: bridge
+
+volumes:
+  postgres-data:
+  qdrant-data:
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["demo", "real"]
+    environment:
+      POSTGRES_USER: specpilot
+      POSTGRES_PASSWORD: specpilot-local-only
+      POSTGRES_DB: specpilot
+    networks: [internal]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U specpilot -d specpilot"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    profiles: ["demo", "real"]
+    networks: [internal]
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # bash, not CMD-SHELL: /bin/sh is dash here and has no /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+    profiles: ["demo", "real"]
+    networks: [internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      # Hits /health rather than probing the port, so a process that is
+      # listening but not serving is reported unhealthy.
+      test: ["CMD", "python", "-c",
+              "import urllib.request as r; r.urlopen('http://127.0.0.1:8080/health').read()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    profiles: ["demo", "real"]
+    networks: [internal]
+    depends_on:
+      mcp:
+        condition: service_healthy
+    healthcheck:
+      # Hits /health rather than probing the port, so a process that is
+      # listening but not serving is reported unhealthy.
+      test: ["CMD", "python", "-c",
+              "import urllib.request as r; r.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  fixture-init:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    profiles: ["demo"]
+    networks: [internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["python", "-m", "specpilot.cli"]
+    command:
+      - "egress"
+      - "envelope-smoke"
+
+  # The only container that handles untrusted documents. Everything here is a
+  # deliberate restriction, not boilerplate.
+  ingestion:
+    build:
+      context: .
+      dockerfile: docker/ingestion.Dockerfile
+    profiles: ["ingestion"]
+    network_mode: none
+    read_only: true
+    user: "10002:10002"
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 64
+    restart: "no"
+    volumes:
+      - ./data/inbox:/input:ro
+      - ./data/inspections:/output
+    tmpfs:
+      - /tmp:size=64m,mode=1777

@@ -1,0 +1,118 @@
+name: CI
+
+# What this workflow must never do, and why each one matters:
+#   - download BGE-M3 or any model weight (slow, and it would make CI depend on
+#     a model host being up)
+#   - call a live provider or require a key (there are no secrets in this
+#     workflow, deliberately)
+#   - touch real 3GPP source material (it is not in the repository and must not
+#     be fetched into one)
+#   - print a recall, accuracy, F1 or any other quality-looking number (W0
+#     measures nothing about answers; a number here would be read as a result)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  static:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m mypy src
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest tests/unit -q
+
+  ledger:
+    name: ledger integration and fixture smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: specpilot
+          POSTGRES_PASSWORD: specpilot-ci-only
+          POSTGRES_DB: specpilot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U specpilot -d specpilot_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      SPECPILOT_TEST_DSN: postgresql://specpilot:specpilot-ci-only@127.0.0.1:5432/specpilot_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      # These targets refuse to run without a DSN rather than skipping, so a
+      # broken service container fails the job instead of quietly passing it.
+      - run: make integration-db
+      - run: make fixture-smoke
+
+  images:
+    name: compose config and image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --profile demo config
+      - run: docker compose --profile real config
+      # The base file must publish nothing; only the explicit demo override may.
+      - name: assert the real profile publishes no host port
+        run: |
+          if docker compose --profile real config | grep -q "published:"; then
+            echo "the real profile publishes a host port"
+            exit 1
+          fi
+      - run: docker compose build api mcp ingestion
+
+  wheel:
+    name: packaged policy resolves outside the source tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --wheel
+      # Installed from a wheel into a clean directory, so a policy file that is
+      # only reachable via the repo layout fails here rather than in a container
+      # months later.
+      - run: python -m pip install dist/*.whl
+      - name: load the packaged egress policy from outside the checkout
+        run: |
+          cd "$(mktemp -d)"
+          python -c "from specpilot.egress.policy import EgressPolicy; \
+            p = EgressPolicy.load(); \
+            assert p.l2_root_transmitted.tokens == 29696, p; \
+            print('packaged policy loaded')"

@@ -13,6 +13,8 @@ __pycache__/
 data/real/
 data/quarantine/
 data/cache/
+data/inbox/
+data/inspections/
 artifacts/restricted/
 manifests/local/
 *.local.manifest.json
