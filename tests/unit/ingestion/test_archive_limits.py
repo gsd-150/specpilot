@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import io
 import os
 import zipfile
@@ -14,6 +15,8 @@ from specpilot.contracts.archive import (
     UnsafeArchiveError,
 )
 from specpilot.ingestion.archive import extract_expected_docx
+
+archive_module = importlib.import_module("specpilot.ingestion.archive")
 
 
 def policy() -> ArchivePolicy:
@@ -234,3 +237,81 @@ def test_existing_destination_symlink_is_not_replaced_or_followed(
     assert destination.is_symlink()
     assert list(symlink_target.iterdir()) == []
     assert list(tmp_path.glob(".corpus-*")) == []
+
+
+def test_destination_parent_symlink_is_not_followed(tmp_path: Path) -> None:
+    archive = build_zip(tmp_path, [("expected.docx", b"payload")])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(FileExistsError):
+        extract_expected_docx(
+            archive,
+            linked_parent / "corpus",
+            tmp_path / "quarantine",
+            policy(),
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_destination_parent_swap_cannot_redirect_extracted_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = build_zip(tmp_path, [("expected.docx", b"payload")])
+    destination_parent = tmp_path / "destination-parent"
+    destination_parent.mkdir()
+    moved_parent = tmp_path / "moved-parent"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open_directory = archive_module.open_directory_path
+    swapped = False
+
+    def swapping_open_directory(path: Path, *, create: bool) -> int:
+        nonlocal swapped
+        descriptor = original_open_directory(path, create=create)
+        if path == destination_parent and not swapped:
+            destination_parent.rename(moved_parent)
+            destination_parent.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(
+        archive_module,
+        "open_directory_path",
+        swapping_open_directory,
+    )
+
+    with pytest.raises(FileExistsError):
+        extract_expected_docx(
+            archive,
+            destination_parent / "corpus",
+            tmp_path / "quarantine",
+            policy(),
+        )
+
+    assert list(outside.iterdir()) == []
+    assert list(moved_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("missing_primitive", ["O_NOFOLLOW", "O_DIRECTORY"])
+def test_extraction_fails_closed_without_secure_filesystem_primitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_primitive: str,
+) -> None:
+    archive = build_zip(tmp_path, [("expected.docx", b"payload")])
+    monkeypatch.delattr(os, missing_primitive)
+
+    with pytest.raises(RuntimeError, match="secure filesystem primitives"):
+        extract_expected_docx(
+            archive,
+            tmp_path / "corpus",
+            tmp_path / "quarantine",
+            policy(),
+        )
+
+    assert not (tmp_path / "corpus").exists()

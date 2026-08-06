@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import stat
@@ -16,6 +17,8 @@ from specpilot.contracts.archive import (
 )
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.quarantine import quarantine_archive
+
+quarantine_module = importlib.import_module("specpilot.ingestion.quarantine")
 
 _SENSITIVE_PAYLOAD = b"<document><secret>do not log me</secret></document>"
 
@@ -160,11 +163,35 @@ def test_quarantine_publishes_private_files_atomically(
     published_modes: list[int] = []
     original_link = os.link
 
-    def recording_link(source: Path, destination: Path) -> None:
-        published_modes.append(stat.S_IMODE(source.stat().st_mode))
-        original_link(source, destination)
+    def recording_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        source_status = os.stat(
+            source,
+            dir_fd=src_dir_fd,
+            follow_symlinks=False,
+        )
+        published_modes.append(stat.S_IMODE(source_status.st_mode))
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
 
     monkeypatch.setattr("specpilot.ingestion.quarantine.os.link", recording_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {recording_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {recording_link},
+    )
 
     quarantine_archive(
         archive,
@@ -175,3 +202,65 @@ def test_quarantine_publishes_private_files_atomically(
     )
 
     assert published_modes == [0o600, 0o600]
+
+
+def test_quarantine_directory_swap_cannot_redirect_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = build_rejected_archive(tmp_path)
+    archive_bytes = archive.read_bytes()
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    quarantine_dir = tmp_path / "quarantine"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved_record_dir = tmp_path / "validated-record-dir"
+    original_prepare = quarantine_module._prepare_record_directory
+
+    def swapping_prepare(directory: Path, digest: str) -> object:
+        prepared = original_prepare(directory, digest)
+        record_dir = directory / digest
+        record_dir.rename(moved_record_dir)
+        record_dir.symlink_to(outside, target_is_directory=True)
+        return prepared
+
+    monkeypatch.setattr(
+        quarantine_module,
+        "_prepare_record_directory",
+        swapping_prepare,
+    )
+
+    with pytest.raises(FileExistsError):
+        quarantine_archive(
+            archive,
+            quarantine_dir,
+            archive_sha256=archive_sha256,
+            archive_bytes=len(archive_bytes),
+            rejection_code=ArchiveRejectionCode.UNEXPECTED_MEMBER,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("missing_primitive", ["O_NOFOLLOW", "O_DIRECTORY"])
+def test_quarantine_fails_closed_without_secure_filesystem_primitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_primitive: str,
+) -> None:
+    archive = build_rejected_archive(tmp_path)
+    archive_bytes = archive.read_bytes()
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    quarantine_dir = tmp_path / "quarantine"
+    monkeypatch.delattr(os, missing_primitive)
+
+    with pytest.raises(RuntimeError, match="secure filesystem primitives"):
+        quarantine_archive(
+            archive,
+            quarantine_dir,
+            archive_sha256=archive_sha256,
+            archive_bytes=len(archive_bytes),
+            rejection_code=ArchiveRejectionCode.UNEXPECTED_MEMBER,
+        )
+
+    assert not quarantine_dir.exists()

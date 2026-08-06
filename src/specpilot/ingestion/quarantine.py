@@ -5,42 +5,83 @@ import hashlib
 import json
 import os
 import stat
-import tempfile
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
 from specpilot.contracts.archive import ArchiveRejectionCode
+from specpilot.ingestion._secure_fs import (
+    create_private_file,
+    directory_open_flags,
+    open_directory_path,
+    require_secure_filesystem,
+)
 
 _COPY_CHUNK_BYTES = 64 * 1024
 
 
-def _open_existing_regular(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+@dataclass(slots=True)
+class _RecordDirectory:
+    path: Path
+    name: str
+    parent_descriptor: int
+    descriptor: int
+    device: int
+    inode: int
+
+    def revalidate(self) -> None:
+        try:
+            entry_status = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as error:
+            raise FileExistsError(self.path) from error
+        if (
+            not stat.S_ISDIR(entry_status.st_mode)
+            or entry_status.st_dev != self.device
+            or entry_status.st_ino != self.inode
+        ):
+            raise FileExistsError(self.path)
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+        os.close(self.parent_descriptor)
+
+
+def _open_existing_regular(record_dir: _RecordDirectory, name: str) -> int:
+    record_dir.revalidate()
     try:
-        file_descriptor = os.open(path, flags)
+        file_descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=record_dir.descriptor,
+        )
     except OSError as error:
         if error.errno == errno.ELOOP:
-            raise FileExistsError(path) from error
+            raise FileExistsError(record_dir.path / name) from error
         raise
 
     file_status = os.fstat(file_descriptor)
     if not stat.S_ISREG(file_status.st_mode) or file_status.st_nlink != 1:
         os.close(file_descriptor)
-        raise FileExistsError(path)
+        raise FileExistsError(record_dir.path / name)
     if stat.S_IMODE(file_status.st_mode) != 0o600:
         os.fchmod(file_descriptor, 0o600)
     return file_descriptor
 
 
 def _verify_archive(
-    stored_archive: Path,
+    record_dir: _RecordDirectory,
     *,
     archive_sha256: str,
     archive_bytes: int,
 ) -> bool:
     try:
-        file_descriptor = _open_existing_regular(stored_archive)
+        file_descriptor = _open_existing_regular(record_dir, "archive.zip")
     except FileNotFoundError:
         return False
 
@@ -51,43 +92,52 @@ def _verify_archive(
             digest.update(chunk)
             byte_count += len(chunk)
     if byte_count != archive_bytes or digest.hexdigest() != archive_sha256:
-        raise FileExistsError(stored_archive)
+        raise FileExistsError(record_dir.path / "archive.zip")
     return True
 
 
-def _verify_record(record_path: Path, expected_record: bytes) -> bool:
+def _verify_record(record_dir: _RecordDirectory, expected_record: bytes) -> bool:
     try:
-        file_descriptor = _open_existing_regular(record_path)
+        file_descriptor = _open_existing_regular(record_dir, "record.json")
     except FileNotFoundError:
         return False
     with os.fdopen(file_descriptor, "rb") as source:
         if source.read(len(expected_record) + 1) != expected_record:
-            raise FileExistsError(record_path)
+            raise FileExistsError(record_dir.path / "record.json")
     return True
 
 
 def _publish_private_file(
-    record_dir: Path,
-    destination: Path,
+    record_dir: _RecordDirectory,
+    destination_name: str,
     writer: Callable[[BinaryIO], object],
 ) -> bool:
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".quarantine-", dir=record_dir
+    record_dir.revalidate()
+    file_descriptor, temporary_name = create_private_file(
+        record_dir.descriptor,
+        prefix=".quarantine-",
     )
-    temporary_path = Path(temporary_name)
     try:
-        os.fchmod(file_descriptor, 0o600)
         with os.fdopen(file_descriptor, "wb") as temporary_file:
             writer(temporary_file)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
+        record_dir.revalidate()
         try:
-            os.link(temporary_path, destination)
+            os.link(
+                temporary_name,
+                destination_name,
+                src_dir_fd=record_dir.descriptor,
+                dst_dir_fd=record_dir.descriptor,
+                follow_symlinks=False,
+            )
         except FileExistsError:
             return False
+        record_dir.revalidate()
         return True
     finally:
-        temporary_path.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=record_dir.descriptor)
 
 
 def _write_archive(
@@ -119,27 +169,41 @@ def _write_archive(
         raise ValueError("archive source changed before quarantine")
 
 
-def _prepare_record_directory(quarantine_dir: Path, archive_sha256: str) -> Path:
-    quarantine_dir.mkdir(parents=True, exist_ok=True)
-    if quarantine_dir.is_symlink():
-        raise FileExistsError(quarantine_dir)
-    record_dir = quarantine_dir / archive_sha256
-    record_dir.mkdir(mode=0o700, exist_ok=True)
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+def _prepare_record_directory(
+    quarantine_dir: Path,
+    archive_sha256: str,
+) -> _RecordDirectory:
+    require_secure_filesystem()
+    quarantine_descriptor = open_directory_path(quarantine_dir, create=True)
     try:
-        directory_descriptor = os.open(record_dir, directory_flags)
-    except OSError as error:
-        if error.errno == errno.ELOOP:
-            raise FileExistsError(record_dir) from error
+        with suppress(FileExistsError):
+            os.mkdir(archive_sha256, mode=0o700, dir_fd=quarantine_descriptor)
+        try:
+            record_descriptor = os.open(
+                archive_sha256,
+                directory_open_flags(),
+                dir_fd=quarantine_descriptor,
+            )
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise FileExistsError(quarantine_dir / archive_sha256) from error
+            raise
+        record_status = os.fstat(record_descriptor)
+        if not stat.S_ISDIR(record_status.st_mode):
+            os.close(record_descriptor)
+            raise FileExistsError(quarantine_dir / archive_sha256)
+        os.fchmod(record_descriptor, 0o700)
+        return _RecordDirectory(
+            path=quarantine_dir / archive_sha256,
+            name=archive_sha256,
+            parent_descriptor=quarantine_descriptor,
+            descriptor=record_descriptor,
+            device=record_status.st_dev,
+            inode=record_status.st_ino,
+        )
+    except BaseException:
+        os.close(quarantine_descriptor)
         raise
-    try:
-        if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
-            raise FileExistsError(record_dir)
-        os.fchmod(directory_descriptor, 0o700)
-    finally:
-        os.close(directory_descriptor)
-    return record_dir
 
 
 def quarantine_archive(
@@ -151,46 +215,51 @@ def quarantine_archive(
     rejection_code: ArchiveRejectionCode,
 ) -> Path:
     """Atomically store a rejected archive and content-free rejection record."""
+    require_secure_filesystem()
     record_dir = _prepare_record_directory(quarantine_dir, archive_sha256)
-    stored_archive = record_dir / "archive.zip"
-    if not _verify_archive(
-        stored_archive,
-        archive_sha256=archive_sha256,
-        archive_bytes=archive_bytes,
-    ):
-        _publish_private_file(
+    try:
+        record_dir.revalidate()
+        if not _verify_archive(
             record_dir,
-            stored_archive,
-            lambda destination: _write_archive(
-                archive_source,
-                destination,
-                archive_sha256=archive_sha256,
-                archive_bytes=archive_bytes,
-            ),
-        )
-        _verify_archive(
-            stored_archive,
             archive_sha256=archive_sha256,
             archive_bytes=archive_bytes,
-        )
+        ):
+            _publish_private_file(
+                record_dir,
+                "archive.zip",
+                lambda destination: _write_archive(
+                    archive_source,
+                    destination,
+                    archive_sha256=archive_sha256,
+                    archive_bytes=archive_bytes,
+                ),
+            )
+            _verify_archive(
+                record_dir,
+                archive_sha256=archive_sha256,
+                archive_bytes=archive_bytes,
+            )
 
-    expected_record = (
-        json.dumps(
-            {
-                "archive_bytes": archive_bytes,
-                "archive_sha256": archive_sha256,
-                "rejection_code": rejection_code,
-            },
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode()
-    record_path = record_dir / "record.json"
-    if not _verify_record(record_path, expected_record):
-        _publish_private_file(
-            record_dir,
-            record_path,
-            lambda output: output.write(expected_record),
-        )
-        _verify_record(record_path, expected_record)
-    return record_path
+        expected_record = (
+            json.dumps(
+                {
+                    "archive_bytes": archive_bytes,
+                    "archive_sha256": archive_sha256,
+                    "rejection_code": rejection_code,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+        record_path = record_dir.path / "record.json"
+        if not _verify_record(record_dir, expected_record):
+            _publish_private_file(
+                record_dir,
+                "record.json",
+                lambda output: output.write(expected_record),
+            )
+            _verify_record(record_dir, expected_record)
+        record_dir.revalidate()
+        return record_path
+    finally:
+        record_dir.close()

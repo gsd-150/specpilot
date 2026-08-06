@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import os
 import posixpath
-import shutil
 import stat
 import tempfile
 import zipfile
+from contextlib import suppress
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
@@ -15,6 +15,12 @@ from specpilot.contracts.archive import (
     ArchiveRejectionCode,
     ExtractionResult,
     UnsafeArchiveError,
+)
+from specpilot.ingestion._secure_fs import (
+    create_private_directory,
+    open_directory_path,
+    require_secure_filesystem,
+    revalidate_directory_path,
 )
 from specpilot.ingestion.quarantine import quarantine_archive
 
@@ -113,17 +119,44 @@ def _extract_member(
     destination: Path,
     policy: ArchivePolicy,
 ) -> tuple[str, int]:
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_dir = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent)
-    )
+    require_secure_filesystem()
+    destination_name = destination.name
+    if not destination_name:
+        raise ValueError("destination must name a directory")
+    parent_descriptor = open_directory_path(destination.parent, create=True)
+    temporary_descriptor: int | None = None
+    temporary_name: str | None = None
+    output_created = False
     try:
-        output_path = temporary_dir / policy.expected_docx_name
+        revalidate_directory_path(destination.parent, parent_descriptor)
+        try:
+            os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(destination)
+
+        temporary_descriptor, temporary_name = create_private_directory(
+            parent_descriptor,
+            prefix=f".{destination_name}-",
+        )
+        revalidate_directory_path(destination.parent, parent_descriptor)
+        output_descriptor = os.open(
+            policy.expected_docx_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=temporary_descriptor,
+        )
+        output_created = True
         digest = hashlib.sha256()
         byte_count = 0
-        with archive.open(member, "r") as source, output_path.open("xb") as output:
+        with os.fdopen(output_descriptor, "wb") as output, archive.open(
+            member, "r"
+        ) as source:
             while chunk := source.read(_COPY_CHUNK_BYTES):
                 byte_count += len(chunk)
                 if byte_count > policy.max_member_bytes:
@@ -136,10 +169,28 @@ def _extract_member(
                 _reject(ArchiveRejectionCode.SIZE_MISMATCH)
             output.flush()
             os.fsync(output.fileno())
-        os.rename(temporary_dir, destination)
+        revalidate_directory_path(destination.parent, parent_descriptor)
+        os.rename(
+            temporary_name,
+            destination_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = None
+        os.close(temporary_descriptor)
+        temporary_descriptor = None
     except BaseException:
-        shutil.rmtree(temporary_dir, ignore_errors=True)
+        if output_created and temporary_descriptor is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(policy.expected_docx_name, dir_fd=temporary_descriptor)
+        if temporary_descriptor is not None:
+            os.close(temporary_descriptor)
+        if temporary_name is not None:
+            with suppress(FileNotFoundError):
+                os.rmdir(temporary_name, dir_fd=parent_descriptor)
         raise
+    finally:
+        os.close(parent_descriptor)
     return digest.hexdigest(), byte_count
 
 
@@ -150,6 +201,7 @@ def extract_expected_docx(
     policy: ArchivePolicy,
 ) -> ExtractionResult:
     """Preflight and atomically extract one expected DOCX from an outer ZIP."""
+    require_secure_filesystem()
     with tempfile.TemporaryFile(mode="w+b") as snapshot:
         archive_sha256, archive_bytes = _snapshot_archive(archive_path, snapshot)
         try:
