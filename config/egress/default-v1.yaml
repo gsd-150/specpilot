@@ -1,0 +1,26 @@
+{
+  "schema_version": "egress-policy/v1",
+  "stage_payload_allowlist": {
+    "evidence": ["l1_query", "l2_design", "l2_atomic_claim"],
+    "compliance": ["l1_query", "l2_design", "l2_atomic_claim"],
+    "verifier": ["l1_query", "l2_design", "l2_atomic_claim"],
+    "judge": ["judge"]
+  },
+  "excerpt": {"excerpts": 1, "tokens": 512, "bytes": 8192},
+  "l1_online_unique": {"excerpts": 5, "tokens": 2560, "bytes": 40960},
+  "l1_online_transmitted": {"excerpts": 0, "tokens": 10240, "bytes": 163840},
+  "l2_online_unique": {"excerpts": 12, "tokens": 6144, "bytes": 98304},
+  "l2_claim_unique": {"excerpts": 4, "tokens": 2048, "bytes": 32768},
+  "l2_online_transmitted": {"excerpts": 0, "tokens": 24576, "bytes": 393216},
+  "judge_unique": {"excerpts": 5, "tokens": 2560, "bytes": 40960},
+  "judge_transmitted": {"excerpts": 0, "tokens": 5120, "bytes": 81920},
+  "l1_root_unique": {"excerpts": 10, "tokens": 5120, "bytes": 81920},
+  "l1_root_transmitted": {"excerpts": 0, "tokens": 15360, "bytes": 245760},
+  "l2_root_unique": {"excerpts": 17, "tokens": 8704, "bytes": 139264},
+  "l2_root_transmitted": {"excerpts": 0, "tokens": 29696, "bytes": 475136},
+  "toc_per_call": 12,
+  "toc_per_run": 24,
+  "l1_query_tokens": 1024,
+  "l2_design_tokens": 2048,
+  "max_l2_claims_per_run": 3
+}
