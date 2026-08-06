@@ -9,6 +9,7 @@ from specpilot.contracts.egress import (
     CapSnapshot,
     CapVector,
     ClaimUsage,
+    CorpusUsage,
     DisclosureFact,
     EgressRequest,
     EgressStage,
@@ -16,6 +17,7 @@ from specpilot.contracts.egress import (
     L1OnlinePayload,
     L2AtomicClaimPayload,
     L2DesignPayload,
+    ReservationOutcome,
     ReservationRequest,
     RouteUsage,
     RunUsage,
@@ -92,9 +94,17 @@ class EgressPolicyEnforcer:
     def apply_reservation(
         self,
         existing_usage: UsageSnapshot | None,
+        existing_corpus_usage: CorpusUsage | None,
         request: ReservationRequest,
         counter: TokenCounter,
-    ) -> UsageSnapshot:
+    ) -> ReservationOutcome:
+        """Move both budget scopes at once.
+
+        The two are passed separately because they have different lifetimes: the
+        usage snapshot is keyed by ``evaluation_root_id`` and starts empty for
+        each case, while corpus usage is keyed by ``corpus_manifest_id`` and
+        carries across every case run against that frozen corpus.
+        """
         if set(request.__dict__) != set(type(request).model_fields):
             _reject(
                 "reservation_primitive_invalid",
@@ -117,11 +127,20 @@ class EgressPolicyEnforcer:
                 "reservation_accounting_mismatch",
                 "disclosure facts do not match canonical reservation primitives",
             )
-        return _apply_usage(
-            existing_usage,
-            request,
-            derived,
-            policy_hash=self._policy.policy_hash,
+        policy_hash = self._policy.policy_hash
+        return ReservationOutcome(
+            usage=_apply_usage(
+                existing_usage,
+                request,
+                derived,
+                policy_hash=policy_hash,
+            ),
+            corpus_usage=_apply_corpus_usage(
+                existing_corpus_usage,
+                request,
+                derived,
+                policy_hash=policy_hash,
+            ),
         )
 
     def _derive(
@@ -254,19 +273,67 @@ class EgressPolicyEnforcer:
 
 def apply_reservation(
     existing_usage: UsageSnapshot | None,
+    existing_corpus_usage: CorpusUsage | None,
     request: ReservationRequest,
     policy: EgressPolicy,
     counter: TokenCounter,
     manifests: SourceManifestResolver,
     *,
     clock: Callable[[], datetime] | None = None,
-) -> UsageSnapshot:
+) -> ReservationOutcome:
     """Apply using server-owned policy, manifest store, counter, and clock."""
     return EgressPolicyEnforcer(
         policy,
         manifests=manifests,
         clock=clock,
-    ).apply_reservation(existing_usage, request, counter)
+    ).apply_reservation(existing_usage, existing_corpus_usage, request, counter)
+
+
+def _apply_corpus_usage(
+    existing: CorpusUsage | None,
+    request: ReservationRequest,
+    derived: _DerivedReservation,
+    *,
+    policy_hash: str,
+) -> CorpusUsage:
+    corpus_manifest_id = request.version.corpus_manifest_id
+    if existing is None:
+        existing = CorpusUsage(
+            corpus_manifest_id=corpus_manifest_id,
+            policy_hash=policy_hash,
+        )
+    if existing.corpus_manifest_id != corpus_manifest_id:
+        _reject("corpus_usage_mismatch", "reservation belongs to another corpus")
+    if existing.policy_hash != policy_hash:
+        _reject("policy_snapshot_mismatch", "policy changed within corpus ledger")
+
+    known = set(existing.disclosure_ids)
+    unique_tokens = existing.unique_tokens
+    unique_bytes = existing.unique_bytes
+    for fact in derived.disclosures:
+        if fact.disclosure_id in known:
+            continue
+        known.add(fact.disclosure_id)
+        unique_tokens += fact.token_count
+        unique_bytes += fact.byte_count
+    disclosure_ids = _ordered_union(
+        existing.disclosure_ids,
+        tuple(fact.disclosure_id for fact in derived.disclosures),
+    )
+    _check_unique_cap(
+        disclosure_ids,
+        unique_tokens,
+        unique_bytes,
+        derived.cap_snapshot.corpus_unique,
+        "corpus_unique",
+    )
+    return CorpusUsage(
+        corpus_manifest_id=corpus_manifest_id,
+        policy_hash=policy_hash,
+        disclosure_ids=disclosure_ids,
+        unique_tokens=unique_tokens,
+        unique_bytes=unique_bytes,
+    )
 
 
 def _apply_usage(

@@ -17,6 +17,7 @@
 - Any unreadable ledger, ambiguous reservation state, policy mismatch, token-counter failure, or manifest mismatch fails closed before network I/O.
 - Default online caps are copied from product-plan v5: L1 unique 5 excerpts/2,560 tokens and L2 run unique 12 excerpts/6,144 tokens; every excerpt is at most 512 model tokens and 8 KiB UTF-8; L2 is additionally limited to 4 excerpts/2,048 tokens per atomic claim.
 - Online transmitted caps reserve four stage fan-outs; judge transmitted caps reserve two. Evaluation-root transmitted caps are L1 15,360 tokens/240 KiB and L2 29,696 tokens/464 KiB.
+- One scope sits above `evaluation_root_id`: unique disclosures per `corpus_manifest_id`, spanning every case run against that frozen corpus. This is the scope product-plan §3.2 means by "全局唯一内容", and it is the number the outbound-limit premise actually rests on — per-case caps alone permit roughly `40 × 10 + 36 × 17 ≈ 1,012` distinct excerpts, more than one whole specification. The shipped value of 1,024 excerpts/524,288 tokens/8 MiB sits just above that all-distinct worst case, so it is a **tripwire, not a squeeze**: it guarantees the aggregate can never silently exceed one specification's worth, and it does not block the designed evaluation. W5's dev dry-run produces the first real distinct-disclosure count; W0 go/no-go records whether to lower it to something that binds.
 - No provider route is authorized by a `SourceManifest` object supplied on the request. Content addressing proves a manifest is internally consistent, not that a compliance decision was ever recorded, so the enforcer resolves every manifest through a `SourceManifestResolver` it owns — the same way it owns the policy, the token counter contract, and the authorization clock.
 - CI and fixture smoke output contain no recall, accuracy, F1, or other quality-looking metric.
 
@@ -364,8 +365,8 @@ git commit -m "feat: add immutable source manifest chain"
 - Test: `tests/unit/egress/test_maximum_legal_envelope.py`
 
 **Interfaces:**
-- Produces: `EgressPolicyEnforcer(policy, *, manifests: SourceManifestResolver, clock)` with `prepare(request: EgressRequest, counter: TokenCounter) -> ReservationRequest`.
-- Produces: `disclosure_id(corpus_manifest_id, content_hash, quote_hash, normalized_excerpt_span) -> str`.
+- Produces: `EgressPolicyEnforcer(policy, *, manifests: SourceManifestResolver, clock)` with `prepare(request, counter) -> ReservationRequest` and `apply_reservation(usage, corpus_usage, request, counter) -> ReservationOutcome`.
+- Produces: `disclosure_id(corpus_manifest_id, content_hash, quote_hash, normalized_excerpt_span) -> str`, which deliberately excludes run and root so one excerpt has one identity corpus-wide.
 - Consumes: a **stored** source manifest resolved by ID through Task 4's store, and a mandatory model-compatible token counter. The manifest carried on the request is compared against the stored one and is never itself the basis of the decision.
 
 - [ ] **Step 1: Write failing field-allowlist and local-object tests**
@@ -418,12 +419,17 @@ git commit -m "feat: enforce egress payload and disclosure caps"
 - Test: `tests/integration/egress/test_postgres_recovery.py`
 
 **Interfaces:**
-- Produces: async `EgressLedger.check_and_reserve(request: ReservationRequest) -> Reservation` and `record_attempt(reservation_id, route, transmitted_usage, outcome) -> Attempt`.
+- Produces: async `EgressLedger.check_and_reserve(request: ReservationRequest, *, idempotency_key: str) -> Reservation` and `record_attempt(reservation_id, route, transmitted_usage, outcome) -> Attempt`.
 - Consumes: exact deltas and policy snapshot hash produced by Task 5.
+
+**Two constraints inherited from Task 5, both easy to get wrong:**
+
+1. `ReservationOutcome` carries two rows with different keys — usage by `evaluation_root_id`, corpus usage by `corpus_manifest_id`. Both must be read, capped, and written inside **one** transaction. A corpus-usage row read outside the lock, or written on only some paths, silently restores the per-case-only ceiling that scope exists to remove.
+2. `apply_reservation` has no idempotency concept and charges transmitted usage on **every** call. That is correct for a genuine resend and wrong for a replayed reservation, so an idempotency-key hit must return the stored `Reservation` directly and **must not** call `apply_reservation` again.
 
 - [ ] **Step 1: Write failing migration/first-reservation integration test**
 
-Create a run bound to `(run_id, resolved_egress_policy_id, policy_hash, corpus_manifest_id)`, reserve one disclosure, and assert persisted global/per-route unique totals plus zero plaintext columns.
+Create a run bound to `(run_id, resolved_egress_policy_id, policy_hash, corpus_manifest_id)`, reserve one disclosure, and assert persisted per-root, per-route, and per-corpus unique totals plus zero plaintext columns. Add a test that two different `evaluation_root_id` values sharing one excerpt produce two usage rows but a single corpus disclosure.
 
 - [ ] **Step 2: Run and verify RED against an ephemeral PostgreSQL service**
 

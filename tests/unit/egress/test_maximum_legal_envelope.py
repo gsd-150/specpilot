@@ -14,7 +14,7 @@ from specpilot.contracts.egress import (
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import (
     EgressPolicyViolation,
-    UsageSnapshot,
+    ReservationOutcome,
 )
 from specpilot.egress.enforcer import (
     apply_reservation as apply_with_trusted_inputs,
@@ -38,9 +38,9 @@ from tests.unit.egress.test_policy_projection import (
 )
 
 
-def maximum_l2_state() -> UsageSnapshot:
+def maximum_l2_state() -> ReservationOutcome:
     quote = sized_quote(tokens=512, byte_count=8192)
-    state: UsageSnapshot | None = None
+    state: ReservationOutcome | None = None
     stages = (
         EgressStage.EVIDENCE,
         EgressStage.COMPLIANCE,
@@ -76,17 +76,17 @@ def maximum_l2_state() -> UsageSnapshot:
 def test_exact_maximum_l2_evaluation_envelope_is_accepted() -> None:
     state = maximum_l2_state()
 
-    assert len(state.disclosures) == 17
-    assert state.root_unique_tokens == 8_704
-    assert state.root_unique_bytes == 139_264
-    assert state.root_transmitted_tokens == 29_696
-    assert state.root_transmitted_bytes == 475_136
-    assert state.run_usage[0].transmitted_tokens == 24_576
-    assert state.run_usage[0].transmitted_bytes == 393_216
-    assert state.run_usage[0].toc_nodes == 24
-    assert state.judge_transmitted_tokens == 5_120
-    assert state.judge_transmitted_bytes == 81_920
-    assert {(item.stage, item.transmissions) for item in state.stage_usage} == {
+    assert len(state.usage.disclosures) == 17
+    assert state.usage.root_unique_tokens == 8_704
+    assert state.usage.root_unique_bytes == 139_264
+    assert state.usage.root_transmitted_tokens == 29_696
+    assert state.usage.root_transmitted_bytes == 475_136
+    assert state.usage.run_usage[0].transmitted_tokens == 24_576
+    assert state.usage.run_usage[0].transmitted_bytes == 393_216
+    assert state.usage.run_usage[0].toc_nodes == 24
+    assert state.usage.judge_transmitted_tokens == 5_120
+    assert state.usage.judge_transmitted_bytes == 81_920
+    assert {(item.stage, item.transmissions) for item in state.usage.stage_usage} == {
         (EgressStage.EVIDENCE, 3),
         (EgressStage.COMPLIANCE, 3),
         (EgressStage.VERIFIER, 6),
@@ -185,6 +185,7 @@ def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
     with pytest.raises(EgressPolicyViolation) as caught:
         apply_with_trusted_inputs(
             None,
+            None,
             altered,
             EgressPolicy.load(),
             FixtureTokenCounter(),
@@ -253,16 +254,16 @@ def test_cross_provider_resend_is_one_root_unique_and_two_transmissions() -> Non
     state = apply_reservation(None, first)
     state = apply_reservation(state, second, ProviderBCounter())
 
-    assert len(state.disclosures) == 1
-    assert len(state.route_usage) == 2
-    assert all(len(route.disclosure_ids) == 1 for route in state.route_usage)
-    assert all(route.unique_tokens == 2 for route in state.route_usage)
+    assert len(state.usage.disclosures) == 1
+    assert len(state.usage.route_usage) == 2
+    assert all(len(route.disclosure_ids) == 1 for route in state.usage.route_usage)
+    assert all(route.unique_tokens == 2 for route in state.usage.route_usage)
     assert all(
         route.unique_bytes == len(b"bounded evidence")
-        for route in state.route_usage
+        for route in state.usage.route_usage
     )
-    assert state.root_unique_tokens == 2
-    assert state.root_transmitted_tokens == 4
+    assert state.usage.root_unique_tokens == 2
+    assert state.usage.root_transmitted_tokens == 4
 
 
 def test_policy_loading_and_hashing_are_semantic_and_deterministic(

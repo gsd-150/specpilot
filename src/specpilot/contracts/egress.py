@@ -180,6 +180,7 @@ class CapSnapshot(_FrozenModel):
     judge_transmitted: CapVector
     root_unique: CapVector
     root_transmitted: CapVector
+    corpus_unique: CapVector
     toc_per_call: Annotated[int, Field(gt=0)]
     toc_per_run: Annotated[int, Field(gt=0)]
     max_claims_per_run: Annotated[int, Field(gt=0)]
@@ -232,6 +233,24 @@ class RunUsage(_FrozenModel):
     claim_usage: tuple[ClaimUsage, ...] = ()
 
 
+class CorpusUsage(_FrozenModel):
+    """Unique source text ever disclosed from one frozen corpus, across all cases.
+
+    This is the only scope above ``evaluation_root_id``. It answers "how much of
+    this specification has left the machine in total", which is the question the
+    product plan's outbound-limit premise actually rests on. It counts unique
+    disclosures only: re-sending the same excerpt is a transmitted-usage concern,
+    not a new disclosure of source text.
+    """
+
+    schema_version: Literal["egress-corpus-usage/v1"] = "egress-corpus-usage/v1"
+    corpus_manifest_id: Sha256
+    policy_hash: Sha256
+    disclosure_ids: tuple[Sha256, ...] = ()
+    unique_tokens: Annotated[int, Field(ge=0)] = 0
+    unique_bytes: Annotated[int, Field(ge=0)] = 0
+
+
 class UsageSnapshot(_FrozenModel):
     schema_version: Literal["egress-usage/v1"] = "egress-usage/v1"
     evaluation_root_id: Identifier
@@ -250,3 +269,14 @@ class UsageSnapshot(_FrozenModel):
     root_unique_bytes: Annotated[int, Field(ge=0)] = 0
     root_transmitted_tokens: Annotated[int, Field(ge=0)] = 0
     root_transmitted_bytes: Annotated[int, Field(ge=0)] = 0
+
+
+class ReservationOutcome(_FrozenModel):
+    """Both budget scopes a reservation moves, so neither can be applied alone.
+
+    The ledger persists these as two rows with different keys, but they must be
+    read, checked, and written inside one transaction.
+    """
+
+    usage: UsageSnapshot
+    corpus_usage: CorpusUsage

@@ -18,7 +18,7 @@ from specpilot.contracts.egress import (
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import (
     EgressPolicyViolation,
-    UsageSnapshot,
+    ReservationOutcome,
 )
 from specpilot.egress.enforcer import (
     apply_reservation as apply_with_trusted_inputs,
@@ -50,12 +50,13 @@ def sized_quote(*, tokens: int, byte_count: int | None = None) -> str:
 
 
 def apply_reservation(
-    existing: UsageSnapshot | None,
+    previous: ReservationOutcome | None,
     reservation,
     counter=None,
-) -> UsageSnapshot:
+) -> ReservationOutcome:
     return apply_with_trusted_inputs(
-        existing,
+        previous.usage if previous else None,
+        previous.corpus_usage if previous else None,
         reservation,
         EgressPolicy.load(),
         counter or FixtureTokenCounter(),
@@ -218,12 +219,12 @@ def test_duplicate_is_unique_once_but_every_retry_is_transmitted() -> None:
     first = apply_reservation(None, reservation)
     second = apply_reservation(first, reservation)
 
-    assert len(second.disclosures) == 1
-    assert second.root_unique_tokens == 2
-    assert second.root_transmitted_tokens == 4
-    assert second.root_transmitted_bytes == 2 * len(b"bounded evidence")
-    assert second.stage_usage[0].transmissions == 2
-    assert second.route_usage[0].disclosure_ids == (
+    assert len(second.usage.disclosures) == 1
+    assert second.usage.root_unique_tokens == 2
+    assert second.usage.root_transmitted_tokens == 4
+    assert second.usage.root_transmitted_bytes == 2 * len(b"bounded evidence")
+    assert second.usage.stage_usage[0].transmissions == 2
+    assert second.usage.route_usage[0].disclosure_ids == (
         reservation.disclosures[0].disclosure_id,
     )
 
@@ -252,13 +253,13 @@ def test_l1_online_unique_and_transmitted_caps_are_exact() -> None:
         egress_request(payload=payload),
         FixtureTokenCounter(),
     )
-    state: UsageSnapshot | None = None
+    state: ReservationOutcome | None = None
     for _ in range(4):
         state = apply_reservation(state, reservation)
 
     assert state is not None
-    assert state.root_unique_tokens == 2560
-    assert state.root_transmitted_tokens == 10240
+    assert state.usage.root_unique_tokens == 2560
+    assert state.usage.root_transmitted_tokens == 10240
 
     with pytest.raises(EgressPolicyViolation) as transmitted:
         apply_reservation(state, reservation)
@@ -280,7 +281,7 @@ def test_l1_online_unique_and_transmitted_caps_are_exact() -> None:
 
 def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact() -> None:
     quote = sized_quote(tokens=512, byte_count=8192)
-    state: UsageSnapshot | None = None
+    state: ReservationOutcome | None = None
     for claim_index in range(3):
         payload = l2_claim_payload(
             f"claim-{claim_index}",
@@ -294,7 +295,7 @@ def test_l2_run_and_per_claim_unique_caps_and_claim_count_are_exact() -> None:
         )
 
     assert state is not None
-    run = state.run_usage[0]
+    run = state.usage.run_usage[0]
     assert len(run.disclosure_ids) == 12
     assert len(run.claim_usage) == 3
     assert all(len(claim.disclosure_ids) == 4 for claim in run.claim_usage)
@@ -325,8 +326,8 @@ def test_judge_unique_and_transmitted_caps_are_exact() -> None:
     state = apply_reservation(None, reservation)
     state = apply_reservation(state, reservation)
 
-    assert state.judge_unique_tokens == 2560
-    assert state.judge_transmitted_tokens == 5120
+    assert state.usage.judge_unique_tokens == 2560
+    assert state.usage.judge_transmitted_tokens == 5120
 
     with pytest.raises(EgressPolicyViolation) as transmitted:
         apply_reservation(state, reservation)
@@ -353,7 +354,7 @@ def test_toc_is_bounded_cumulatively_per_run() -> None:
 
     state = apply_reservation(None, first)
     state = apply_reservation(state, second)
-    assert state.run_usage[0].toc_nodes == 24
+    assert state.usage.run_usage[0].toc_nodes == 24
 
     with pytest.raises(EgressPolicyViolation) as caught:
         apply_reservation(state, overflow)

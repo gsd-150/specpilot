@@ -18,6 +18,7 @@
   "l1_root_transmitted": {"excerpts": 0, "tokens": 15360, "bytes": 245760},
   "l2_root_unique": {"excerpts": 17, "tokens": 8704, "bytes": 139264},
   "l2_root_transmitted": {"excerpts": 0, "tokens": 29696, "bytes": 475136},
+  "corpus_unique": {"excerpts": 1024, "tokens": 524288, "bytes": 8388608},
   "toc_per_call": 12,
   "toc_per_run": 24,
   "l1_query_tokens": 1024,

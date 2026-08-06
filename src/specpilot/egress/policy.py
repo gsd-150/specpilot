@@ -33,6 +33,7 @@ class EgressPolicy(_PolicyModel):
     l1_root_transmitted: CapVector
     l2_root_unique: CapVector
     l2_root_transmitted: CapVector
+    corpus_unique: CapVector
     toc_per_call: int
     toc_per_run: int
     l1_query_tokens: int
@@ -88,6 +89,7 @@ class EgressPolicy(_PolicyModel):
             root_transmitted=(
                 self.l1_root_transmitted if is_l1 else self.l2_root_transmitted
             ),
+            corpus_unique=self.corpus_unique,
             toc_per_call=self.toc_per_call,
             toc_per_run=self.toc_per_run,
             max_claims_per_run=self.max_l2_claims_per_run,
