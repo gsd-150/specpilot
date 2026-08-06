@@ -107,8 +107,21 @@ CREATE TABLE IF NOT EXISTS egress_attempt (
                         CHECK (outcome IN ('succeeded', 'failed_known')),
     transmitted_tokens  integer NOT NULL CHECK (transmitted_tokens >= 0),
     transmitted_bytes   bigint  NOT NULL CHECK (transmitted_bytes >= 0),
+    duration_ms         integer NOT NULL CHECK (duration_ms >= 0),
     public_error_code   text,
     recorded_at         timestamptz NOT NULL DEFAULT now()
+);
+
+-- A run is sealed when a send provably happened but its accounting could not be
+-- written. check_and_reserve refuses sealed runs, so the seal is enforced at the
+-- same atomic point as every cap rather than by a caller-side check that some
+-- future call site can forget.
+CREATE TABLE IF NOT EXISTS egress_run_seal (
+    evaluation_root_id  text NOT NULL,
+    run_id              text NOT NULL,
+    reason              text        NOT NULL,
+    sealed_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (evaluation_root_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS egress_reservation_run_idx

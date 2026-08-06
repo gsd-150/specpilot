@@ -186,7 +186,9 @@ async def test_attempts_are_recorded_against_a_reservation(
         reservation.route,
         TransmittedUsage(transmitted_tokens=2, transmitted_bytes=16),
         AttemptOutcome.SUCCEEDED,
+        duration_ms=12,
     )
 
     assert attempt.reservation_id == reservation.reservation_id
     assert attempt.outcome is AttemptOutcome.SUCCEEDED
+    assert attempt.duration_ms == 12

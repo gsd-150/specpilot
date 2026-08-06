@@ -25,6 +25,7 @@ from specpilot.egress.ledger import (
     Reservation,
     ReservationAmbiguous,
     ReservationState,
+    RunSealed,
     TransmittedUsage,
 )
 from specpilot.egress.policy import EgressPolicy
@@ -94,6 +95,7 @@ class PostgresEgressLedger:
         transmitted_usage: TransmittedUsage,
         outcome: AttemptOutcome,
         *,
+        duration_ms: int,
         public_error_code: str | None = None,
     ) -> Attempt:
         attempt_id = str(uuid.uuid4())
@@ -105,8 +107,8 @@ class PostgresEgressLedger:
                         INSERT INTO egress_attempt (
                             attempt_id, reservation_id, provider_id,
                             endpoint_purpose, outcome, transmitted_tokens,
-                            transmitted_bytes, public_error_code
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            transmitted_bytes, duration_ms, public_error_code
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                     (
                         attempt_id,
@@ -116,6 +118,7 @@ class PostgresEgressLedger:
                         outcome.value,
                         transmitted_usage.transmitted_tokens,
                         transmitted_usage.transmitted_bytes,
+                        duration_ms,
                         public_error_code,
                     ),
                 )
@@ -139,8 +142,26 @@ class PostgresEgressLedger:
             route=route,
             outcome=outcome,
             transmitted_usage=transmitted_usage,
+            duration_ms=duration_ms,
             public_error_code=public_error_code,
         )
+
+    async def seal_run(
+        self,
+        evaluation_root_id: str,
+        run_id: str,
+        reason: str,
+    ) -> None:
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                await connection.execute(
+                    "INSERT INTO egress_run_seal (evaluation_root_id, run_id, reason) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (evaluation_root_id, run_id, reason),
+                )
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
 
     async def _connect(self) -> psycopg.AsyncConnection[Any]:
         try:
@@ -169,6 +190,8 @@ class PostgresEgressLedger:
         # their budget. Holding both locks makes the lookup authoritative.
         corpus_usage = await _lock_corpus(connection, corpus_manifest_id, policy_hash)
         usage = await _lock_root(connection, request, policy_hash, corpus_manifest_id)
+
+        await _require_unsealed(connection, request)
 
         replay = await _find_replay(connection, request, policy_hash, idempotency_key)
         if replay is not None:
@@ -200,6 +223,22 @@ class PostgresEgressLedger:
             usage=outcome.usage,
             corpus_usage=outcome.corpus_usage,
         )
+
+
+async def _require_unsealed(
+    connection: psycopg.AsyncConnection[Any],
+    request: ReservationRequest,
+) -> None:
+    """Refuse a sealed run inside the same transaction that checks every cap."""
+    row = await (
+        await connection.execute(
+            "SELECT reason FROM egress_run_seal "
+            "WHERE evaluation_root_id = %s AND run_id = %s",
+            (request.evaluation_root_id, request.run_id),
+        )
+    ).fetchone()
+    if row is not None:
+        raise RunSealed()
 
 
 async def _record_policy(

@@ -479,25 +479,25 @@ git commit -m "feat: reserve egress budgets atomically in postgres"
 - Produces: `PolicyBoundTransport.send(request: EgressRequest, *, idempotency_key: str) -> ProviderResponse` as the sole importable send API.
 - Consumes: Task 5 enforcer, Task 6 ledger, and a private `_ProviderAdapter.send(projected_payload)` protocol.
 
-- [ ] **Step 1: Write failing no-send tests**
+- [x] **Step 1: Write failing no-send tests**
 
 Use a call-capturing fake adapter and assert its call count remains zero for unauthorized manifests/routes, expired policies, field violations, token/byte overages, ledger read/write failures, ambiguous reservations, and policy-hash mismatch.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/unit/providers/test_transport_fail_closed.py -q`
 
 Expected: missing transport.
 
-- [ ] **Step 3: Implement prepare → reserve → send → attempt-record flow**
+- [x] **Step 3: Implement prepare → reserve → send → attempt-record flow**
 
 Keep adapter classes in a private module namespace, expose no raw client from dependency injection, and record only provider, endpoint identifier hash, model slug, response metadata allowlist, usage, hashes, duration, and public error code. A provider response body may enter the local response cache later but never ordinary logs.
 
-- [ ] **Step 4: Write retry/cross-route integration tests**
+- [x] **Step 4: Write retry/cross-route integration tests**
 
 Assert one retry reuses the reservation but charges transmitted usage again; a fallback provider records a new route disclosure; failed attempt recording causes the run to be sealed against further sends until reconciled.
 
-- [ ] **Step 5: Verify provider suite**
+- [x] **Step 5: Verify provider suite**
 
 Run: `python -m pytest tests/unit/providers -q`
 
@@ -505,7 +505,7 @@ Run: `make test-integration TEST=tests/integration/providers/test_transport_ledg
 
 Expected: every violation is no-send and all valid attempt counts match policy math.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/specpilot/providers tests/unit/providers tests/integration/providers

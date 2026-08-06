@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 MIGRATION = (
-    Path(__file__).resolve().parents[3] / "migrations" / "001_egress_ledger.sql"
+    Path(__file__).resolve().parents[2] / "migrations" / "001_egress_ledger.sql"
 )
 _TABLES = (
+    "egress_run_seal",
     "egress_attempt",
     "egress_route_disclosure",
     "egress_reservation_disclosure",

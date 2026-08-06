@@ -55,6 +55,23 @@ class ReservationAmbiguous(LedgerError):
         super().__init__(code, message)
 
 
+class RunSealed(LedgerError):
+    """The run is closed to further sends until a human reconciles it.
+
+    Sealing is what happens when a send provably left the machine but its
+    accounting could not be written. Usage is then unknown, and continuing would
+    spend a budget nobody can measure.
+    """
+
+    def __init__(
+        self,
+        message: str = "run is sealed pending reconciliation",
+        *,
+        code: str = "run_sealed",
+    ) -> None:
+        super().__init__(code, message)
+
+
 class ReservationState(StrEnum):
     RESERVED = "reserved"
     SENDING = "sending"
@@ -108,6 +125,7 @@ class Attempt(_FrozenModel):
     route: ProviderRouteBinding
     outcome: AttemptOutcome
     transmitted_usage: TransmittedUsage
+    duration_ms: Annotated[int, Field(ge=0)]
     public_error_code: str | None = None
 
 
@@ -127,6 +145,13 @@ class EgressLedger(Protocol):
         idempotency_key: str,
     ) -> Reservation: ...
 
+    async def seal_run(
+        self,
+        evaluation_root_id: str,
+        run_id: str,
+        reason: str,
+    ) -> None: ...
+
     async def record_attempt(
         self,
         reservation_id: str,
@@ -134,5 +159,6 @@ class EgressLedger(Protocol):
         transmitted_usage: TransmittedUsage,
         outcome: AttemptOutcome,
         *,
+        duration_ms: int,
         public_error_code: str | None = None,
     ) -> Attempt: ...
