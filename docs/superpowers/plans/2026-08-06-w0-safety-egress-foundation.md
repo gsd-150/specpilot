@@ -56,7 +56,7 @@
 ### SQL, policy, fixture, and documentation assets
 
 - `migrations/001_egress_ledger.sql` — policy-run, disclosure, reservation, attempt, and route-disclosure tables.
-- `config/egress/default-v1.yaml` — exact W0 policy caps and allowed fields.
+- `src/specpilot/egress/policies/default-v1.json` — exact W0 policy caps and allowed fields. It lives inside the package rather than a repo-root `config/`, so a wheel or Docker install still resolves it; the extension is `.json` because the loader parses JSON and no YAML parser is a dependency.
 - `data/fixtures/specs/synthetic-mini-spec.docx` — generated synthetic safe OOXML fixture.
 - `tests/fixtures/` — generated malicious archives/OOXML packages; no 3GPP content.
 - `docs/compliance/assessment-template.md` — the four required self-assessment sections and explicit uncertainty field.
@@ -357,7 +357,7 @@ git commit -m "feat: add immutable source manifest chain"
 - Create: `src/specpilot/contracts/egress.py`
 - Create: `src/specpilot/egress/policy.py`
 - Create: `src/specpilot/egress/enforcer.py`
-- Create: `config/egress/default-v1.yaml`
+- Create: `src/specpilot/egress/policies/default-v1.json`
 - Test: `tests/unit/egress/test_policy_projection.py`
 - Test: `tests/unit/egress/test_disclosure_caps.py`
 - Test: `tests/unit/egress/test_maximum_legal_envelope.py`

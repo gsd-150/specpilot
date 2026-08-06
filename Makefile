@@ -17,5 +17,7 @@ lint:
 typecheck:
 	.venv/bin/python -m mypy src
 
+# Scoped to tests/smoke on purpose: pytest exits 4 when that path is absent and 5 when
+# nothing carries the marker, so this target cannot report success on an empty selection.
 fixture-smoke:
-	.venv/bin/python -m pytest -q -m fixture_smoke
+	.venv/bin/python -m pytest tests/smoke -q -m fixture_smoke

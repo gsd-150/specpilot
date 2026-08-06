@@ -279,7 +279,7 @@ def test_policy_loading_and_hashing_are_semantic_and_deterministic(
     tmp_path: Path,
 ) -> None:
     policy = EgressPolicy.load()
-    reordered = tmp_path / "reordered.yaml"
+    reordered = tmp_path / "reordered.json"
     source = policy.model_dump_json(indent=2)
     reordered.write_text(source, encoding="utf-8")
 

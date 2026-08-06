@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from specpilot.contracts.egress import CapSnapshot, CapVector, NormalizedExcerptSpan
+
+_POLICY_PACKAGE = "specpilot.egress.policies"
+_DEFAULT_POLICY_NAME = "default-v1.json"
 
 
 class _PolicyModel(BaseModel):
@@ -37,8 +41,14 @@ class EgressPolicy(_PolicyModel):
 
     @classmethod
     def load(cls, path: Path | None = None) -> EgressPolicy:
-        policy_path = path or default_policy_path()
-        raw = json.loads(policy_path.read_text(encoding="utf-8"))
+        """Load the packaged default policy, or an explicit JSON policy file."""
+        source = path.read_text(encoding="utf-8") if path else _default_policy_text()
+        try:
+            raw = json.loads(source)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "egress policy must be JSON; comments and YAML syntax are not read"
+            ) from error
         if not isinstance(raw, dict):
             raise ValueError("egress policy root must be a mapping")
         return cls.model_validate(raw)
@@ -85,8 +95,10 @@ class EgressPolicy(_PolicyModel):
         )
 
 
-def default_policy_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "egress" / "default-v1.yaml"
+def _default_policy_text() -> str:
+    """Read the policy that ships inside the installed package, not the repo tree."""
+    resource = resources.files(_POLICY_PACKAGE).joinpath(_DEFAULT_POLICY_NAME)
+    return resource.read_text(encoding="utf-8")
 
 
 def disclosure_id(
