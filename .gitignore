@@ -1,0 +1,23 @@
+.env
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Restricted and machine-local data
+data/real/
+data/quarantine/
+data/cache/
+artifacts/restricted/
+manifests/local/
+*.local.manifest.json
+provider-snapshots/
+data/provider-snapshots/
+
+# Local Compose volumes
+compose-volumes/
+postgres-data/
+qdrant-data/
