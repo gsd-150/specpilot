@@ -1,4 +1,4 @@
-.PHONY: setup unit integration lint typecheck fixture-smoke
+.PHONY: setup unit integration integration-db lint typecheck fixture-smoke
 
 setup:
 	python -m venv .venv
@@ -10,6 +10,13 @@ unit:
 
 integration:
 	.venv/bin/python -m pytest -q -m integration
+
+# The ledger tests skip without a database, and a skipped run produces no
+# concurrency or recovery evidence at all, so this target refuses to look green
+# when SPECPILOT_TEST_DSN is unset.
+integration-db:
+	@test -n "$$SPECPILOT_TEST_DSN" || { echo "integration-db: set SPECPILOT_TEST_DSN to a throwaway PostgreSQL"; exit 1; }
+	.venv/bin/python -m pytest tests/integration/egress -q
 
 lint:
 	.venv/bin/python -m ruff check .

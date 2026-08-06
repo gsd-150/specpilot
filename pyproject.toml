@@ -37,6 +37,7 @@ filterwarnings = [
 markers = [
     "integration: tests requiring integration dependencies",
     "fixture_smoke: deterministic synthetic-fixture smoke tests",
+    "anyio: async tests driven by the anyio pytest plugin",
 ]
 
 [tool.ruff]

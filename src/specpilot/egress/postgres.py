@@ -1,0 +1,416 @@
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
+
+import psycopg
+from psycopg.rows import tuple_row
+
+from specpilot.contracts.egress import (
+    CorpusUsage,
+    ReservationOutcome,
+    ReservationRequest,
+    SourceManifestResolver,
+    TokenCounter,
+    UsageSnapshot,
+)
+from specpilot.contracts.manifests import ProviderRouteBinding
+from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
+from specpilot.egress.ledger import (
+    Attempt,
+    AttemptOutcome,
+    LedgerUnavailable,
+    Reservation,
+    ReservationAmbiguous,
+    ReservationState,
+    TransmittedUsage,
+)
+from specpilot.egress.policy import EgressPolicy
+
+
+class PostgresEgressLedger:
+    """Durable, atomic check-and-reserve over the pure enforcer.
+
+    The transaction locks the corpus row and then the evaluation-root row --
+    always in that order, because every reservation touches both and a fixed
+    order is what prevents deadlock -- re-runs the enforcer against the stored
+    state, and writes both scopes back before committing.
+
+    Cap arithmetic is never reimplemented here. A second implementation would be
+    free to drift from the enforcer, and drift in this direction is a silently
+    raised ceiling.
+    """
+
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        policy: EgressPolicy,
+        manifests: SourceManifestResolver,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._conninfo = conninfo
+        self._policy = policy
+        self._enforcer = EgressPolicyEnforcer(
+            policy,
+            manifests=manifests,
+            clock=clock,
+        )
+
+    async def check_and_reserve(
+        self,
+        request: ReservationRequest,
+        counter: TokenCounter,
+        *,
+        idempotency_key: str,
+    ) -> Reservation:
+        policy_hash = self._policy.policy_hash
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                return await self._reserve(
+                    connection,
+                    request,
+                    counter,
+                    policy_hash,
+                    idempotency_key,
+                )
+        except EgressPolicyViolation:
+            raise
+        except psycopg.OperationalError as error:
+            # The connection dropped. Whether the transaction committed is not
+            # knowable from here, so the caller must not send and must not
+            # reuse this key until the state is reconciled.
+            raise ReservationAmbiguous() from error
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
+
+    async def record_attempt(
+        self,
+        reservation_id: str,
+        route: ProviderRouteBinding,
+        transmitted_usage: TransmittedUsage,
+        outcome: AttemptOutcome,
+        *,
+        public_error_code: str | None = None,
+    ) -> Attempt:
+        attempt_id = str(uuid.uuid4())
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                await connection.execute(
+                    """
+                        INSERT INTO egress_attempt (
+                            attempt_id, reservation_id, provider_id,
+                            endpoint_purpose, outcome, transmitted_tokens,
+                            transmitted_bytes, public_error_code
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                    (
+                        attempt_id,
+                        reservation_id,
+                        route.provider_id,
+                        route.endpoint_purpose,
+                        outcome.value,
+                        transmitted_usage.transmitted_tokens,
+                        transmitted_usage.transmitted_bytes,
+                        public_error_code,
+                    ),
+                )
+                await connection.execute(
+                    "UPDATE egress_reservation SET state = %s "
+                    "WHERE reservation_id = %s",
+                    (
+                        ReservationState.SUCCEEDED.value
+                        if outcome is AttemptOutcome.SUCCEEDED
+                        else ReservationState.FAILED_KNOWN.value,
+                        reservation_id,
+                    ),
+                )
+        except psycopg.OperationalError as error:
+            raise ReservationAmbiguous() from error
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
+        return Attempt(
+            attempt_id=attempt_id,
+            reservation_id=reservation_id,
+            route=route,
+            outcome=outcome,
+            transmitted_usage=transmitted_usage,
+            public_error_code=public_error_code,
+        )
+
+    async def _connect(self) -> psycopg.AsyncConnection[Any]:
+        try:
+            return await psycopg.AsyncConnection.connect(
+                self._conninfo,
+                row_factory=tuple_row,
+            )
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
+
+    async def _reserve(
+        self,
+        connection: psycopg.AsyncConnection[Any],
+        request: ReservationRequest,
+        counter: TokenCounter,
+        policy_hash: str,
+        idempotency_key: str,
+    ) -> Reservation:
+        corpus_manifest_id = request.version.corpus_manifest_id
+        await _record_policy(connection, self._policy, policy_hash)
+
+        # Locks first, replay lookup second. The other order leaves a window in
+        # which concurrent holders of one idempotency key all read "no such
+        # reservation" and then race to insert it; only one can win the unique
+        # constraint and the rest fail for a reason that has nothing to do with
+        # their budget. Holding both locks makes the lookup authoritative.
+        corpus_usage = await _lock_corpus(connection, corpus_manifest_id, policy_hash)
+        usage = await _lock_root(connection, request, policy_hash, corpus_manifest_id)
+
+        replay = await _find_replay(connection, request, policy_hash, idempotency_key)
+        if replay is not None:
+            return replay
+
+        outcome = self._enforcer.apply_reservation(
+            usage, corpus_usage, request, counter
+        )
+
+        reservation_id = str(uuid.uuid4())
+        await _write_scopes(connection, request, outcome, corpus_manifest_id)
+        await _write_reservation(
+            connection,
+            reservation_id,
+            request,
+            policy_hash,
+            corpus_manifest_id,
+            idempotency_key,
+        )
+        return Reservation(
+            reservation_id=reservation_id,
+            idempotency_key=idempotency_key,
+            evaluation_root_id=request.evaluation_root_id,
+            run_id=request.run_id,
+            policy_hash=policy_hash,
+            corpus_manifest_id=corpus_manifest_id,
+            route=request.route,
+            state=ReservationState.RESERVED,
+            usage=outcome.usage,
+            corpus_usage=outcome.corpus_usage,
+        )
+
+
+async def _record_policy(
+    connection: psycopg.AsyncConnection[Any],
+    policy: EgressPolicy,
+    policy_hash: str,
+) -> None:
+    await connection.execute(
+        "INSERT INTO egress_policy_snapshot (policy_hash, schema_version) "
+        "VALUES (%s, %s) ON CONFLICT (policy_hash) DO NOTHING",
+        (policy_hash, policy.schema_version),
+    )
+
+
+async def _lock_corpus(
+    connection: psycopg.AsyncConnection[Any],
+    corpus_manifest_id: str,
+    policy_hash: str,
+) -> CorpusUsage | None:
+    """Take the outermost lock first. Every reservation passes through here."""
+    await connection.execute(
+        """
+        INSERT INTO egress_corpus_ledger (
+            corpus_manifest_id, policy_hash, corpus_usage,
+            unique_excerpts, unique_tokens, unique_bytes
+        ) VALUES (%s, %s, %s, 0, 0, 0)
+        ON CONFLICT (corpus_manifest_id) DO NOTHING
+        """,
+        (corpus_manifest_id, policy_hash, "null"),
+    )
+    row = await (
+        await connection.execute(
+            "SELECT corpus_usage FROM egress_corpus_ledger "
+            "WHERE corpus_manifest_id = %s FOR UPDATE",
+            (corpus_manifest_id,),
+        )
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return CorpusUsage.model_validate(row[0])
+
+
+async def _lock_root(
+    connection: psycopg.AsyncConnection[Any],
+    request: ReservationRequest,
+    policy_hash: str,
+    corpus_manifest_id: str,
+) -> UsageSnapshot | None:
+    await connection.execute(
+        """
+        INSERT INTO egress_evaluation_root (
+            evaluation_root_id, policy_hash, task_level,
+            corpus_manifest_id, usage_snapshot
+        ) VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (evaluation_root_id) DO NOTHING
+        """,
+        (
+            request.evaluation_root_id,
+            policy_hash,
+            request.task_level.value,
+            corpus_manifest_id,
+            "null",
+        ),
+    )
+    row = await (
+        await connection.execute(
+            "SELECT usage_snapshot FROM egress_evaluation_root "
+            "WHERE evaluation_root_id = %s FOR UPDATE",
+            (request.evaluation_root_id,),
+        )
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return UsageSnapshot.model_validate(row[0])
+
+
+async def _write_scopes(
+    connection: psycopg.AsyncConnection[Any],
+    request: ReservationRequest,
+    outcome: ReservationOutcome,
+    corpus_manifest_id: str,
+) -> None:
+    corpus_usage = outcome.corpus_usage
+    usage = outcome.usage
+    await connection.execute(
+        """
+        UPDATE egress_corpus_ledger
+        SET corpus_usage = %s, unique_excerpts = %s, unique_tokens = %s,
+            unique_bytes = %s, updated_at = now()
+        WHERE corpus_manifest_id = %s
+        """,
+        (
+            corpus_usage.model_dump_json(),
+            len(corpus_usage.disclosure_ids),
+            corpus_usage.unique_tokens,
+            corpus_usage.unique_bytes,
+            corpus_manifest_id,
+        ),
+    )
+    await connection.execute(
+        "UPDATE egress_evaluation_root SET usage_snapshot = %s, updated_at = now() "
+        "WHERE evaluation_root_id = %s",
+        (usage.model_dump_json(), request.evaluation_root_id),
+    )
+    for fact in request.disclosures:
+        await connection.execute(
+            """
+            INSERT INTO egress_route_disclosure (
+                corpus_manifest_id, provider_id, endpoint_purpose, disclosure_id
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                corpus_manifest_id,
+                request.route.provider_id,
+                request.route.endpoint_purpose,
+                fact.disclosure_id,
+            ),
+        )
+
+
+async def _write_reservation(
+    connection: psycopg.AsyncConnection[Any],
+    reservation_id: str,
+    request: ReservationRequest,
+    policy_hash: str,
+    corpus_manifest_id: str,
+    idempotency_key: str,
+) -> None:
+    await connection.execute(
+        """
+        INSERT INTO egress_reservation (
+            reservation_id, idempotency_key, evaluation_root_id, run_id,
+            policy_hash, corpus_manifest_id, stage, provider_id,
+            endpoint_purpose, provider_use, model_id, state
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            reservation_id,
+            idempotency_key,
+            request.evaluation_root_id,
+            request.run_id,
+            policy_hash,
+            corpus_manifest_id,
+            request.stage.value,
+            request.route.provider_id,
+            request.route.endpoint_purpose,
+            request.route.use.value,
+            request.model_id,
+            ReservationState.RESERVED.value,
+        ),
+    )
+    for fact in request.disclosures:
+        await connection.execute(
+            """
+            INSERT INTO egress_reservation_disclosure (
+                reservation_id, disclosure_id, token_count, byte_count
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (reservation_id, fact.disclosure_id, fact.token_count, fact.byte_count),
+        )
+
+
+async def _find_replay(
+    connection: psycopg.AsyncConnection[Any],
+    request: ReservationRequest,
+    policy_hash: str,
+    idempotency_key: str,
+) -> Reservation | None:
+    """Return the stored reservation for a repeated key, without re-applying caps.
+
+    A replay is a request that never reached a provider, so charging it
+    transmitted usage again would spend budget on nothing.
+    """
+    row = await (
+        await connection.execute(
+            """
+            SELECT r.reservation_id, r.state, e.usage_snapshot, c.corpus_usage
+            FROM egress_reservation r
+            JOIN egress_evaluation_root e
+              ON e.evaluation_root_id = r.evaluation_root_id
+            JOIN egress_corpus_ledger c
+              ON c.corpus_manifest_id = r.corpus_manifest_id
+            WHERE r.evaluation_root_id = %s AND r.run_id = %s
+              AND r.policy_hash = %s AND r.idempotency_key = %s
+            """,
+            (
+                request.evaluation_root_id,
+                request.run_id,
+                policy_hash,
+                idempotency_key,
+            ),
+        )
+    ).fetchone()
+    if row is None:
+        return None
+    reservation_id, state, usage_snapshot, corpus_usage = row
+    return Reservation(
+        reservation_id=str(reservation_id),
+        idempotency_key=idempotency_key,
+        evaluation_root_id=request.evaluation_root_id,
+        run_id=request.run_id,
+        policy_hash=policy_hash,
+        corpus_manifest_id=request.version.corpus_manifest_id,
+        route=request.route,
+        state=ReservationState(state),
+        usage=UsageSnapshot.model_validate(usage_snapshot),
+        corpus_usage=CorpusUsage.model_validate(corpus_usage),
+        replayed=True,
+    )
+
+
+__all__ = ["PostgresEgressLedger"]

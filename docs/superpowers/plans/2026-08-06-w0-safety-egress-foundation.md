@@ -427,39 +427,39 @@ git commit -m "feat: enforce egress payload and disclosure caps"
 1. `ReservationOutcome` carries two rows with different keys — usage by `evaluation_root_id`, corpus usage by `corpus_manifest_id`. Both must be read, capped, and written inside **one** transaction. A corpus-usage row read outside the lock, or written on only some paths, silently restores the per-case-only ceiling that scope exists to remove.
 2. `apply_reservation` has no idempotency concept and charges transmitted usage on **every** call. That is correct for a genuine resend and wrong for a replayed reservation, so an idempotency-key hit must return the stored `Reservation` directly and **must not** call `apply_reservation` again.
 
-- [ ] **Step 1: Write failing migration/first-reservation integration test**
+- [x] **Step 1: Write failing migration/first-reservation integration test**
 
 Create a run bound to `(run_id, resolved_egress_policy_id, policy_hash, corpus_manifest_id)`, reserve one disclosure, and assert persisted per-root, per-route, and per-corpus unique totals plus zero plaintext columns. Add a test that two different `evaluation_root_id` values sharing one excerpt produce two usage rows but a single corpus disclosure.
 
-- [ ] **Step 2: Run and verify RED against an ephemeral PostgreSQL service**
+- [x] **Step 2: Run and verify RED against an ephemeral PostgreSQL service**
 
 Run: `make test-integration TEST=tests/integration/egress/test_postgres_reservation.py`
 
 Expected: fails because the migration/repository does not exist.
 
-- [ ] **Step 3: Implement append-oriented schema and serializable transaction**
+- [x] **Step 3: Implement append-oriented schema and serializable transaction**
 
 Use row locking on the run budget row, unique constraints on `(run_id, policy_id, idempotency_key)` and disclosure route tuples, check constraints for non-negative counters, and a transaction that revalidates every cap before inserting the reservation. Store hashes/coordinates/counts only; never query, claim, or excerpt text.
 
-- [ ] **Step 4: Write failing idempotency/retry tests**
+- [x] **Step 4: Write failing idempotency/retry tests**
 
 Assert the same stable idempotency key reuses the unique reservation, each actual send attempt increments transmitted usage, a different provider creates a route disclosure and transmitted charge without resetting global unique usage, and an ambiguous/non-final reservation blocks transport.
 
-- [ ] **Step 5: Implement attempt accounting and fail-closed states**
+- [x] **Step 5: Implement attempt accounting and fail-closed states**
 
 Represent `reserved`, `sending`, `succeeded`, and `failed_known` states; absence, connection loss, or unknown commit outcome must raise `LedgerUnavailable`/`ReservationAmbiguous`, which the transport treats as no-send.
 
-- [ ] **Step 6: Write failing concurrency and restart tests**
+- [x] **Step 6: Write failing concurrency and restart tests**
 
 Run at least 20 concurrent tasks racing for the last allowed excerpt and assert exactly one succeeds. Close/recreate the repository and assert the restored run keeps all unique/transmitted totals and rejects over-budget continuation.
 
-- [ ] **Step 7: Implement/re-run until concurrency and recovery are GREEN**
+- [x] **Step 7: Implement/re-run until concurrency and recovery are GREEN**
 
 Run: `make test-integration TEST='tests/integration/egress/test_postgres_*.py'`
 
 Expected: all integration tests pass repeatedly with no leaked connections.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add migrations src/specpilot/egress/ledger.py src/specpilot/egress/postgres.py tests/integration/egress
