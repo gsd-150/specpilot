@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
@@ -10,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StringConstraints,
     ValidationInfo,
     field_validator,
@@ -30,12 +32,31 @@ Statement = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1, max_length=2_048),
 ]
 HttpsUrl = Annotated[AnyUrl, Field(max_length=2_048)]
+_RFC3339_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 def _utc_timestamp(value: datetime, field_name: str | None) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{field_name} must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _validated_timestamp_input(value: object, field_name: str | None) -> datetime:
+    if isinstance(value, datetime):
+        return _utc_timestamp(value, field_name)
+    if not isinstance(value, str) or _RFC3339_TIMESTAMP.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be an RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field_name} must be an RFC3339 timestamp") from error
+    return _utc_timestamp(parsed, field_name)
 
 
 class _FrozenModel(BaseModel):
@@ -54,14 +75,14 @@ class EvidenceSnapshot(_FrozenModel):
             raise ValueError("snapshot URL must use HTTPS")
         return value
 
-    @field_validator("captured_at")
+    @field_validator("captured_at", mode="before")
     @classmethod
     def _normalize_timestamp(
         cls,
-        value: datetime,
+        value: object,
         info: ValidationInfo,
     ) -> datetime:
-        return _utc_timestamp(value, info.field_name)
+        return _validated_timestamp_input(value, info.field_name)
 
 
 class SourceTermsAssessment(_FrozenModel):
@@ -92,7 +113,7 @@ class OutboundLimitAssessment(_FrozenModel):
 
 
 class AuthorizationConclusion(_FrozenModel):
-    authorized: bool
+    authorized: StrictBool
     authorization_statement: Statement
     author_id: Identifier
     provider_id: Identifier
@@ -100,14 +121,14 @@ class AuthorizationConclusion(_FrozenModel):
     authored_at: datetime
     expires_at: datetime
 
-    @field_validator("authored_at", "expires_at")
+    @field_validator("authored_at", "expires_at", mode="before")
     @classmethod
     def _normalize_timestamp(
         cls,
-        value: datetime,
+        value: object,
         info: ValidationInfo,
     ) -> datetime:
-        return _utc_timestamp(value, info.field_name)
+        return _validated_timestamp_input(value, info.field_name)
 
     @model_validator(mode="after")
     def _require_forward_expiry(self) -> Self:
@@ -144,7 +165,7 @@ class SourceManifestDraft(_FrozenModel):
     downloaded_at: datetime
     created_at: datetime
     predecessor_manifest_id: Sha256 | None = None
-    cloud_egress_authorized: bool = False
+    cloud_egress_authorized: StrictBool = False
     compliance_assessment: ComplianceAssessment | None = None
     provider_route_binding: ProviderRouteBinding | None = None
 
@@ -155,14 +176,14 @@ class SourceManifestDraft(_FrozenModel):
             raise ValueError("download URL must use HTTPS")
         return value
 
-    @field_validator("downloaded_at", "created_at")
+    @field_validator("downloaded_at", "created_at", mode="before")
     @classmethod
     def _normalize_timestamp(
         cls,
-        value: datetime,
+        value: object,
         info: ValidationInfo,
     ) -> datetime:
-        return _utc_timestamp(value, info.field_name)
+        return _validated_timestamp_input(value, info.field_name)
 
     @model_validator(mode="after")
     def _enforce_manifest_state(self) -> Self:

@@ -164,10 +164,13 @@ class ManifestStore:
             raise ValueError("manifest_id must be a lowercase SHA-256 digest")
 
     def _read_regular_file(self, directory_descriptor: int, name: str) -> bytes:
+        nonblocking_flag = getattr(os, "O_NONBLOCK", 0)
+        if not nonblocking_flag:
+            raise RuntimeError("required secure filesystem primitives unavailable")
         try:
             file_descriptor = os.open(
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW,
+                os.O_RDONLY | os.O_NOFOLLOW | nonblocking_flag,
                 dir_fd=directory_descriptor,
             )
         except OSError as error:

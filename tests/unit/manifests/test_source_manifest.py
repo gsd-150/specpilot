@@ -19,7 +19,7 @@ from specpilot.contracts.manifests import (
     SourceManifestDraft,
     SourceTermsAssessment,
 )
-from specpilot.manifests.canonical import canonical_sha256
+from specpilot.manifests.canonical import canonical_json, canonical_sha256
 from specpilot.manifests.store import ManifestStore
 
 _ARCHIVE_SHA256 = "a" * 64
@@ -359,3 +359,82 @@ def test_successor_assessment_is_deeply_immutable() -> None:
         review.source_terms.summary = "changed"  # type: ignore[misc]
 
     assert isinstance(review.source_terms.uncertainty, tuple)
+
+
+@pytest.mark.parametrize("coerced_value", ["yes", 1, 0])
+def test_authorization_conclusion_rejects_coerced_booleans(
+    coerced_value: object,
+) -> None:
+    fields = assessment().author_conclusion.model_dump()
+    fields["authorized"] = coerced_value
+
+    with pytest.raises(ValidationError) as raised:
+        AuthorizationConclusion(**fields)
+
+    assert {error["type"] for error in raised.value.errors()} == {"bool_type"}
+
+
+@pytest.mark.parametrize("coerced_value", ["yes", 1, 0])
+def test_manifest_cloud_authorization_rejects_coerced_booleans(
+    coerced_value: object,
+) -> None:
+    fields = initial_fields()
+    fields["cloud_egress_authorized"] = coerced_value
+
+    with pytest.raises(ValidationError) as raised:
+        SourceManifestDraft(**fields)
+
+    assert "bool_type" in {error["type"] for error in raised.value.errors()}
+
+
+@pytest.mark.parametrize(
+    ("field", "unintended_input"),
+    [
+        ("downloaded_at", 1_723_000_000),
+        ("created_at", 1_723_000_000.0),
+        ("downloaded_at", True),
+        ("created_at", object()),
+        ("downloaded_at", "2026-08-06T01:30:00"),
+    ],
+)
+def test_manifest_timestamps_reject_pre_coercion_inputs(
+    field: str,
+    unintended_input: object,
+) -> None:
+    fields = initial_fields()
+    fields[field] = unintended_input
+
+    with pytest.raises(ValidationError):
+        SourceManifestDraft(**fields)
+
+
+@pytest.mark.parametrize("field", ["authored_at", "expires_at"])
+def test_authorization_timestamps_reject_numeric_epochs(field: str) -> None:
+    fields = assessment().author_conclusion.model_dump()
+    fields[field] = 1_723_000_000
+
+    with pytest.raises(ValidationError):
+        AuthorizationConclusion(**fields)
+
+
+def test_snapshot_timestamp_rejects_numeric_epoch() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceSnapshot(
+            snapshot_url="https://evidence.example/snapshot.html",
+            snapshot_sha256="d" * 64,
+            captured_at=1_723_000_000,
+        )
+
+
+def test_canonical_authorized_manifest_json_round_trip(tmp_path: Path) -> None:
+    store = ManifestStore(tmp_path / "manifests")
+    initial = store.create_source(SourceManifestDraft(**initial_fields()))
+    successor = store.create_successor(
+        initial,
+        assessment=assessment(),
+        route_binding=route(),
+        created_at=datetime(2026, 8, 6, 3, tzinfo=UTC),
+    )
+    canonical = canonical_json(successor, include_manifest_id=True)
+
+    assert SourceManifest.model_validate_json(canonical) == successor

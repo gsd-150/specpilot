@@ -4,6 +4,9 @@ import importlib
 import json
 import os
 import stat
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -272,3 +275,37 @@ def test_store_normalizes_successor_creation_time_to_utc(tmp_path: Path) -> None
     )
 
     assert successor.created_at.tzinfo is UTC
+
+
+def test_store_rejects_fifo_manifest_without_blocking(tmp_path: Path) -> None:
+    store_dir = tmp_path / "manifests"
+    store_dir.mkdir(mode=0o700)
+    manifest_id = "f" * 64
+    fifo_path = store_dir / f"{manifest_id}.json"
+    os.mkfifo(fifo_path, mode=0o600)
+    probe = """
+import sys
+from pathlib import Path
+from specpilot.manifests.store import ManifestStore
+
+try:
+    ManifestStore(Path(sys.argv[1])).read_source(sys.argv[2])
+except FileExistsError:
+    raise SystemExit(73)
+except BaseException:
+    raise SystemExit(74)
+raise SystemExit(75)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, str(store_dir), manifest_id],
+        check=False,
+        timeout=1,
+    )
+    assert completed.returncode == 73
+
+    started = time.monotonic()
+    with pytest.raises(FileExistsError) as raised:
+        ManifestStore(store_dir).read_source(manifest_id)
+    assert time.monotonic() - started < 0.5
+    assert raised.value.args == (fifo_path,)
