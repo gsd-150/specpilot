@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from html import escape
 from pathlib import Path
 
 CONTENT_TYPES = (
@@ -19,6 +20,53 @@ DOCUMENT_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   <w:body><w:p><w:r><w:t>safe fixture</w:t></w:r></w:p></w:body>
 </w:document>
 """
+
+
+def build_relationship_docx(
+    tmp_path: Path,
+    *,
+    target: str,
+    target_mode: str | None = None,
+    relationship_part: str = "word/_rels/document.xml.rels",
+    relationship_id: str = "rId9",
+    relationship_type: str = (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    ),
+    name: str = "source.docx",
+) -> Path:
+    mode_attribute = (
+        ""
+        if target_mode is None
+        else f' TargetMode="{escape(target_mode, quote=True)}"'
+    )
+    relationships = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
+        '2006/relationships">\n'
+        f'  <Relationship Id="{escape(relationship_id, quote=True)}" '
+        f'Type="{escape(relationship_type, quote=True)}" '
+        f'Target="{escape(target, quote=True)}"{mode_attribute}/>\n'
+        "</Relationships>\n"
+    ).encode()
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", CONTENT_TYPES)
+        archive.writestr("word/document.xml", DOCUMENT_XML)
+        archive.writestr(relationship_part, relationships)
+    return path
+
+
+def append_windows_member(
+    docx: Path,
+    member_name: str,
+    *,
+    external_attr: int,
+) -> None:
+    member = zipfile.ZipInfo(member_name)
+    member.create_system = 0
+    member.external_attr = external_attr
+    with zipfile.ZipFile(docx, "a") as archive:
+        archive.writestr(member, b"")
 
 
 def build_docx(

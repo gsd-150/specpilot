@@ -14,7 +14,11 @@ from specpilot.ingestion.ooxml import (
     UnsafeOoxmlError,
     inspect_docx,
 )
-from tests.helpers.ooxml_factory import build_docx
+from tests.helpers.ooxml_factory import (
+    append_windows_member,
+    build_docx,
+    build_relationship_docx,
+)
 
 
 @pytest.mark.parametrize(
@@ -65,10 +69,77 @@ def test_external_target_is_recorded_only_as_a_hash(tmp_path: Path) -> None:
     assert len(raised.value.external_relationships) == 1
     finding = raised.value.external_relationships[0]
     assert finding.target_sha256 == hashlib.sha256(target.encode()).hexdigest()
-    assert finding.source_part == "word/document.xml"
+    assert finding.source_part_sha256 == hashlib.sha256(
+        b"word/document.xml"
+    ).hexdigest()
     assert finding.relationship_id == "rId9"
     assert target not in str(raised.value)
     assert target not in repr(raised.value)
+
+
+@pytest.mark.parametrize("target_mode", [None, "Internal"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://secret.example.invalid/egress",
+        "//secret.example.invalid/egress",
+        "/word/media/image.png",
+        r"\\secret.example.invalid\share",
+        "word/media/image.png\nsecret",
+        "word/media/image.png?secret=yes",
+        "scheme:payload",
+        "%2F%2Fsecret.example.invalid/egress",
+        "word%2Fmedia/image.png",
+        "%0Asecret.xml",
+        "%2e%2e/%2e%2e/escape.xml",
+        "..%2f..%2fescape.xml",
+        "../../escape.xml",
+    ],
+)
+def test_internal_relationship_target_must_be_a_canonical_relative_part_uri(
+    tmp_path: Path,
+    target: str,
+    target_mode: str | None,
+) -> None:
+    source = build_relationship_docx(
+        tmp_path,
+        target=target,
+        target_mode=target_mode,
+    )
+
+    with pytest.raises(UnsafeOoxmlError) as raised:
+        inspect_docx(source, OoxmlLimits())
+
+    assert raised.value.code is OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET
+
+
+def test_unknown_relationship_target_mode_is_rejected(tmp_path: Path) -> None:
+    source = build_relationship_docx(
+        tmp_path,
+        target="media/image.png",
+        target_mode="Unknown",
+    )
+
+    with pytest.raises(UnsafeOoxmlError) as raised:
+        inspect_docx(source, OoxmlLimits())
+
+    assert raised.value.code is OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET
+
+
+@pytest.mark.parametrize("target_mode", [None, "Internal"])
+def test_internal_relative_target_that_stays_in_package_is_accepted(
+    tmp_path: Path,
+    target_mode: str | None,
+) -> None:
+    source = build_relationship_docx(
+        tmp_path,
+        target="../media/image.png",
+        target_mode=target_mode,
+    )
+
+    result = inspect_docx(source, OoxmlLimits())
+
+    assert result.relationship_count == 1
 
 
 def test_internal_ole_relationship_is_rejected(tmp_path: Path) -> None:
@@ -235,6 +306,82 @@ def test_content_types_directory_is_rejected_with_a_stable_code(
         inspect_docx(source, OoxmlLimits())
 
     assert raised.value.code is OoxmlRejectionCode.MISSING_CONTENT_TYPES
+
+
+@pytest.mark.parametrize(
+    ("member_name", "external_attr"),
+    [
+        ("word/media/volume/", 0x08),
+        ("word/media/volume/", 0x18),
+        ("word/media/inconsistent/", 0x00),
+        ("word/media/not-a-directory.bin", 0x10),
+    ],
+)
+def test_windows_special_or_inconsistent_member_attributes_are_rejected(
+    tmp_path: Path,
+    member_name: str,
+    external_attr: int,
+) -> None:
+    source = build_docx(tmp_path)
+    append_windows_member(source, member_name, external_attr=external_attr)
+
+    with pytest.raises(UnsafeOoxmlError) as raised:
+        inspect_docx(source, OoxmlLimits())
+
+    assert raised.value.code is OoxmlRejectionCode.SPECIAL_FILE
+
+
+def test_windows_directory_attribute_with_directory_name_is_accepted(
+    tmp_path: Path,
+) -> None:
+    source = build_docx(tmp_path)
+    append_windows_member(source, "word/media/", external_attr=0x10)
+
+    result = inspect_docx(source, OoxmlLimits())
+
+    assert result.member_count == 3
+
+
+def test_external_finding_hashes_control_character_source_part(
+    tmp_path: Path,
+) -> None:
+    relationship_part = "word/_rels/private\nsource.xml.rels"
+    source_part = "word/private\nsource.xml"
+    source = build_relationship_docx(
+        tmp_path,
+        target="https://secret.example.invalid/egress",
+        target_mode="External",
+        relationship_part=relationship_part,
+    )
+
+    with pytest.raises(UnsafeOoxmlError) as raised:
+        inspect_docx(source, OoxmlLimits())
+
+    finding = raised.value.external_relationships[0]
+    expected_source_hash = hashlib.sha256(source_part.encode()).hexdigest()
+    assert finding.source_part_sha256 == expected_source_hash
+    assert source_part not in repr(finding)
+    assert source_part not in str(raised.value)
+
+
+def test_external_finding_omits_untrusted_relationship_metadata(
+    tmp_path: Path,
+) -> None:
+    source = build_relationship_docx(
+        tmp_path,
+        target="https://secret.example.invalid/egress",
+        target_mode="External",
+        relationship_id="private metadata",
+        relationship_type="https://private.example.invalid/secret-metadata",
+    )
+
+    with pytest.raises(UnsafeOoxmlError) as raised:
+        inspect_docx(source, OoxmlLimits())
+
+    finding = raised.value.external_relationships[0]
+    assert finding.relationship_id is None
+    assert finding.relationship_type is None
+    assert "private" not in repr(finding)
 
 
 def test_path_replacement_during_inspection_cannot_return_success(

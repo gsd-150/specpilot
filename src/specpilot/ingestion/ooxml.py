@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO, NoReturn, cast
+from urllib.parse import unquote_to_bytes, urlsplit
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as DefusedElementTree  # type: ignore[import-untyped]
@@ -54,8 +55,17 @@ _NESTED_PACKAGE_SUFFIXES = {
     ".xlsx",
     ".zip",
 }
-_SAFE_RELATIONSHIP_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}\Z")
-_SAFE_RELATIONSHIP_TYPE = re.compile(r"https?://[A-Za-z0-9./_:#?&=%+-]{1,512}\Z")
+_SAFE_RELATIONSHIP_ID = re.compile(r"rId[1-9][0-9]{0,9}\Z")
+_SAFE_RELATIONSHIP_TYPE = re.compile(
+    r"http://(?:schemas\.openxmlformats\.org/officeDocument/2006|"
+    r"purl\.oclc\.org/ooxml/officeDocument|"
+    r"schemas\.microsoft\.com/office/2006)/relationships/"
+    r"[A-Za-z0-9._-]{1,128}\Z"
+)
+_UNSAFE_PERCENT_ESCAPE = re.compile(
+    r"%(?:0[0-9a-f]|1[0-9a-f]|25|2e|2f|3a|5c|7f)",
+    re.IGNORECASE,
+)
 
 
 class OoxmlRejectionCode(StrEnum):
@@ -82,6 +92,7 @@ class OoxmlRejectionCode(StrEnum):
     EMBEDDED_ACTIVE_CONTENT = "embedded_active_content"
     NESTED_PACKAGE = "nested_package"
     EXTERNAL_RELATIONSHIP = "external_relationship"
+    INVALID_RELATIONSHIP_TARGET = "invalid_relationship_target"
     INVALID_LIMITS = "invalid_limits"
 
 
@@ -95,7 +106,7 @@ class OoxmlLimits:
 
 @dataclass(frozen=True, slots=True)
 class ExternalRelationship:
-    source_part: str
+    source_part_sha256: str
     relationship_id: str | None
     relationship_type: str | None
     target_sha256: str
@@ -217,10 +228,14 @@ def _validate_member_path(member_name: str) -> str:
 
 
 def _validate_member_type(member: zipfile.ZipInfo) -> None:
-    if member.create_system == 0 and member.external_attr & 0x18:
-        if member.is_dir():
-            return
-        _reject(OoxmlRejectionCode.SPECIAL_FILE)
+    if member.create_system == 0:
+        dos_attributes = member.external_attr & 0xFF
+        if dos_attributes & 0x08:
+            _reject(OoxmlRejectionCode.SPECIAL_FILE)
+        has_directory_attribute = bool(dos_attributes & 0x10)
+        if has_directory_attribute != member.is_dir():
+            _reject(OoxmlRejectionCode.SPECIAL_FILE)
+        return
     unix_mode = member.external_attr >> 16
     file_type = stat.S_IFMT(unix_mode)
     if file_type == stat.S_IFLNK:
@@ -391,6 +406,61 @@ def _safe_relationship_metadata(
     return value
 
 
+def _decoded_relationship_target(target: str) -> str:
+    decoded = target
+    for _ in range(8):
+        if "%" not in decoded:
+            return decoded
+        if _UNSAFE_PERCENT_ESCAPE.search(decoded):
+            _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+        try:
+            next_decoded = unquote_to_bytes(decoded).decode("utf-8")
+        except UnicodeDecodeError:
+            _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+        if next_decoded == decoded:
+            _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+        decoded = next_decoded
+    if "%" in decoded:
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    return decoded
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def _validate_internal_relationship_target(
+    source_part: str,
+    target: str,
+) -> None:
+    if not target or _has_control_characters(target):
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    if "\\" in target or any(character.isspace() for character in target):
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+
+    decoded = _decoded_relationship_target(target)
+    if _has_control_characters(decoded):
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    if "\\" in decoded or decoded.startswith("/"):
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    try:
+        parsed = urlsplit(decoded)
+    except ValueError:
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    if parsed.path != decoded:
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+
+    segments = decoded.split("/")
+    if not segments[0] or ":" in segments[0] or "" in segments or "." in segments:
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+    source_directory = "" if source_part == "/" else posixpath.dirname(source_part)
+    resolved = posixpath.normpath(posixpath.join(source_directory, decoded))
+    if resolved in {"", ".", ".."} or resolved.startswith(("../", "/")):
+        _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
+
+
 def _inspect_relationships(
     relationship_part: str,
     payload: bytes,
@@ -400,6 +470,7 @@ def _inspect_relationships(
         _reject(OoxmlRejectionCode.INVALID_XML)
     relationship_count = 0
     external: list[ExternalRelationship] = []
+    source_part = _relationship_source_part(relationship_part)
     for entry in root:
         if _local_name(entry.tag) != "Relationship":
             continue
@@ -419,10 +490,12 @@ def _inspect_relationships(
         ):
             _reject(OoxmlRejectionCode.EMBEDDED_ACTIVE_CONTENT)
         target_mode = entry.attrib.get("TargetMode")
-        if target_mode is not None and target_mode.casefold() == "external":
+        if target_mode == "External":
             external.append(
                 ExternalRelationship(
-                    source_part=_relationship_source_part(relationship_part),
+                    source_part_sha256=hashlib.sha256(
+                        source_part.encode("utf-8")
+                    ).hexdigest(),
                     relationship_id=_safe_relationship_metadata(
                         entry.attrib.get("Id"),
                         _SAFE_RELATIONSHIP_ID,
@@ -434,8 +507,10 @@ def _inspect_relationships(
                     target_sha256=hashlib.sha256(target.encode("utf-8")).hexdigest(),
                 )
             )
-        elif target_mode is not None and target_mode != "Internal":
-            _reject(OoxmlRejectionCode.INVALID_XML)
+        elif target_mode in {None, "Internal"}:
+            _validate_internal_relationship_target(source_part, target)
+        else:
+            _reject(OoxmlRejectionCode.INVALID_RELATIONSHIP_TARGET)
     return relationship_count, tuple(external)
 
 
