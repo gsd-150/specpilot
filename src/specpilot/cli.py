@@ -36,7 +36,7 @@ from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolatio
 from specpilot.egress.policy import EgressPolicy
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
-from specpilot.manifests.store import ManifestStore
+from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 
 # Exit codes, matching the ingestion worker: 2 is a refused input or policy
 # violation, 3 is an I/O fault, 4 is bad usage. Every non-zero exit prints one
@@ -139,6 +139,8 @@ def _manifest_authorize(arguments: argparse.Namespace) -> int:
     store = ManifestStore(arguments.manifest_dir)
     try:
         predecessor = store.read_source(arguments.predecessor)
+    except UnsupportedManifestVersionError:
+        return _refuse("unsupported_manifest_version")
     except (OSError, ValueError, RuntimeError):
         return _refuse("manifest_not_found")
 

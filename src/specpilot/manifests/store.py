@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import stat
@@ -26,6 +27,10 @@ from specpilot.manifests.canonical import canonical_json
 
 _MANIFEST_ID = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MANIFEST_BYTES = 256 * 1024
+
+
+class UnsupportedManifestVersionError(ValueError):
+    """Raised when a readable manifest declares an unsupported schema version."""
 
 
 class ManifestStore:
@@ -208,6 +213,19 @@ class ManifestStore:
 
     @staticmethod
     def _decode_canonical(data: bytes, expected_id: str) -> SourceManifest:
+        try:
+            raw_manifest = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        else:
+            if (
+                isinstance(raw_manifest, dict)
+                and isinstance(raw_manifest.get("schema_version"), str)
+                and raw_manifest["schema_version"] != "source-manifest/v1"
+            ):
+                raise UnsupportedManifestVersionError(
+                    "stored manifest has an unsupported schema version"
+                )
         try:
             manifest = SourceManifest.model_validate_json(data)
         except ValidationError as error:

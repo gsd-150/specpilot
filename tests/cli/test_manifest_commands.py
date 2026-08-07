@@ -156,10 +156,53 @@ def test_an_unknown_predecessor_is_refused(
     capsys: pytest.CaptureFixture[str],
     run_cli,
 ) -> None:
-    run_cli(create_args(tmp_path), capsys)
     evidence = write_assessment(tmp_path)
 
-    code, _, err = run_cli(authorize_args(tmp_path, "0" * 64, evidence), capsys)
+    code, out, err = run_cli(authorize_args(tmp_path, "0" * 64, evidence), capsys)
 
-    assert code != 0
-    assert err.strip() in {"manifest_not_found", "invalid_authorization_evidence"}
+    assert code == 2
+    assert out == ""
+    assert err == "manifest_not_found\n"
+
+
+def test_an_unsupported_predecessor_schema_version_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    run_cli,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_id = "e" * 64
+    manifest_path = manifest_dir / f"{manifest_id}.json"
+    manifest_path.write_text(
+        '{"schema_version":"source-manifest/v2"}',
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+    evidence = write_assessment(tmp_path)
+
+    code, out, err = run_cli(authorize_args(tmp_path, manifest_id, evidence), capsys)
+
+    assert code == 2
+    assert out == ""
+    assert err == "unsupported_manifest_version\n"
+
+
+def test_a_malformed_predecessor_is_not_an_unsupported_version(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    run_cli,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_id = "f" * 64
+    manifest_path = manifest_dir / f"{manifest_id}.json"
+    manifest_path.write_bytes(b'{"schema_version":')
+    manifest_path.chmod(0o600)
+    evidence = write_assessment(tmp_path)
+
+    code, out, err = run_cli(authorize_args(tmp_path, manifest_id, evidence), capsys)
+
+    assert code == 2
+    assert out == ""
+    assert err == "manifest_not_found\n"

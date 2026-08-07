@@ -14,7 +14,7 @@ import pytest
 
 from specpilot.contracts.manifests import SourceManifest, SourceManifestDraft
 from specpilot.manifests.canonical import canonical_json
-from specpilot.manifests.store import ManifestStore
+from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from tests.unit.manifests.test_source_manifest import initial_fields
 
 store_module = importlib.import_module("specpilot.manifests.store")
@@ -119,6 +119,23 @@ def test_read_rejects_filename_and_content_id_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="manifest"):
         store.read_source(manifest.manifest_id)
+
+
+def test_read_rejects_a_secure_manifest_with_an_unsupported_schema_version(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "manifests"
+    store_dir.mkdir(mode=0o700)
+    manifest_id = "e" * 64
+    manifest_path = store_dir / f"{manifest_id}.json"
+    manifest_path.write_text(
+        '{"schema_version":"source-manifest/v2"}',
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+
+    with pytest.raises(UnsupportedManifestVersionError):
+        ManifestStore(store_dir).read_source(manifest_id)
 
 
 def test_store_publishes_with_atomic_no_replace_link(
