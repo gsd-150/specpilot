@@ -119,6 +119,60 @@ because each takes about an hour:
 
 Either keeps the telecom-specification narrative that C otherwise gives up.
 
+#### Variant 1 result — 2026-08-07: failed
+
+Three further Release 18 specifications were downloaded and put through
+`archive inspect`. All three were refused, and all three carry embedded
+objects:
+
+| Specification | Version | Refusal | Embedded objects |
+|---|---|---|---|
+| TS 38.331 (RRC) | v18.10.0 | `xml_too_large` | 73 — 64 OLE `.bin`, 5 `.vsdx`, 1 `.vsd`, 3 nested Word documents |
+| TS 38.322 (RLC) | v18.2.0 | `embedded_active_content` | 18 — 15 `.vsd`, 2 `.vsdx`, 1 OLE |
+| TS 38.323 (PDCP) | v18.5.0 | `embedded_active_content` | 28 — 17 `.vsd`, 10 `.vsdx`, 1 OLE |
+
+**TS 38.331's different refusal code is a trap.** Its `word/document.xml` is
+48 MB against a 16 MB limit, so `xml_too_large` fires before the embedded-object
+check runs. That reads like "raise the limit and it passes", and it is worth
+naming because the temptation is real: 38.331 is the same `ia0` version line as
+the frozen corpus and RRC is the most valuable specification in this project.
+Re-running the inspector with `max_xml_bytes` at 128 MB returns
+`embedded_active_content`. Raising the limit only trades one honest refusal for
+another while weakening a real resource boundary.
+
+Five 3GPP DOCX distributions have now been measured — 38.300 (119 objects),
+38.321, 38.331 (73), 38.322 (18), 38.323 (28) — spanning architecture, MAC, RRC,
+RLC, and PDCP. Embedded Visio and OLE objects are normal in this distribution
+format, not an accident of the two originally chosen specifications. Variant 1
+is closed: do not spend another hour looking for a clean DOCX.
+
+#### Variant 2 result — 2026-08-07: partly available, with two costs
+
+**The 3GPP HTML rendering does not exist.** `html-info/38300.htm` redirects to a
+portal page carrying reference, title, status, type, and release metadata. It is
+not the specification text.
+
+**The ETSI PDF does exist** and is comparatively clean. `ts_138300v180900p.pdf`
+is 3,164,085 bytes of PDF 1.7. A byte-level token scan — not a full PDF security
+analysis — found no `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/AA`,
+`/RichMedia`, `/GoToR`, or `/SubmitForm`; it found one `/OpenAction` and 16
+`/URI`. Nothing in it resembles the OLE and Visio payloads that refuse the DOCX.
+
+Two costs come with it, and neither is small:
+
+1. **Version.** ETSI publishes up to v18.9.0 for both TS 138 300 and TS 138 321.
+   The frozen corpus is v18.10.0. Taking this route means re-freezing one minor
+   version back, with new hashes and new manifests.
+2. **Format.** The project has no PDF ingestion path, by decision rather than
+   omission. Product plan §3.2 fixes the source format as the `.docx` inside the
+   official ZIP and excludes PDF, because DOCX exposes paragraph styles, tables,
+   and OOXML nodes directly and removes PDF layout recovery as a variable.
+   Choosing variant 2 reverses that decision and builds the parser it avoided.
+
+So variant 2 keeps the telecom narrative and removes the OOXML risk surface, at
+the price of a version step back and a layout-recovery subsystem. That trade is
+a product decision, not an evidence question, and it is not recorded here.
+
 ### Route D — reviewed derivative
 
 Build a separately reviewed, content-addressed derivative of the refused source
