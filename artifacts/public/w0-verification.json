@@ -1,5 +1,13 @@
 {
   "all_checks_passed": true,
+  "carries_over_to_new_corpus": [
+    "egress policy and caps",
+    "atomic postgres ledger",
+    "policy-bound transport",
+    "evidence indexes",
+    "api-policy conclusion gate",
+    "provider-side assessments"
+  ],
   "checks": [
     {
       "check": "lint",
@@ -166,14 +174,52 @@
       "requirement": "compliance conclusion written, signed with an author_id, carrying an expiry"
     }
   ],
-  "route_decision": "extend",
+  "requires_redo_for_new_corpus": [
+    "source manifests",
+    "source-terms assessment against BCP 78 and the IETF Trust Legal Provisions"
+  ],
+  "route_decision": "C",
   "route_decision_rationale": {
     "A": "not met: zero authorized successor manifests",
     "B": "not met: the cloud-egress conclusion is yes, and B requires no",
-    "C": "trigger fires (corpus cannot be safely ingested) but the two cheaper variants have not been tried",
-    "D": "does not move W0 to a pass by its own definition; still priced against C",
-    "selected": "extend"
+    "C": "selected: the chosen corpus cannot be safely ingested, and both cheaper variants are now tried and recorded",
+    "D": "not chosen: does not move W0 to a pass by its own definition, and C is cheaper",
+    "selected": "C",
+    "supersedes": "extend, recorded at cc73e773c113a3891587d39ecf43bcae24b8d8b6 while both variants were untried"
+  },
+  "route_research": {
+    "selected_corpus": {
+      "candidate_suite": [
+        "RFC 9110",
+        "RFC 9111",
+        "RFC 9112"
+      ],
+      "cross_document_section_references": {
+        "rfc9110": 86,
+        "rfc9111": 51,
+        "rfc9112": 56
+      },
+      "family": "IETF RFC",
+      "formats": [
+        "txt",
+        "xml"
+      ],
+      "rfc9110_xml_sections": 305,
+      "rfc9110_xml_xrefs": 2519,
+      "terms_regime": "BCP 78 and the IETF Trust Legal Provisions",
+      "xml_doctype_or_entity_declarations": 0
+    },
+    "variant_1_other_3gpp_docx": {
+      "detail": "38.300 (119 embedded objects), 38.321, 38.331 (73), 38.322 (18), 38.323 (28); 38.331 reports xml_too_large first because a 48MB document.xml trips a 16MB limit, and returns embedded_active_content once that limit is raised. The limit was not raised.",
+      "outcome": "failed",
+      "specifications_measured": 5
+    },
+    "variant_2_etsi_pdf_or_3gpp_html": {
+      "detail": "3GPP HTML does not exist (metadata portal page). ETSI PDF exists and a byte-level token scan found no JavaScript, Launch, EmbeddedFile, AA, RichMedia, GoToR or SubmitForm. Costs a version step back (ETSI publishes 18.9.0; corpus frozen at 18.10.0) and a PDF layout-recovery parser that product plan section 3.2 excluded on purpose.",
+      "outcome": "available at a declined price"
+    }
   },
   "schema_version": "w0-verification/v1",
-  "tracked_tree_clean": true
+  "tracked_tree_clean": true,
+  "w1_precondition": "a new RFC-specific design and plan must exist before W1 begins"
 }

@@ -5,7 +5,15 @@
 **Date:** 2026-08-07
 **Machine-readable evidence:** `../../artifacts/public/w0-verification.json`
 
-**Route decision: `extend`. W1 does not begin.**
+**Route decision: `C` — compatible corpus. The corpus moves to IETF RFCs.
+W1 does not begin until a new RFC-specific design and plan exists.**
+
+This supersedes the `extend` first recorded at commit `cc73e77`, and the
+sequence matters more than the final letter. `extend` was correct when written:
+C's corpus trigger had already fired, but the runbook requires two cheaper
+variants to be tried first, and an untried variant is incomplete evidence. Both
+were then tried and recorded — variant 1 failed outright, variant 2 turned out
+available at a price the author declined — which is the condition C asks for.
 
 Nothing in this report is approval. The compliance conclusion it refers to is
 the author's own self-assessment; no external party reviewed or cleared it.
@@ -93,23 +101,68 @@ platform while its user agreement's training clause sits in a chapter that
 covers the API, and ChatAnywhere discloses nothing either way about training
 while routing inputs and outputs onward to third-party model providers.
 
-## Why `extend` and not A, B, C, or D
+## Why `C` and not A, B, or D
 
 - **A** requires separately bound authorized successor manifests, one per use.
-  There are zero successors. Not met.
+  There are zero successors. Not met, and unaffected by the corpus change.
 - **B** requires the cloud-egress conclusion to be **no**. It is yes. Not met.
-- **C**'s second trigger does fire — the chosen corpus cannot be safely ingested.
-  But the runbook requires the two cheaper variants first: a different 3GPP
-  specification whose DOCX carries no embedded objects, then the ETSI PDF or
-  3GPP HTML rendering of the same specification. Neither has been tried, so
-  choosing C now would discard the telecom narrative before checking whether it
-  can be kept for about an hour's work.
-- **D** does not move W0 to a pass by its own definition, and remains priced
-  against C rather than chosen.
+- **C** is selected. Its second trigger fired — the chosen corpus cannot be
+  safely ingested — and both cheaper variants have now been tried and recorded.
+- **D** does not move W0 to a pass by its own definition, and costs a new
+  subsystem comparable in size to all of W0. C is cheaper and was pre-registered.
 
-`extend` is therefore the only valid record. It is the designed resting state,
-not a failure: the gate is closed, nothing is authorized, and no real source text
-can reach a provider.
+### Variant 1 — a different 3GPP DOCX: failed
+
+Three further Release 18 specifications were inspected. All were refused and all
+carry embedded objects: TS 38.331 (73), TS 38.322 (18), TS 38.323 (28). With
+38.300 (119) and 38.321 that is five distributions across architecture, MAC,
+RRC, RLC, and PDCP. Embedded Visio and OLE objects are normal in this format.
+
+TS 38.331 is worth naming, because it was the tempting one: same `ia0` version
+line as the frozen corpus, and RRC is the most valuable specification here. It
+fails with `xml_too_large` rather than `embedded_active_content`, which reads
+like a tunable. Re-running with the XML limit at 128 MB returns
+`embedded_active_content`. The limit was not raised — doing so would have traded
+one honest refusal for another while weakening a real resource boundary.
+
+### Variant 2 — ETSI PDF or 3GPP HTML: available, declined
+
+The 3GPP HTML rendering does not exist; that URL is a metadata portal page. The
+ETSI PDF does exist and is comparatively clean — a byte-level token scan found
+no `/JavaScript`, `/Launch`, `/EmbeddedFile`, `/AA`, `/RichMedia`, `/GoToR`, or
+`/SubmitForm`. It costs a version step back, since ETSI publishes up to v18.9.0
+while the corpus is frozen at v18.10.0, and it costs a PDF layout-recovery
+parser that product plan §3.2 excluded on purpose. The author declined that
+trade.
+
+### What the RFC corpus measures
+
+Product plan §3.2 pre-registered IETF RFC partly because plain-text or XML
+distribution removes the OOXML sandbox risk surface. That was a hypothesis. It
+is now measured on both sides.
+
+RFC 9110, 9111, and 9112 — the HTTP core suite — carry 291, 65, and 59 numbered
+sections and 86, 51, and 56 cross-document section references respectively,
+reproducing the dense normative cross-referencing that 38.300 and 38.321 were
+chosen for. RFC 9110's XML carries 305 `<section>` and 2,519 `<xref>` elements,
+so cross-references arrive machine-readable rather than recovered from text
+patterns, and it contains zero DOCTYPE, entity declarations, external-entity
+references, or stylesheet processing instructions.
+
+The ingestion path shortens from `ZIP → DOCX → OOXML part graph → embedded
+objects and external relationships` to a direct fetch of text or structured XML.
+
+### What carries over
+
+Everything provider-side is corpus independent and survives: the egress policy
+and its caps, the atomic ledger, the policy-bound transport, both evidence
+indexes, the API-policy conclusion gate, and both providers' assessed
+retention, training, region, and subprocessor findings.
+
+The source side does not. The 3GPP and ETSI terms assessments describe a corpus
+no longer in use; they stay as records of what was assessed. The RFC corpus
+needs its own source manifests and its own source-terms assessment against
+BCP 78 and the IETF Trust Legal Provisions.
 
 ## What W0 does not establish
 
@@ -125,10 +178,15 @@ can reach a provider.
 
 ## Next action
 
-Route research, in this order, before any W1 work:
+Write the RFC-specific design and plan. W1 does not begin without it. It has to
+settle at least:
 
-1. A different 3GPP specification whose DOCX carries no embedded objects.
-2. The official ETSI PDF or 3GPP HTML rendering of the same specification.
-
-Only if both are recorded as failed, and the corpus is recorded as genuinely
-irreplaceable, may a separately reviewed derivative plan be written.
+1. Which RFC suite is frozen, at which format and which published revision.
+2. Source manifests for RFC documents, and a source-terms assessment against
+   BCP 78 and the IETF Trust Legal Provisions.
+3. Whether the parser consumes `.txt`, the v3 XML, or both — the XML carries
+   sections and cross-references as elements, the text does not.
+4. What replaces the OOXML inspection boundary. The archive and OOXML risk
+   surface is gone, but XML parsing keeps its own; `defusedxml` stays.
+5. Which existing tests describe 3GPP-shaped inputs and must be retargeted
+   rather than deleted.

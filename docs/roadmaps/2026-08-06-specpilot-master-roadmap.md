@@ -12,9 +12,16 @@ W0 is in progress on `feat/w0-foundation`. Tasks 1–9 are implemented and their
 plan steps are checked; Task 8 Step 4 (the author's own compliance research and
 assessment prose) is the open item, and Task 10 has not started.
 
-No successor manifest exists, both source manifests remain default-deny, no real
-provider has been called, and the only eligible route decision is therefore
-`extend`. W1 has not begun and must not begin from an undecided W0.
+No successor manifest exists, both source manifests remain default-deny, and no
+real provider has been called.
+
+**The recorded route decision is `C` — the corpus moves to IETF RFCs.** Both
+chosen 3GPP sources are refused by the ingestion boundary with
+`embedded_active_content`, and three further specifications measured the same
+way, so the blocker is ingestion rather than compliance. Everything
+provider-side carries over; the source side needs new manifests and a
+source-terms assessment against BCP 78. W1 does not begin until an
+RFC-specific design and plan exists.
 
 Verification as of this date: 329 tests pass with a local PostgreSQL DSN set
 (24 of them are skipped without one), Ruff and mypy are clean, and the envelope

@@ -10,20 +10,68 @@ There is no undecided state, and W1 does not begin from one.
 
 ## Recorded decision — 2026-08-07
 
-**`extend`**, at commit `cc73e773c113a3891587d39ecf43bcae24b8d8b6`.
+**`C` — compatible corpus. The corpus moves to IETF RFCs.**
+
+This record supersedes the `extend` first written at commit
+`cc73e773c113a3891587d39ecf43bcae24b8d8b6`. `extend` was correct then: C's
+corpus trigger had fired, but its two cheaper variants were untried, and an
+untried variant is incomplete evidence. Both have since been tried and recorded
+below — variant 1 failed, variant 2 is available at a price the author declined
+— which is exactly the condition C requires.
 
 Every checklist item below is met and all ten verification commands exit 0 from
-a clean state, and the answer is still `extend`: A needs an authorized successor
-manifest that does not exist, B needs a cloud-egress conclusion of *no* when the
-recorded one is *yes*, and C's corpus trigger fires but its two cheaper variants
-have not been tried.
+a clean state. A and B remain unavailable regardless: A needs an authorized
+successor manifest and there are zero, and B needs a cloud-egress conclusion of
+*no* when the recorded one is *yes*.
 
-The blocker is ingestion, not compliance. Both chosen sources are refused with
-`embedded_active_content` and sit in quarantine, while the main-chain conclusion
-is written and signed.
+The blocker was ingestion, not compliance. Both chosen 3GPP sources are refused
+with `embedded_active_content` and sit unchanged in quarantine, while the
+main-chain conclusion is written and signed.
+
+**What carries over and what does not.** The provider-side work is corpus
+independent and survives intact: the egress policy and its caps, the atomic
+ledger, the policy-bound transport, the evidence indexes, the API-policy
+conclusion gate, and both providers' assessed retention/training/region/
+subprocessor findings. The source-side does not: the 3GPP and ETSI terms
+assessments describe a corpus no longer in use. They remain as records of what
+was assessed, and the RFC corpus needs its own source manifests and its own
+source-terms assessment against BCP 78 and the IETF Trust Legal Provisions.
+
+**W1 does not begin until a new RFC-specific design and plan exists.**
 
 Evidence: `../../artifacts/public/w0-verification.json` and
 `../reports/w0-foundation-report.md`.
+
+### Why RFC, measured rather than assumed — 2026-08-07
+
+Product plan §3.2 pre-registered IETF RFC partly because plain-text or XML
+distribution removes the entire OOXML sandbox risk surface. That was a
+hypothesis when it was written. It is now measured on both sides.
+
+RFC 9110, 9111, and 9112 — the HTTP core suite — were fetched in both `.txt`
+and `.xml`:
+
+| Property | RFC 9110 | RFC 9111 | RFC 9112 |
+|---|---|---|---|
+| Numbered sections | 291 | 65 | 59 |
+| Distinct cross-RFC references | 57 | 9 | 15 |
+| Cross-document section references | 86 | 51 | 56 |
+
+The suite reproduces the property 38.300 and 38.321 were chosen for: dense
+normative cross-referencing between documents, which is what the evidence and
+reference-expansion work needs.
+
+The XML is better input than the DOCX ever was. RFC 9110's XML carries 305
+`<section>` and **2,519 `<xref>`** elements, so cross-references arrive
+machine-readable instead of being recovered from text patterns. It also contains
+zero `<!DOCTYPE>`, zero entity declarations, zero external-entity references,
+and zero stylesheet processing instructions — the XXE surface is empty in the
+documents themselves, and `defusedxml` is already a dependency for the parser
+that remains.
+
+The ingestion pipeline shortens from `ZIP → DOCX → OOXML part graph → embedded
+objects and external relationships` to a direct fetch of text or structured XML.
+Nothing in that path has an archive, an OOXML part, or an embedded OLE object.
 
 ## Evidence to gather
 
