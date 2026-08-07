@@ -1436,7 +1436,7 @@ test -f "$observed" && test ! -e "$blocked" && test -f "$png" || \
   { test -f "$blocked" && test ! -e "$observed" && test ! -e "$png"; }
 ```
 
-- [ ] **Step 4: Obtain the author-owned assessment prose**
+- [x] **Step 4: Obtain the author-owned assessment prose**
 
 Present only the exact captured URLs, hashes, times, page labels, and required
 field names. The author must read the referenced evidence and provide their own
@@ -1491,7 +1491,7 @@ DeepSeek-page keys, and `deepseek-account-setting`. The ChatAnywhere index
 consumes the seven shared keys, four ChatAnywhere-page keys, and
 `glm-5-2-official`. No key is inferred or silently omitted.
 
-- [ ] **Step 5: Build and validate both canonical indexes**
+- [x] **Step 5: Build and validate both canonical indexes**
 
 Each JSON object has exactly:
 
@@ -1539,7 +1539,7 @@ complete. After publication, securely reread each index, require
 its filename stem to equal `canonical_sha256(parsed_index)`, and require
 `canonical_json(parsed_index)` to equal the stored bytes.
 
-- [ ] **Step 6: Update and commit the sanitized evidence checkpoint**
+- [x] **Step 6: Update and commit the sanitized evidence checkpoint**
 
 Add only the two evidence-index IDs, route/model identities, capture status
 (`observed` or `not_captured` without the setting value), and remaining gate
@@ -1565,7 +1565,7 @@ git commit -m "docs: record task8 route evidence indexes"
   account gate, default-v1 premise, and exact DeepSeek conclusion.
 - Produces: four validated source-bound envelopes and no successor.
 
-- [ ] **Step 1: Recompute outbound premise and policy hashes**
+- [x] **Step 1: Recompute outbound premise and policy hashes**
 
 Compare every payload kind and numeric cap against `default-v1.json`. Compute
 the exact premise and policy-file SHA-256 fresh. If they differ from reviewed
@@ -1582,7 +1582,7 @@ Under egress-policy/v1 default-v1, evidence, compliance, and verifier stages may
 Hash the UTF-8 bytes without a trailing newline and require the reviewed
 premise SHA-256 before use.
 
-- [ ] **Step 2: Write the fixed four-file matrix**
+- [x] **Step 2: Write the fixed four-file matrix**
 
 Each file is a complete `source-bound-assessment/v1` envelope with explicit
 source manifest, route, model, evidence index, and nested assessment. DeepSeek
@@ -1697,7 +1697,7 @@ loads manifests/indexes by parsing their canonical contents, validates the
 author-input keys exactly, and implements `publish_private_no_replace` with
 `O_EXCL|O_NOFOLLOW`, mode `0600`, file fsync, and directory fsync.
 
-- [ ] **Step 3: Apply the policy-evidence/conclusion branch exactly**
+- [x] **Step 3: Apply the policy-evidence/conclusion branch exactly**
 
 If and only if the DeepSeek index hash-binds all three required API-governing
 documents and none of them was captured after the conclusion's `authored_at`,
@@ -1706,7 +1706,7 @@ verify the 268-byte length and SHA-256. Otherwise omit it from both. Always omit
 it from both ChatAnywhere assessments. The account record never decides this
 branch.
 
-- [ ] **Step 4: Validate every binding and completion state**
+- [x] **Step 4: Validate every binding and completion state**
 
 For each file, parse the envelope, load the index whose exact ID appears in the
 envelope, and build the `ProviderPolicyEvidence` records from the same
@@ -1720,7 +1720,7 @@ ChatAnywhere nested assessments always fail complete validation only at that
 field. Assert two initial manifests, zero successors, zero provider calls, no
 Task 10 outputs, private modes, and Git-ignore coverage.
 
-- [ ] **Step 5: Update and commit the sanitized result**
+- [x] **Step 5: Update and commit the sanitized result**
 
 Record the actual branch without exposing the account setting: either
 `deepseek_assessments: complete (2)` or `deepseek_assessments: unsigned (2)`;

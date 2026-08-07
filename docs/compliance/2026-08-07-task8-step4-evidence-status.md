@@ -1,5 +1,19 @@
 # Task 8 Step 4 Evidence Status
 
+## Scope 1 assessments
+
+- evidence_indexes: `2`
+- deepseek_index_entries: `11`
+- chatanywhere_index_entries: `12`
+- deepseek_assessments: `complete (2)`
+- chatanywhere_assessments: `unsigned (2)`
+- conclusion_gate: `api_policy_evidence`
+- account_setting_role: `optional_context`
+- successor_count: `0`
+- provider_calls: `0`
+- task10_decision: `not_recorded`
+- route_eligibility: `extend`
+
 ## 3GPP TS 38.300
 
 - download_url: `https://www.3gpp.org/ftp/Specs/archive/38_series/38.300/38300-ia0.zip`
