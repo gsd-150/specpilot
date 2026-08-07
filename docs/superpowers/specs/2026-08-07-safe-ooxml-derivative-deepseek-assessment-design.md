@@ -22,10 +22,10 @@ that only one of them is blocked:
    below and must be recorded before Scope 2 begins.
 
 Three engineering reductions also follow from review and are folded in:
-directory-bundle atomicity replaced by the existing link primitive, the
+directory-bundle atomicity replaced by the existing link primitive and the
 cross-environment byte-determinism promise downgraded to what the dependency
-lock can actually support, and the `model_slug` disagreement with the product
-plan raised rather than silently resolved.
+lock can actually support. Scope 1 also records the resolved ChatAnywhere
+`glm-5.2` route and hash-bound evidence identity.
 
 ## Blocking evidence
 
@@ -66,8 +66,11 @@ The author made these decisions explicitly:
    `2026-09-05T20:00:00Z`.
 3. Apply the conclusion independently to both TS 38.300 v18.10.0 and
    TS 38.321 v18.10.0.
-4. Leave both ChatAnywhere assessments without an `author_conclusion`.
-5. Do not create an authorized successor manifest in this scope. Default deny
+4. Use the resolved ChatAnywhere judge route: `provider_id=chatanywhere`,
+   `endpoint_purpose=offline-judge-glm-5-2-api`, `use=offline_judge`, and
+   `model_slug=glm-5.2`.
+5. Leave both ChatAnywhere assessments without an `author_conclusion`.
+6. Do not create an authorized successor manifest in this scope. Default deny
    remains active and Task 10's only eligible result remains `extend`.
 
 The authorization statement is copied byte-for-byte into each selected DeepSeek
@@ -93,26 +96,18 @@ parsing, not JSON lexical formatting; leading or trailing whitespace is
 forbidden rather than silently accepted.
 
 This remains the author's self-assessment. Schema validation and implementation
-review do not constitute external approval or legal advice. No tool may write,
-infer, alter, or upgrade a conclusion; it may only copy the bytes above and
-refuse when a gate fails.
+review do not constitute external approval or legal advice. Only after every
+evidence, policy, and observed-account gate passes may a tool mechanically copy
+the exact confirmed DeepSeek conclusion. It may not write, infer, paraphrase,
+alter, or upgrade that conclusion; source and policy prose remain text the
+author supplied or confirmed.
 
-## Open item the author must resolve: `model_slug`
+## Resolved Scope 1 routes
 
-The product plan names **`gpt-5.6-luna`** as the scorer, in five places
-including a full argument for the choice (§8.3 and the change record). The first
-draft of this spec named **`glm-5.2`** for the ChatAnywhere route without
-recording that as a change.
-
-Both are outside the DeepSeek family, so the "different vendor from the main
-chain" property that §8.3 relies on survives either way. But §8.3 argues for a
-specific slug, and a silent swap leaves that argument pointing at a choice
-nobody made.
-
-**Scope 1 cannot finalize the two ChatAnywhere envelopes until the author states
-which slug is correct and the losing document is updated.** The two DeepSeek
-envelopes are unaffected: `deepseek-v4-flash` is consistent across both
-documents.
+| Route | `provider_id` | `endpoint_purpose` | `use` | `model_slug` |
+| --- | --- | --- | --- | --- |
+| DeepSeek main chain | `deepseek` | `online-main-deepseek-v4-flash-api` | `online_main` | `deepseek-v4-flash` |
+| ChatAnywhere judge | `chatanywhere` | `offline-judge-glm-5-2-api` | `offline_judge` | `glm-5.2` |
 
 ## Source-bound assessment envelope
 
@@ -122,7 +117,8 @@ identify a source. Every Task 8 file therefore uses a separate
 
 - `source_manifest_id`, naming one stored initial source manifest;
 - `route_binding`, containing `provider_id`, `endpoint_purpose`, and `use`;
-- `model_slug`, matched to the hash-bound evidence index;
+- `model_slug`, matched to the evidence index's canonical model slug;
+- `evidence_index_id`, the canonical SHA-256 ID of that exact evidence index;
 - `assessment`, containing `source_terms`, `provider_policy`, `outbound_limit`,
   and an optional `author_conclusion` while it is a draft.
 
@@ -130,24 +126,25 @@ In Scope 1 the manifest is a source-manifest/v1 and there is no derivation
 record. Scope 2 adds a `derivation_record_id` field and the v2 binding; the
 envelope schema is designed so that addition is additive.
 
-Envelope validation resolves the stored manifest, checks its ID and origin
-hashes, and checks that a present conclusion names the exact envelope route.
-Source identity is never inferred from a filename or prose summary. This is the
-check that stops an assessment being swapped between documents, routes, or
-models, and it is cheap enough to be worth doing regardless of how the route
-decision goes.
+Envelope validation resolves the stored canonical initial-v1 manifest by
+`source_manifest_id`; that resolution verifies the origin hashes already bound
+into the manifest ID. The envelope does not duplicate origin fields. Validation
+also checks the canonical evidence-index ID, its route and model slug, and that
+a present conclusion names the exact envelope route. Source, route, model, and
+index identity are never inferred from a filename or prose summary. This stops
+an assessment being swapped between documents, routes, models, or evidence.
 
 `model_slug` is an evidence binding, not an egress authorization. The manifest
 and enforcer still lack a route-to-model allowlist.
 
 ## Scope 1 gates
 
-The two DeepSeek envelopes become complete only when both have hash-bound
-`status=observed` personal-account evidence. Otherwise they remain drafts. If
-account evidence cannot establish the policy and settings applicable to the
-personal DeepSeek account, generation stops before adding the conclusion; it
-never fabricates or infers an account state. A `blocked` or `not_captured`
-record leaves both DeepSeek envelopes unsigned.
+Exactly two DeepSeek envelopes become complete only when both have hash-bound
+`status=observed` personal-account evidence and every other gate passes.
+Otherwise both remain unsigned. If account evidence cannot establish the policy
+and settings applicable to the personal DeepSeek account, generation stops
+before adding the conclusion; it never fabricates or infers an account state. A
+`blocked` or `not_captured` record leaves both DeepSeek envelopes unsigned.
 
 The two ChatAnywhere envelopes always remain valid drafts without a conclusion
 in this scope, and their nested assessment objects must fail complete
@@ -184,7 +181,6 @@ These are facts the tooling cannot supply and must not invent:
   `subprocessor_summary`, and every `uncertainty` entry. These are the author's
   own paraphrase of pages the author read; a generated summary would make
   `author_id` name someone who did not form the view.
-- The `model_slug` decision above.
 - The personal-account evidence capture.
 
 ---
@@ -567,8 +563,9 @@ or a raw relationship target.
 - In the successful observed-account path, validate the two DeepSeek files as
   complete `ComplianceAssessment` objects; in blocked or not-captured paths,
   validate that both remain drafts missing only `author_conclusion`.
-- Resolve each envelope's stored manifest and verify every structured binding
-  and origin hash.
+- Resolve each envelope's stored canonical initial-v1 manifest and verify every
+  structured binding; the manifest ID resolution verifies its already-bound
+  origin hashes without duplicating origin fields in the envelope.
 - Verify the statement is exactly 268 UTF-8 bytes with SHA-256
   `b88021706a85f89dd98aa91e2233a404a1396f8f2a831fc33e6686f31fadc215`, and verify
   the author ID, normalized route IDs, and normalized timestamps.
@@ -595,9 +592,9 @@ not recharacterize the author's conclusion as external approval.
   tests. It touches no ingestion code.
 - Scope 2 adds the derivation policy, analyzer and transformer, provenance
   contract, initial-v2 manifest support, CLI, and tests.
-- Extend the restricted evidence-index route identity with the exact
-  `model_slug` once the author resolves which slug is correct, preserving its
-  canonical content addressing.
+- Extend the restricted evidence-index canonical shape with the resolved exact
+  `model_slug`, and bind each envelope to that index through
+  `evidence_index_id`.
 - Amend the earlier Task 8 assessment design and the evidence implementation
   plan. The earlier blanket prohibition on `author_conclusion` is superseded
   only for mechanically copying the exact author-provided conclusion into the
