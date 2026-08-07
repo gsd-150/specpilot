@@ -33,6 +33,10 @@ class UnsupportedManifestVersionError(ValueError):
     """Raised when a readable manifest declares an unsupported schema version."""
 
 
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 class ManifestStore:
     """Create-only storage for canonical, content-addressed source manifests."""
 
@@ -214,8 +218,11 @@ class ManifestStore:
     @staticmethod
     def _decode_canonical(data: bytes, expected_id: str) -> SourceManifest:
         try:
-            raw_manifest = json.loads(data)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_manifest = json.loads(
+                data,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError):
             pass
         else:
             if (

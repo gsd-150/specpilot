@@ -206,3 +206,23 @@ def test_a_malformed_predecessor_is_not_an_unsupported_version(
     assert code == 2
     assert out == ""
     assert err == "manifest_not_found\n"
+
+
+def test_a_nonstandard_json_predecessor_is_not_an_unsupported_version(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    run_cli,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_id = "d" * 64
+    manifest_path = manifest_dir / f"{manifest_id}.json"
+    manifest_path.write_bytes(b'{"schema_version":"source-manifest/v2","extra":NaN}')
+    manifest_path.chmod(0o600)
+    evidence = write_assessment(tmp_path)
+
+    code, out, err = run_cli(authorize_args(tmp_path, manifest_id, evidence), capsys)
+
+    assert code == 2
+    assert out == ""
+    assert err == "manifest_not_found\n"
