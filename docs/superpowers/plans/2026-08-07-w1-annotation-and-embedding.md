@@ -227,7 +227,7 @@ an adjudication record. Assert no question or clause text appears in the output.
 - Produces: `embedding_cache_key(weights_sha256, pipeline_version, text_sha256)`
   and a sampled measurement command.
 
-- [ ] **Step 1: Write failing cache-key and estimate tests**
+- [x] **Step 1: Write failing cache-key and estimate tests**
 
 Assert the cache key changes when any of the three inputs changes, so a
 re-chunk or a weight swap cannot silently reuse stale vectors. Assert the
@@ -235,17 +235,22 @@ full-corpus estimate is derived from the measured rate and the real clause
 count, and that requesting an estimate without a measurement raises rather than
 guessing.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement measurement over a sample**
+- [x] **Step 3: Implement measurement over a sample**
 
 Measure MPS and CPU separately on the target machine. Record weight hash,
 device, batch size, sample size, and observed rate. No model weights, vectors,
 or clause text enter Git.
 
-- [ ] **Step 4: Record the measurement and derive the estimate**
+- [x] **Step 4: Record the measurement and derive the estimate**
 
 Only now may a full-corpus encoding time be written down anywhere, per §7.
+Recorded in `../../reports/w1-embedding-throughput.md`: **40–90 s for the whole
+1474-clause corpus on this machine**, measured end to end rather than
+extrapolated. Batch order turned out to matter more than batch size — grouping
+clauses by length before batching cuts padding waste from 60% to 16% and raises
+MPS throughput from 20.3 to 39.2 clauses per second.
 
 ---
 
