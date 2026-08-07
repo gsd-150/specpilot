@@ -150,6 +150,15 @@ entry's document hash, URL, and capture time matching a supplied
 conclusion's `authored_at`, and every other gate passing. Otherwise both remain
 unsigned. Generation never fabricates or infers a provider policy state.
 
+The three required kinds do not all carry data-handling text. The captured
+`deepseek-api-docs` page is the API quickstart: it establishes route and model
+identity — that `deepseek-v4-flash` was a documented production slug at
+`https://api.deepseek.com` when the conclusion was authored — and nothing about
+retention, training, region, or subprocessors. It stays required because
+authorizing a route means binding proof that the route existed as described;
+its `scope` entry must say so plainly, and the data-handling premise rests on
+`deepseek-terms` and `deepseek-privacy`.
+
 The gate binds API-governing documents rather than an account toggle on
 purpose. The conclusion authorizes an API route; a data-use switch inside a
 provider's consumer chat product governs a different surface, so it cannot
