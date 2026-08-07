@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 from collections.abc import Sequence
@@ -30,14 +31,22 @@ from specpilot.contracts.manifests import (
     ComplianceAssessment,
     ProviderRouteBinding,
     ProviderUse,
+    RfcSourceManifest,
     SourceManifest,
     SourceManifestDraft,
+)
+from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
+from specpilot.corpus.clauses import (
+    ClauseLimits,
+    OversizedClauseError,
+    build_clauses,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
+from specpilot.rfc.structure import extract_structure
 
 # Exit codes, matching the ingestion worker: 2 is a refused input or policy
 # violation, 3 is an I/O fault, 4 is bad usage. Every non-zero exit prints one
@@ -183,6 +192,58 @@ def _manifest_authorize(arguments: argparse.Namespace) -> int:
             "provider_id": binding.provider_id,
             "endpoint_purpose": binding.endpoint_purpose,
             "use": binding.use.value,
+        }
+    )
+
+
+def _corpus_parse(arguments: argparse.Namespace) -> int:
+    """Parse one frozen specification, reporting counts and never its text.
+
+    The manifest is the authority on which bytes are the corpus. A file that
+    hashes differently is a different document, whatever its filename says, so
+    it is refused before the parser ever sees it.
+    """
+    store = ManifestStore(arguments.manifest_dir)
+    try:
+        manifest = store.read_source(arguments.manifest)
+    except UnsupportedManifestVersionError:
+        return _refuse("unsupported_manifest_version")
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("manifest_not_found")
+
+    if not isinstance(manifest, RfcSourceManifest):
+        # A DOCX-shaped manifest describes a different corpus; it has no XML
+        # rendition to be the authority for.
+        return _refuse("unsupported_manifest_version")
+
+    try:
+        actual = hashlib.sha256(arguments.xml.read_bytes()).hexdigest()
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    if actual != manifest.xml_sha256:
+        return _refuse("document_hash_mismatch")
+
+    try:
+        structure = extract_structure(arguments.xml, RfcLimits())
+        clauses = build_clauses(arguments.xml, RfcLimits(), ClauseLimits())
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "parsed",
+            "document_id": manifest.document_id,
+            "document_version": manifest.document_version,
+            "source_manifest_id": manifest.manifest_id,
+            "xml_sha256": structure.document_sha256,
+            "section_count": structure.section_count,
+            "clause_count": len(clauses),
+            "cross_reference_count": len(structure.cross_references),
+            "dangling_cross_references": structure.dangling_count,
         }
     )
 
@@ -608,6 +669,15 @@ def _parser() -> argparse.ArgumentParser:
     route.add_argument("--route", choices=["main", "judge"], required=True)
     route.add_argument("--ledger-dsn", default=None)
     route.set_defaults(handler=_route_smoke)
+
+    corpus = commands.add_parser("corpus").add_subparsers(
+        dest="command", required=True
+    )
+    parse = corpus.add_parser("parse")
+    parse.add_argument("--manifest", required=True)
+    parse.add_argument("--manifest-dir", type=Path, required=True)
+    parse.add_argument("--xml", type=Path, required=True)
+    parse.set_defaults(handler=_corpus_parse)
 
     return parser
 

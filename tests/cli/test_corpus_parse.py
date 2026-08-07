@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from specpilot.cli import main
+from specpilot.contracts.manifests import RfcSourceManifestDraft
+from specpilot.manifests.store import ManifestStore
+from tests.helpers import rfc_factory
+
+
+@pytest.fixture
+def corpus(tmp_path: Path) -> Path:
+    directory = tmp_path / "corpus"
+    directory.mkdir(mode=0o700)
+    return directory
+
+
+def stored_manifest(tmp_path: Path, xml: Path) -> tuple[Path, str]:
+    directory = tmp_path / "manifests"
+    manifest = ManifestStore(directory).create_source_v2(
+        RfcSourceManifestDraft(
+            document_id="ietf-rfc-9999",
+            document_version="2026-08",
+            text_url="https://www.rfc-editor.org/rfc/rfc9999.txt",
+            xml_url="https://www.rfc-editor.org/rfc/rfc9999.xml",
+            text_sha256="a" * 64,
+            xml_sha256=hashlib.sha256(xml.read_bytes()).hexdigest(),
+            downloaded_at="2026-08-07T09:00:00Z",
+            created_at="2026-08-07T09:01:00Z",
+        )
+    )
+    return directory, manifest.manifest_id
+
+
+def test_one_command_parses_one_specification(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W1's hard gate from product plan section 12."""
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+
+    code = main(
+        [
+            "corpus",
+            "parse",
+            "--manifest",
+            manifest_id,
+            "--manifest-dir",
+            str(directory),
+            "--xml",
+            str(xml),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "parsed"
+    assert payload["document_id"] == "ietf-rfc-9999"
+    assert payload["section_count"] >= 1
+    assert payload["clause_count"] >= 1
+    assert payload["cross_reference_count"] >= 1
+    assert payload["dangling_cross_references"] == 0
+
+
+def test_the_parse_output_carries_no_clause_text(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+
+    main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert "This paragraph exists" not in captured.out
+    assert "Introduction" not in captured.out
+
+
+def test_a_document_that_is_not_the_frozen_one_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The manifest froze specific bytes; anything else is a different document."""
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+    xml.write_text(
+        rfc_factory.SAFE_RFC_XML.replace("Introduction", "Introduction "),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_hash_mismatch\n"
+
+
+def test_a_hostile_document_is_refused_with_its_boundary_code(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write(
+        corpus, "hostile.xml", rfc_factory.EXTERNAL_ENTITY_XML
+    )
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "external_entity\n"
+
+
+def test_a_v1_manifest_cannot_stand_in_for_an_rfc_source(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A DOCX-shaped manifest describes a different corpus entirely."""
+    from specpilot.contracts.manifests import SourceManifestDraft
+
+    xml = rfc_factory.write_safe(corpus)
+    directory = tmp_path / "manifests"
+    v1 = ManifestStore(directory).create_source(
+        SourceManifestDraft(
+            document_id="3gpp-ts-38.300",
+            document_version="18.10.0",
+            download_url="https://www.3gpp.org/x.zip",
+            archive_sha256="a" * 64,
+            docx_sha256="b" * 64,
+            downloaded_at="2026-08-06T20:23:31Z",
+            created_at="2026-08-07T04:55:01Z",
+        )
+    )
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", v1.manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "unsupported_manifest_version\n"
+
+
+def test_a_missing_manifest_refuses_without_parsing(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, _ = stored_manifest(tmp_path, xml)
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", "0" * 64,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "manifest_not_found\n"

@@ -175,18 +175,18 @@ clause ID.
 This is W1's hard gate from product plan §12: *one specification parses with one
 command.*
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Assert the command resolves a stored v2 manifest, verifies the document hash
 against the manifest before parsing, and prints section, clause, and
 cross-reference counts with no clause text. Assert a hash mismatch refuses with
 a stable code and parses nothing.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, reusing R0's boundary rather than re-parsing loosely**
+- [x] **Step 3: Implement, reusing R0's boundary rather than re-parsing loosely**
 
-- [ ] **Step 4: Verify GREEN on both frozen sources**
+- [x] **Step 4: Verify GREEN on both frozen sources**
 
 ---
 
