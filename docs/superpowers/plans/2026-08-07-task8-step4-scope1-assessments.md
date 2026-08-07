@@ -953,46 +953,174 @@ the author confirms the newly captured exact TS 38.321 `download_url` and
 
 - [ ] **Step 3: Inspect each source independently**
 
-Run the existing inspector for 38.321. If it accepts, retain the DOCX in the
-accepted location. If it refuses, record the stable code, verify the fresh
-extracted path, and no-replace move only that new file into the dedicated 38.321
-quarantine directory. In both cases compute the DOCX SHA-256. Re-run the 38.300
-inspector only against a private temporary extraction and assert its known
-`embedded_active_content` refusal; do not alter retained files.
+The 38.321 inspection paths are mutually exclusive. Select the
+observed-interrupted/recovery branch only when Step 1 and the reviewed recovery
+branch established the existing `inspection.json` and quarantined DOCX. That
+branch verifies both artifacts read-only and skips the inspector and every
+publication operation. Select the fresh-publication branch only when both
+artifacts, the accepted path, and transient stderr are absent. The presence of
+only one recovery artifact, any symlink at an absent-state path, or any other
+mixed state is an error and must stop before inspection.
 
-Run 38.321 with captured exit/output and branch only on the observed result:
+Run this discriminator and exactly one branch:
 
 ```bash
+set -euo pipefail
 umask 077
-mkdir -p data/quarantine/3gpp/38.321
-chmod 700 data/quarantine/3gpp/38.321
-test ! -e data/quarantine/3gpp/38.321/inspection.stderr
-test ! -L data/quarantine/3gpp/38.321/inspection.stderr
-set +e
-inspection_out="$(.venv/bin/python -m specpilot.cli archive inspect \
-  --archive artifacts/restricted/sources/3gpp/38.321/18.10.0/38321-ia0.zip \
-  --destination data/real/3gpp/38.321/18.10.0 \
-  --quarantine data/quarantine/3gpp/38.321 \
-  --expect-docx 38321-ia0.docx 2>data/quarantine/3gpp/38.321/inspection.stderr)"
-inspection_code=$?
-set -e
-if test "$inspection_code" -eq 0; then
-  test -n "$inspection_out"
-  test ! -s data/quarantine/3gpp/38.321/inspection.stderr
-elif test "$inspection_code" -eq 2; then
-  test -z "$inspection_out"
-  test "$(wc -l < data/quarantine/3gpp/38.321/inspection.stderr | tr -d ' ')" = 1
+source_dir=artifacts/restricted/sources/3gpp/38.321/18.10.0
+archive="$source_dir/38321-ia0.zip"
+inspection="$source_dir/inspection.json"
+quarantine_dir=data/quarantine/3gpp/38.321
+quarantined="$quarantine_dir/38321-ia0.docx"
+accepted=data/real/3gpp/38.321/18.10.0/38321-ia0.docx
+inspection_stderr="$quarantine_dir/inspection.stderr"
+
+recovery_present=0
+if test -e "$inspection" || test -L "$inspection" || \
+   test -e "$quarantined" || test -L "$quarantined"; then
+  recovery_present=1
+fi
+
+if test "$recovery_present" -eq 1; then
+  # Observed interrupted/recovery state: read-only verification only.
+  test -d "$quarantine_dir"
+  test ! -L "$quarantine_dir"
+  test "$(/usr/bin/stat -f '%Lp' "$quarantine_dir")" = 700
+  test "$(/usr/bin/stat -f '%Su' "$quarantine_dir")" = "$(id -un)"
+  test -f "$inspection"
+  test ! -L "$inspection"
+  test "$(/usr/bin/stat -f '%Lp' "$inspection")" = 600
+  test "$(/usr/bin/stat -f '%Su' "$inspection")" = "$(id -un)"
+  test "$(shasum -a 256 "$inspection" | awk '{print $1}')" = \
+    4c21359dbc68fe0f45fcb89b3d105ce3cad37b6fc956464d28735d3de59a6d9c
+  test "$(wc -c < "$inspection" | tr -d ' ')" = 136
+  .venv/bin/python - "$inspection" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {
+    "inspection_code": "embedded_active_content",
+    "docx_sha256": "6c98d03d5c3936c251edaa4148e3536bff80addc918c8a5416624aeda82ab9ff",
+}
+if value != expected:
+    raise SystemExit("unexpected 38.321 recovery inspection record")
+PY
+  test -f "$quarantined"
+  test ! -L "$quarantined"
+  test "$(/usr/bin/stat -f '%Lp' "$quarantined")" = 600
+  test "$(/usr/bin/stat -f '%Su' "$quarantined")" = "$(id -un)"
+  test "$(shasum -a 256 "$quarantined" | awk '{print $1}')" = \
+    6c98d03d5c3936c251edaa4148e3536bff80addc918c8a5416624aeda82ab9ff
+  test "$(wc -c < "$quarantined" | tr -d ' ')" = 3857056
+  test ! -e "$accepted"
+  test ! -L "$accepted"
+  test ! -e "$inspection_stderr"
+  test ! -L "$inspection_stderr"
+  printf '%s\n' 'inspection_branch=observed_recovery_read_only'
 else
-  exit "$inspection_code"
+  # Fresh-publication state: inspect once, then complete the observed branch.
+  test ! -e "$inspection"
+  test ! -L "$inspection"
+  test ! -e "$quarantined"
+  test ! -L "$quarantined"
+  test ! -e "$accepted"
+  test ! -L "$accepted"
+  test ! -e "$inspection_stderr"
+  test ! -L "$inspection_stderr"
+  if test -e "$quarantine_dir" || test -L "$quarantine_dir"; then
+    test -d "$quarantine_dir"
+    test ! -L "$quarantine_dir"
+    test "$(/usr/bin/stat -f '%Su' "$quarantine_dir")" = "$(id -un)"
+  else
+    test ! -L "$quarantine_dir"
+    mkdir -p "$quarantine_dir"
+  fi
+  chmod 700 "$quarantine_dir"
+  test -d "$quarantine_dir"
+  test ! -L "$quarantine_dir"
+  test "$(/usr/bin/stat -f '%Lp' "$quarantine_dir")" = 700
+  test "$(/usr/bin/stat -f '%Su' "$quarantine_dir")" = "$(id -un)"
+  inspection_attempt_pending=1
+  trap 'if test "${inspection_attempt_pending:-0}" = 1; then if test -e "$accepted" || test -L "$accepted"; then printf "%s\n" "TASK3_STEP3_UNVALIDATED_EXTRACTION_RECOVERY_REQUIRED" "preserve accepted=$accepted stderr=$inspection_stderr exactly as found" "do not rerun or delete; record path identities, hashes, and inspection_code=${inspection_code:-not_captured} before reconciliation" >&2; fi; fi' EXIT
+  trap 'exit 128' HUP INT TERM
+  set +e
+  inspection_out="$(.venv/bin/python -m specpilot.cli archive inspect \
+    --archive "$archive" \
+    --destination data/real/3gpp/38.321/18.10.0 \
+    --quarantine "$quarantine_dir" \
+    --expect-docx 38321-ia0.docx 2>"$inspection_stderr")"
+  inspection_code=$?
+  set -e
+  if test "$inspection_code" -eq 0; then
+    test -n "$inspection_out"
+    test ! -s "$inspection_stderr"
+    test -f "$accepted"
+    test ! -L "$accepted"
+    test ! -e "$quarantined"
+    test ! -L "$quarantined"
+    /bin/rm -- "$inspection_stderr"
+    test ! -e "$inspection_stderr"
+    test ! -L "$inspection_stderr"
+    printf '%s\n' 'inspection_branch=fresh_accepted'
+    inspection_attempt_pending=0
+    trap - EXIT HUP INT TERM
+  elif test "$inspection_code" -eq 2; then
+    # From this point, every failure preserves exact state and prints the
+    # recovery instruction instead of rerunning or deleting evidence.
+    fresh_refusal_pending=1
+    inspection_attempt_pending=0
+    trap 'if test "${fresh_refusal_pending:-0}" = 1; then printf "%s\n" "TASK3_STEP3_FRESH_REFUSAL_RECOVERY_REQUIRED" "preserve fresh=$accepted quarantined=$quarantined stderr=$inspection_stderr exactly as found" "do not rerun, move, overwrite, or delete; record path identities and hashes, then resume link-before-unlink reconciliation" >&2; fi' EXIT
+    trap 'exit 128' HUP INT TERM
+    test -z "$inspection_out"
+    test "$(wc -l < "$inspection_stderr" | tr -d ' ')" = 1
+    refusal_code="$(/bin/cat "$inspection_stderr")"
+    test "$refusal_code" = embedded_active_content
+    test -f "$accepted"
+    test ! -L "$accepted"
+    test ! -e "$quarantined"
+    test ! -L "$quarantined"
+    chmod 600 "$accepted"
+    docx_sha="$(shasum -a 256 "$accepted" | awk '{print $1}')"
+    test "$docx_sha" = \
+      6c98d03d5c3936c251edaa4148e3536bff80addc918c8a5416624aeda82ab9ff
+    ln "$accepted" "$quarantined"
+    test -f "$quarantined"
+    test ! -L "$quarantined"
+    test "$(/usr/bin/stat -f '%d:%i' "$accepted")" = \
+      "$(/usr/bin/stat -f '%d:%i' "$quarantined")"
+    test "$(shasum -a 256 "$accepted" | awk '{print $1}')" = \
+      "$(shasum -a 256 "$quarantined" | awk '{print $1}')"
+    /bin/rm -- "$accepted"
+    test ! -e "$accepted"
+    test ! -L "$accepted"
+    printf 'inspection_branch=fresh_refused\ninspection_code=%s\ndocx_sha256=%s\n' \
+      "$refusal_code" "$docx_sha"
+    fresh_refusal_pending=0
+    trap - EXIT HUP INT TERM
+  else
+    exit "$inspection_code"
+  fi
 fi
 ```
 
-After extracting the stable refusal code into `inspection.json`, remove the
-temporary stderr file. For 38.300, use this exact macOS-safe temporary-root
-sequence. On macOS, `/var` is a symlink to `/private/var`; the secure path
-walker correctly refuses symlinked parent components, so pass only canonical
-`tmp_root` children to the inspector. Do not change product code or weaken
-`O_NOFOLLOW` behavior.
+For a fresh refusal, use `apply_patch` immediately after the successful
+link-before-unlink branch to write the printed stable refusal code and DOCX hash
+into a new `0600` restricted `inspection.json`; validate its exact content,
+owner, regular-file/non-symlink state, then remove only the exact transient
+stderr file. If that metadata step stops, preserve the quarantined DOCX and
+stderr exactly as found and resume metadata-only reconciliation—never rerun the
+inspector. The inspection record contains no document text, relationship
+target, or unrestricted path.
+
+After either mutually exclusive 38.321 branch completes, re-run the 38.300
+inspector only against a private temporary extraction and assert its known
+`embedded_active_content` refusal; do not alter retained files. Use this exact
+macOS-safe temporary-root sequence. On macOS, `/var` is a symlink to
+`/private/var`; the secure path walker correctly refuses symlinked parent
+components, so pass only canonical `tmp_root` children to the inspector. Do not
+change product code or weaken `O_NOFOLLOW` behavior.
 
 ```bash
 set -euo pipefail
@@ -1042,26 +1170,6 @@ The sole recursive removal above is the already revalidated exact canonical
 `tmp_root`, a direct child of the canonical current temporary directory; both
 the raw `/var/...` spelling and canonical `/private/var/...` spelling must be
 absent afterward.
-
-For a 38.321 refusal, use exact paths and link-before-unlink publication:
-
-```bash
-fresh=data/real/3gpp/38.321/18.10.0/38321-ia0.docx
-quarantined=data/quarantine/3gpp/38.321/38321-ia0.docx
-test -f "$fresh"
-test ! -L "$fresh"
-test ! -e "$quarantined"
-test ! -L "$quarantined"
-chmod 600 "$fresh"
-ln "$fresh" "$quarantined"
-test "$(shasum -a 256 "$fresh" | awk '{print $1}')" = \
-  "$(shasum -a 256 "$quarantined" | awk '{print $1}')"
-rm -f -- "$fresh"
-```
-
-Write the inspection code and DOCX hash into a `0600` restricted
-`inspection.json` beside `source-capture.json`; it contains no document text,
-relationship target, or unrestricted path.
 
 - [ ] **Step 4: Apply the author-fact gate and create manifests**
 
