@@ -75,8 +75,48 @@ evidenced on the target hardware.
 
 ### Route C — compatible corpus
 
-Allowed only when the cloud-egress conclusion is **no** and the target hardware
-cannot sustain B. Write a new RFC-specific design and plan before W1 starts.
+Allowed when **either** holds:
+
+- The cloud-egress conclusion is **no** and the target hardware cannot sustain B.
+- **The chosen corpus cannot be safely ingested.** This is a separate trigger
+  from the compliance conclusion, and the original table missed it: a source may
+  be perfectly permitted to use and still be refused by the ingestion boundary
+  on its own merits. TS 38.300 v18.10.0 is exactly this case — its DOCX carries
+  119 embedded OLE objects and an external `attachedTemplate` relationship, and
+  `inspect_docx` refuses it with `embedded_active_content`. That refusal is
+  correct and is not a compliance question.
+
+Write a new RFC-specific design and plan before W1 starts.
+
+Product plan §3.2 pre-registered IETF RFC for this reason among others, in its
+own words: plain text or XML distribution, which *省掉整套 OOXML 沙箱风险面* —
+it removes the entire OOXML sandbox risk surface. That risk surface is now
+measured rather than hypothetical, which strengthens the case rather than
+weakening it.
+
+Before choosing C, check the cheaper variants of the same idea in this order,
+because each takes about an hour:
+
+1. A different 3GPP specification whose DOCX carries no embedded objects.
+2. The ETSI PDF or the 3GPP HTML rendering of the same specification.
+
+Either keeps the telecom-specification narrative that C otherwise gives up.
+
+### Route D — reviewed derivative
+
+Build a separately reviewed, content-addressed derivative of the refused source
+under ADR 0001, and ingest that instead of the original.
+
+**Do not choose D without pricing it against C first.** D is a new subsystem —
+an OPC graph analyzer, a deterministic transformer, a provenance record, and a
+manifest schema version — comparable in size to all of W0. It is only the right
+answer when the specific corpus is genuinely irreplaceable for the project's
+narrative and options 1 and 2 above have both been tried and recorded as
+failing.
+
+Choosing D does not move W0 to a pass. The derivative unblocks parsing; it does
+not create an authorized route, and Task 10 still records `extend` until a
+successor manifest exists.
 
 ### extend
 
