@@ -65,6 +65,26 @@ def test_manifest_id_is_content_addressed_and_input_order_independent() -> None:
     assert len(first) == 64
 
 
+def test_source_manifest_v1_canonical_bytes_and_id_remain_unchanged() -> None:
+    manifest = build_initial_source_manifest()
+
+    assert manifest.manifest_id == (
+        "df5c1ba5c1f6c90555adb9b190443553b6c877740d94168367fdfc100561fd37"
+    )
+    assert canonical_json(manifest, include_manifest_id=True) == (
+        b'{"archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"cloud_egress_authorized":false,"compliance_assessment":null,'
+        b'"created_at":"2026-08-06T01:31:00Z","document_id":"iso-9001",'
+        b'"document_version":"2026-edition",'
+        b'"docx_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+        b'"download_url":"https://example.com/standards/iso-9001.zip",'
+        b'"downloaded_at":"2026-08-06T01:30:00Z",'
+        b'"manifest_id":"df5c1ba5c1f6c90555adb9b190443553b6c877740d94168367fdfc100561fd37",'
+        b'"predecessor_manifest_id":null,"provider_route_binding":null,'
+        b'"schema_version":"source-manifest/v1"}'
+    )
+
+
 def test_canonicalization_normalizes_urls_and_timestamps() -> None:
     first = SourceManifestDraft(**initial_fields())
     alternative_fields = initial_fields()

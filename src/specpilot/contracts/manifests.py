@@ -121,6 +121,15 @@ class AuthorizationConclusion(_FrozenModel):
     authored_at: datetime
     expires_at: datetime
 
+    @field_validator("authorization_statement", mode="before")
+    @classmethod
+    def _reject_boundary_whitespace(cls, value: object) -> str:
+        if not isinstance(value, str) or value != value.strip():
+            raise ValueError(
+                "authorization_statement must be a boundary-whitespace-free string"
+            )
+        return value
+
     @field_validator("authored_at", "expires_at", mode="before")
     @classmethod
     def _normalize_timestamp(
