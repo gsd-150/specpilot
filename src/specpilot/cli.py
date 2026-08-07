@@ -30,6 +30,7 @@ from specpilot.contracts.manifests import (
     ComplianceAssessment,
     ProviderRouteBinding,
     ProviderUse,
+    SourceManifest,
     SourceManifestDraft,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
@@ -149,6 +150,11 @@ def _manifest_authorize(arguments: argparse.Namespace) -> int:
             arguments.assessment.read_text(encoding="utf-8")
         )
     except (ValidationError, OSError, ValueError):
+        return _refuse("invalid_authorization_evidence")
+
+    # Successors currently exist only for v1 sources. Anything else is refused
+    # rather than coerced, so a corpus change can never silently authorize one.
+    if not isinstance(predecessor, SourceManifest):
         return _refuse("invalid_authorization_evidence")
 
     binding = ProviderRouteBinding(

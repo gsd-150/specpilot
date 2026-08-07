@@ -95,33 +95,33 @@ format.
   assessment, and route-binding fields v1 carries.
 - Preserves: every v1 byte, ID, and public method signature.
 
-- [ ] **Step 1: Write the failing v1-preservation and v2 tests**
+- [x] **Step 1: Write the failing v1-preservation and v2 tests**
 
 Assert first that a golden v1 draft still produces its exact canonical bytes and
 manifest ID. Then assert v2 rejects `archive_sha256` and `docx_sha256` as extra
 fields, requires both `text_sha256` and `xml_sha256`, is default-deny, and gets
 a different manifest ID from a v1 draft carrying otherwise identical values.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/unit/manifests -q`
 
 Expected: the v2 contract does not exist; v1 tests still pass.
 
-- [ ] **Step 3: Implement v2 beside v1**
+- [x] **Step 3: Implement v2 beside v1**
 
 Do not generalize v1 into a shared base whose field order could shift v1's
 canonical bytes. Define v2 separately and let the duplication stand — canonical
 byte stability outranks DRY here.
 
-- [ ] **Step 4: Teach the store both versions**
+- [x] **Step 4: Teach the store both versions**
 
 `read_source` dispatches on the declared `schema_version`: v1 to the existing
 path, v2 to the new contract, anything else still raises
 `UnsupportedManifestVersionError` with its stable CLI code. Create-only,
 no-replace, `0600`, fsync semantics are unchanged.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run: `.venv/bin/python -m pytest tests/unit/manifests tests/cli -q`,
 `.venv/bin/ruff check .`, `.venv/bin/mypy src`.

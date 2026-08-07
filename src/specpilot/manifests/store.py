@@ -8,12 +8,15 @@ import stat
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
 from pydantic import ValidationError
 
 from specpilot.contracts.manifests import (
     ComplianceAssessment,
     ProviderRouteBinding,
+    RfcSourceManifest,
+    RfcSourceManifestDraft,
     SourceManifest,
     SourceManifestDraft,
 )
@@ -24,6 +27,8 @@ from specpilot.ingestion._secure_fs import (
     revalidate_directory_path,
 )
 from specpilot.manifests.canonical import canonical_json
+
+_ManifestT = TypeVar("_ManifestT", SourceManifest, RfcSourceManifest)
 
 _MANIFEST_ID = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MANIFEST_BYTES = 256 * 1024
@@ -48,6 +53,11 @@ class ManifestStore:
             raise ValueError("create_source requires an initial manifest draft")
         return self._create(SourceManifest.from_draft(draft))
 
+    def create_source_v2(self, draft: RfcSourceManifestDraft) -> RfcSourceManifest:
+        if draft.predecessor_manifest_id is not None:
+            raise ValueError("create_source_v2 requires an initial manifest draft")
+        return self._create(RfcSourceManifest.from_draft(draft))
+
     def create_successor(
         self,
         predecessor: SourceManifest,
@@ -59,6 +69,8 @@ class ManifestStore:
         stored_predecessor = self.read_source(predecessor.manifest_id)
         if stored_predecessor != predecessor:
             raise ValueError("predecessor does not match the stored manifest")
+        if not isinstance(stored_predecessor, SourceManifest):
+            raise ValueError("create_successor requires a v1 predecessor")
 
         draft = SourceManifestDraft(
             schema_version=predecessor.schema_version,
@@ -76,7 +88,7 @@ class ManifestStore:
         )
         return self._create(SourceManifest.from_draft(draft))
 
-    def read_source(self, manifest_id: str) -> SourceManifest:
+    def read_source(self, manifest_id: str) -> SourceManifest | RfcSourceManifest:
         self._validate_manifest_id(manifest_id)
         require_secure_filesystem()
         directory_descriptor = open_directory_path(self._directory, create=False)
@@ -91,7 +103,7 @@ class ManifestStore:
         finally:
             os.close(directory_descriptor)
 
-    def _create(self, manifest: SourceManifest) -> SourceManifest:
+    def _create(self, manifest: _ManifestT) -> _ManifestT:
         data = canonical_json(manifest, include_manifest_id=True)
         if len(data) > _MAX_MANIFEST_BYTES:
             raise ValueError("manifest exceeds maximum storage size")
@@ -106,9 +118,9 @@ class ManifestStore:
     def _create_in_directory(
         self,
         directory_descriptor: int,
-        manifest: SourceManifest,
+        manifest: _ManifestT,
         data: bytes,
-    ) -> SourceManifest:
+    ) -> _ManifestT:
         destination_name = f"{manifest.manifest_id}.json"
         temporary_name: str | None = None
         published = False
@@ -159,7 +171,7 @@ class ManifestStore:
             if stored != data:
                 raise FileExistsError(self._directory / destination_name)
             decoded = self._decode_canonical(stored, manifest.manifest_id)
-            if decoded != manifest:
+            if decoded != manifest or not isinstance(decoded, type(manifest)):
                 raise FileExistsError(self._directory / destination_name)
             if not published and not replay:
                 raise FileExistsError(self._directory / destination_name)
@@ -216,7 +228,10 @@ class ManifestStore:
             os.close(file_descriptor)
 
     @staticmethod
-    def _decode_canonical(data: bytes, expected_id: str) -> SourceManifest:
+    def _decode_canonical(
+        data: bytes, expected_id: str
+    ) -> SourceManifest | RfcSourceManifest:
+        model: type[SourceManifest] | type[RfcSourceManifest] = SourceManifest
         try:
             raw_manifest = json.loads(
                 data,
@@ -225,16 +240,18 @@ class ManifestStore:
         except (UnicodeDecodeError, ValueError):
             pass
         else:
-            if (
-                isinstance(raw_manifest, dict)
-                and isinstance(raw_manifest.get("schema_version"), str)
-                and raw_manifest["schema_version"] != "source-manifest/v1"
+            if isinstance(raw_manifest, dict) and isinstance(
+                raw_manifest.get("schema_version"), str
             ):
-                raise UnsupportedManifestVersionError(
-                    "stored manifest has an unsupported schema version"
-                )
+                declared = raw_manifest["schema_version"]
+                if declared == "source-manifest/v2":
+                    model = RfcSourceManifest
+                elif declared != "source-manifest/v1":
+                    raise UnsupportedManifestVersionError(
+                        "stored manifest has an unsupported schema version"
+                    )
         try:
-            manifest = SourceManifest.model_validate_json(data)
+            manifest = model.model_validate_json(data)
         except ValidationError as error:
             raise ValueError("stored manifest is invalid") from error
         if manifest.manifest_id != expected_id:

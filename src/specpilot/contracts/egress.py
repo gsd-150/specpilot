@@ -15,6 +15,7 @@ from pydantic import (
 from specpilot.contracts.manifests import (
     Identifier,
     ProviderRouteBinding,
+    RfcSourceManifest,
     Sha256,
     SourceManifest,
 )
@@ -150,9 +151,15 @@ class TokenCounter(Protocol):
 
 
 class SourceManifestResolver(Protocol):
-    """Reads a stored source manifest by ID; never trusts a caller-supplied copy."""
+    """Reads a stored source manifest by ID; never trusts a caller-supplied copy.
 
-    def read_source(self, manifest_id: str) -> SourceManifest: ...
+    The return type spans every manifest version on purpose. Egress
+    authorization is a property of the recorded compliance decision, not of the
+    source document's file format, so the enforcer must not be able to tell a
+    DOCX corpus from an RFC one.
+    """
+
+    def read_source(self, manifest_id: str) -> SourceManifest | RfcSourceManifest: ...
 
 
 class DisclosureFact(_FrozenModel):

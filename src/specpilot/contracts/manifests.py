@@ -228,25 +228,17 @@ class SourceManifestDraft(_FrozenModel):
         return self
 
 
-class SourceManifest(SourceManifestDraft):
-    manifest_id: Sha256
+class _AuthorizationMixin:
+    """Shared egress-authorization behaviour for every source-manifest version.
 
-    @model_validator(mode="after")
-    def _verify_manifest_id(self) -> Self:
-        from specpilot.manifests.canonical import canonical_sha256
+    Methods are not serialized, so sharing them here cannot disturb any
+    version's canonical byte order. The fields stay duplicated per version
+    precisely because that order is what manifest IDs are derived from.
+    """
 
-        if self.manifest_id != canonical_sha256(self):
-            raise ValueError("manifest_id does not match canonical content")
-        return self
-
-    @classmethod
-    def from_draft(cls, draft: SourceManifestDraft) -> SourceManifest:
-        from specpilot.manifests.canonical import canonical_sha256
-
-        return cls(
-            manifest_id=canonical_sha256(draft),
-            **draft.model_dump(),
-        )
+    cloud_egress_authorized: StrictBool
+    compliance_assessment: ComplianceAssessment | None
+    provider_route_binding: ProviderRouteBinding | None
 
     def authorizes(self, route: ProviderRouteBinding, *, at: datetime) -> bool:
         """Return whether this manifest authorizes exactly ``route`` at ``at``."""
@@ -264,4 +256,114 @@ class SourceManifest(SourceManifestDraft):
             and conclusion.provider_id == route.provider_id
             and conclusion.endpoint_purpose == route.endpoint_purpose
             and conclusion.authored_at <= checked_at < conclusion.expires_at
+        )
+
+
+class RfcSourceManifestDraft(_FrozenModel):
+    """An IETF RFC source: no archive, no DOCX, two document renditions.
+
+    Defined separately from v1 rather than sharing a base class. A shared base
+    could reorder v1's fields and change canonical bytes that existing manifest
+    IDs are derived from, so the duplication below is deliberate.
+    """
+
+    schema_version: Literal["source-manifest/v2"] = "source-manifest/v2"
+    document_id: Identifier
+    document_version: Identifier
+    download_url: HttpsUrl
+    text_sha256: Sha256
+    xml_sha256: Sha256
+    downloaded_at: datetime
+    created_at: datetime
+    predecessor_manifest_id: Sha256 | None = None
+    cloud_egress_authorized: StrictBool = False
+    compliance_assessment: ComplianceAssessment | None = None
+    provider_route_binding: ProviderRouteBinding | None = None
+
+    @field_validator("download_url")
+    @classmethod
+    def _require_https(cls, value: AnyUrl) -> AnyUrl:
+        if value.scheme != "https":
+            raise ValueError("download URL must use HTTPS")
+        return value
+
+    @field_validator("downloaded_at", "created_at", mode="before")
+    @classmethod
+    def _normalize_timestamp(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> datetime:
+        return _validated_timestamp_input(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _enforce_manifest_state(self) -> Self:
+        if self.predecessor_manifest_id is None:
+            if (
+                self.cloud_egress_authorized
+                or self.compliance_assessment is not None
+                or self.provider_route_binding is not None
+            ):
+                raise ValueError("initial source manifest must be default-deny")
+            return self
+
+        if (
+            not self.cloud_egress_authorized
+            or self.compliance_assessment is None
+            or self.provider_route_binding is None
+        ):
+            raise ValueError("successor must contain explicit authorization evidence")
+
+        conclusion = self.compliance_assessment.author_conclusion
+        route = self.provider_route_binding
+        if not conclusion.authorized:
+            raise ValueError("successor conclusion must explicitly authorize egress")
+        if (
+            conclusion.provider_id != route.provider_id
+            or conclusion.endpoint_purpose != route.endpoint_purpose
+        ):
+            raise ValueError("successor conclusion must match its provider route")
+        if conclusion.authored_at > self.created_at:
+            raise ValueError("successor conclusion cannot postdate the successor")
+        if conclusion.expires_at <= self.created_at:
+            raise ValueError("successor conclusion is expired at creation")
+        return self
+
+
+class RfcSourceManifest(RfcSourceManifestDraft, _AuthorizationMixin):
+    manifest_id: Sha256
+
+    @model_validator(mode="after")
+    def _verify_manifest_id(self) -> Self:
+        from specpilot.manifests.canonical import canonical_sha256
+
+        if self.manifest_id != canonical_sha256(self):
+            raise ValueError("manifest_id does not match canonical content")
+        return self
+
+    @classmethod
+    def from_draft(cls, draft: RfcSourceManifestDraft) -> RfcSourceManifest:
+        from specpilot.manifests.canonical import canonical_sha256
+
+        return cls(manifest_id=canonical_sha256(draft), **draft.model_dump())
+
+
+class SourceManifest(SourceManifestDraft, _AuthorizationMixin):
+    manifest_id: Sha256
+
+    @model_validator(mode="after")
+    def _verify_manifest_id(self) -> Self:
+        from specpilot.manifests.canonical import canonical_sha256
+
+        if self.manifest_id != canonical_sha256(self):
+            raise ValueError("manifest_id does not match canonical content")
+        return self
+
+    @classmethod
+    def from_draft(cls, draft: SourceManifestDraft) -> SourceManifest:
+        from specpilot.manifests.canonical import canonical_sha256
+
+        return cls(
+            manifest_id=canonical_sha256(draft),
+            **draft.model_dump(),
         )

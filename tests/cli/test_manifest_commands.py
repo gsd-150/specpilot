@@ -175,7 +175,7 @@ def test_an_unsupported_predecessor_schema_version_is_refused(
     manifest_id = "e" * 64
     manifest_path = manifest_dir / f"{manifest_id}.json"
     manifest_path.write_text(
-        '{"schema_version":"source-manifest/v2"}',
+        '{"schema_version":"source-manifest/v3"}',
         encoding="utf-8",
     )
     manifest_path.chmod(0o600)
@@ -217,7 +217,7 @@ def test_a_nonstandard_json_predecessor_is_not_an_unsupported_version(
     manifest_dir.mkdir(mode=0o700)
     manifest_id = "d" * 64
     manifest_path = manifest_dir / f"{manifest_id}.json"
-    manifest_path.write_bytes(b'{"schema_version":"source-manifest/v2","extra":NaN}')
+    manifest_path.write_bytes(b'{"schema_version":"source-manifest/v3","extra":NaN}')
     manifest_path.chmod(0o600)
     evidence = write_assessment(tmp_path)
 

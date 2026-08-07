@@ -115,6 +115,11 @@ def validate_task8_source_bound_assessment(
         manifest = manifest_store.read_source(envelope.source_manifest_id)
     except (OSError, RuntimeError, ValueError) as error:
         raise AssessmentBindingError("source binding is invalid") from error
+    # Task 8 assessed two specific 3GPP DOCX sources. A manifest of any other
+    # version describes a different corpus and cannot be what this envelope
+    # claims to bind, whatever else about it validates.
+    if not isinstance(manifest, SourceManifest):
+        raise AssessmentBindingError("source binding is invalid")
     if (
         manifest.predecessor_manifest_id is not None
         or manifest.cloud_egress_authorized

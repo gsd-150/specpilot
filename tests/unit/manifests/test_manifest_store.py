@@ -124,12 +124,15 @@ def test_read_rejects_filename_and_content_id_mismatch(tmp_path: Path) -> None:
 def test_read_rejects_a_secure_manifest_with_an_unsupported_schema_version(
     tmp_path: Path,
 ) -> None:
+    # v2 was this test's example of "unsupported" until the RFC corpus made it
+    # a supported version. The behaviour under test is unchanged; only the
+    # example of an unknown version had to move on.
     store_dir = tmp_path / "manifests"
     store_dir.mkdir(mode=0o700)
     manifest_id = "e" * 64
     manifest_path = store_dir / f"{manifest_id}.json"
     manifest_path.write_text(
-        '{"schema_version":"source-manifest/v2"}',
+        '{"schema_version":"source-manifest/v3"}',
         encoding="utf-8",
     )
     manifest_path.chmod(0o600)
