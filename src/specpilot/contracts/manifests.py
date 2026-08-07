@@ -270,7 +270,11 @@ class RfcSourceManifestDraft(_FrozenModel):
     schema_version: Literal["source-manifest/v2"] = "source-manifest/v2"
     document_id: Identifier
     document_version: Identifier
-    download_url: HttpsUrl
+    # One URL per rendition. A single download_url beside two hashes would
+    # force a reader to infer which URL produced which hash from a filename
+    # convention, which is the kind of inference this project refuses.
+    text_url: HttpsUrl
+    xml_url: HttpsUrl
     text_sha256: Sha256
     xml_sha256: Sha256
     downloaded_at: datetime
@@ -280,7 +284,7 @@ class RfcSourceManifestDraft(_FrozenModel):
     compliance_assessment: ComplianceAssessment | None = None
     provider_route_binding: ProviderRouteBinding | None = None
 
-    @field_validator("download_url")
+    @field_validator("text_url", "xml_url")
     @classmethod
     def _require_https(cls, value: AnyUrl) -> AnyUrl:
         if value.scheme != "https":

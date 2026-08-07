@@ -30,7 +30,8 @@ V1_FIELDS: dict[str, object] = {
 V2_FIELDS: dict[str, object] = {
     "document_id": "ietf-rfc-9110",
     "document_version": "2022-06",
-    "download_url": "https://www.rfc-editor.org/rfc/rfc9110.xml",
+    "text_url": "https://www.rfc-editor.org/rfc/rfc9110.txt",
+    "xml_url": "https://www.rfc-editor.org/rfc/rfc9110.xml",
     "text_sha256": "c" * 64,
     "xml_sha256": "d" * 64,
     "downloaded_at": "2026-08-07T16:00:00Z",
@@ -64,8 +65,11 @@ def test_v2_refuses_docx_shaped_fields(field: str) -> None:
         RfcSourceManifestDraft(**{**V2_FIELDS, field: "e" * 64})
 
 
-@pytest.mark.parametrize("field", ["text_sha256", "xml_sha256"])
-def test_v2_requires_both_document_hashes(field: str) -> None:
+@pytest.mark.parametrize(
+    "field", ["text_sha256", "xml_sha256", "text_url", "xml_url"]
+)
+def test_v2_requires_both_renditions_fully_identified(field: str) -> None:
+    """Two hashes with one URL would force a filename-convention inference."""
     fields = {k: v for k, v in V2_FIELDS.items() if k != field}
     with pytest.raises(ValidationError):
         RfcSourceManifestDraft(**fields)
@@ -76,19 +80,29 @@ def test_v2_id_differs_from_v1_carrying_the_same_values() -> None:
     shared = {
         "document_id": "shared-id",
         "document_version": "1",
-        "download_url": "https://example.org/x",
         "downloaded_at": "2026-08-07T16:00:00Z",
         "created_at": "2026-08-07T16:01:00Z",
     }
-    v1 = SourceManifestDraft(**shared, archive_sha256="f" * 64, docx_sha256="f" * 64)
-    v2 = RfcSourceManifestDraft(**shared, text_sha256="f" * 64, xml_sha256="f" * 64)
+    v1 = SourceManifestDraft(
+        **shared,
+        download_url="https://example.org/x",
+        archive_sha256="f" * 64,
+        docx_sha256="f" * 64,
+    )
+    v2 = RfcSourceManifestDraft(
+        **shared,
+        text_url="https://example.org/x",
+        xml_url="https://example.org/x",
+        text_sha256="f" * 64,
+        xml_sha256="f" * 64,
+    )
     assert canonical_sha256(v1) != canonical_sha256(v2)
 
 
 def test_v2_requires_https_and_rejects_naive_timestamps() -> None:
     with pytest.raises(ValidationError):
         RfcSourceManifestDraft(
-            **{**V2_FIELDS, "download_url": "http://www.rfc-editor.org/rfc/rfc9110.xml"}
+            **{**V2_FIELDS, "xml_url": "http://www.rfc-editor.org/rfc/rfc9110.xml"}
         )
     with pytest.raises(ValidationError):
         RfcSourceManifestDraft(**{**V2_FIELDS, "downloaded_at": "2026-08-07T16:00:00"})

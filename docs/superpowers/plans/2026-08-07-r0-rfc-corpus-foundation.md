@@ -203,24 +203,24 @@ never resolve an external reference over the network.
 - Produces: exactly two default-deny `source-manifest/v2` records.
 - Consumes: author-confirmed URLs and download times, and the Task 2 boundary.
 
-- [ ] **Step 1: Fetch and publish both documents privately**
+- [x] **Step 1: Fetch and publish both documents privately**
 
 `umask 077`, no-replace hard-link publication, `0600`, capture record carrying
 `download_url`, `downloaded_at`, `text_sha256`, `xml_sha256`, and byte counts.
 
-- [ ] **Step 2: Run each XML through the Task 2 boundary and record the result**
+- [x] **Step 2: Run each XML through the Task 2 boundary and record the result**
 
-- [ ] **Step 3: Obtain the author's BCP 78 source-terms assessment**
+- [x] **Step 3: Obtain the author's BCP 78 source-terms assessment**
 
 The author reads the IETF Trust Legal Provisions and BCP 78 and writes the
 summary and uncertainty entries. Tooling must never write, infer, paraphrase, or
 upgrade that text — the same rule that governed the 3GPP assessment.
 
-- [ ] **Step 4: Create both v2 manifests and verify the invariant**
+- [x] **Step 4: Create both v2 manifests and verify the invariant**
 
 Two manifests, zero successors, zero authorized, private modes, Git-ignored.
 
-- [ ] **Step 5: Commit only the sanitized record**
+- [x] **Step 5: Commit only the sanitized record**
 
 ---
 
