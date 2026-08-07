@@ -83,7 +83,7 @@
 - Produces: importable `specpilot.__version__: str` and `create_app() -> FastAPI` with a sanitized `/health` response.
 - Consumes: no project code.
 
-- [ ] **Step 1: Write the failing package/health test**
+- [x] **Step 1: Write the failing package/health test**
 
 ```python
 from fastapi.testclient import TestClient
@@ -102,13 +102,13 @@ def test_health_exposes_no_runtime_details() -> None:
     assert response.json() == {"status": "ok"}
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `python -m pytest tests/unit/test_package_baseline.py -q`
 
 Expected: collection fails because `specpilot` does not exist.
 
-- [ ] **Step 3: Add the minimal package and health implementation**
+- [x] **Step 3: Add the minimal package and health implementation**
 
 ```python
 # src/specpilot/__init__.py
@@ -130,11 +130,11 @@ def create_app() -> FastAPI:
     return app
 ```
 
-- [ ] **Step 4: Configure tooling and safe ignore rules**
+- [x] **Step 4: Configure tooling and safe ignore rules**
 
 Use a `src/` package layout, Python `>=3.12,<3.15`, Pydantic/FastAPI/psycopg/defusedxml production dependencies, pytest/Hypothesis/Ruff/mypy test dependencies, strict mypy, and Ruff `E,F,I,B,UP,SIM` rules. Ignore `.env`, `.venv`, `data/real/`, `data/quarantine/`, `data/cache/`, `artifacts/restricted/`, local manifests, provider snapshots containing account metadata, and Compose volumes.
 
-- [ ] **Step 5: Verify GREEN and static baseline**
+- [x] **Step 5: Verify GREEN and static baseline**
 
 Run: `python -m pytest tests/unit/test_package_baseline.py -q`
 
@@ -144,7 +144,7 @@ Run: `python -m mypy src`
 
 Expected: all commands exit 0 without warnings.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add .gitignore .env.example pyproject.toml Makefile README.md src/specpilot tests/unit/test_package_baseline.py
@@ -166,7 +166,7 @@ git commit -m "chore: initialize independent specpilot package"
 - Produces: `ArchivePolicy(expected_docx_name: str, max_members: int, max_member_bytes: int, max_total_bytes: int, max_compression_ratio: float = 100.0)` and stable `ArchiveRejectionCode` values.
 - Consumes: local filesystem only; performs no network access.
 
-- [ ] **Step 1: Write failing traversal/symlink/unexpected-member tests**
+- [x] **Step 1: Write failing traversal/symlink/unexpected-member tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -188,17 +188,17 @@ def test_unsafe_member_quarantines_whole_archive(...):
     assert one_quarantine_record_exists(quarantine_dir)
 ```
 
-- [ ] **Step 2: Run traversal tests and verify RED**
+- [x] **Step 2: Run traversal tests and verify RED**
 
 Run: `python -m pytest tests/unit/ingestion/test_archive_preflight.py -q`
 
 Expected: import failure because archive contracts and extractor do not exist.
 
-- [ ] **Step 3: Implement normalized whole-archive preflight**
+- [x] **Step 3: Implement normalized whole-archive preflight**
 
 The preflight must inspect every `ZipInfo` before opening any member, reject absolute/drive-qualified paths, reject any normalized path containing `..`, reject Unix symlink/device modes from `external_attr`, accept exactly one regular member whose basename equals `expected_docx_name`, and reject nested archive extensions case-insensitively. It must not call `ZipFile.extract()`.
 
-- [ ] **Step 4: Write failing encrypted/count/size/ratio tests**
+- [x] **Step 4: Write failing encrypted/count/size/ratio tests**
 
 ```python
 def test_member_count_limit_is_checked_before_writes(...): ...
@@ -209,27 +209,27 @@ def test_encrypted_flag_is_rejected(...): ...
 def test_high_compression_ratio_is_rejected(...): ...
 ```
 
-- [ ] **Step 5: Run limit tests and verify RED**
+- [x] **Step 5: Run limit tests and verify RED**
 
 Run: `python -m pytest tests/unit/ingestion/test_archive_limits.py -q`
 
 Expected: each new test fails at the missing limit behavior, not fixture construction.
 
-- [ ] **Step 6: Implement streamed extraction into a sibling temporary directory**
+- [x] **Step 6: Implement streamed extraction into a sibling temporary directory**
 
 Read in bounded chunks while rechecking actual byte counts and SHA-256. `fsync` the file, rename the completed temporary directory atomically to the destination, and remove only the task-created temporary path on failure. Never follow destination symlinks. The result records archive hash, DOCX hash, byte count, and member name but never file contents.
 
-- [ ] **Step 7: Write and implement content-addressed quarantine tests**
+- [x] **Step 7: Write and implement content-addressed quarantine tests**
 
 Assert that quarantine creates `<sha256>/record.json` plus the original archive with mode `0600`, records rejection code and safe metadata only, and is idempotent for the same archive hash. Logs and exceptions must not include extracted bytes or DOCX XML.
 
-- [ ] **Step 8: Run archive unit suite**
+- [x] **Step 8: Run archive unit suite**
 
 Run: `python -m pytest tests/unit/ingestion -q`
 
 Expected: all archive and quarantine tests pass.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/specpilot/contracts/archive.py src/specpilot/ingestion tests/unit/ingestion
@@ -250,7 +250,7 @@ git commit -m "feat: quarantine unsafe source archives"
 - Produces: CLI `python -m specpilot.ingestion.sandbox_worker inspect --input /input/source.docx --output /output/inspection.json`.
 - Consumes: an already safely extracted DOCX; emits metadata/findings only.
 
-- [ ] **Step 1: Write failing tests for macros, executable embeddings, nested packages, and external relationships**
+- [x] **Step 1: Write failing tests for macros, executable embeddings, nested packages, and external relationships**
 
 ```python
 @pytest.mark.parametrize(
@@ -266,27 +266,27 @@ git commit -m "feat: quarantine unsafe source archives"
 def test_active_content_never_becomes_parseable_fixture(...): ...
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/unit/ingestion/test_ooxml_inspection.py -q`
 
 Expected: import failure for `inspect_docx`.
 
-- [ ] **Step 3: Implement package inspection without XML entity/network resolution**
+- [x] **Step 3: Implement package inspection without XML entity/network resolution**
 
 Use `defusedxml` for `[Content_Types].xml` and `.rels` files, disable entity expansion, validate OOXML member paths with the same path policy, cap member count and total uncompressed bytes, reject macro-enabled content types and active embeddings, and collect external relationship target hashes without resolving targets. W0’s fail-closed policy quarantines an external-relationship input; a later explicitly reviewed sanitizer may create a separate derivative, never silently promote the original.
 
-- [ ] **Step 4: Write failing subprocess boundary test**
+- [x] **Step 4: Write failing subprocess boundary test**
 
 Start the worker with an input directory that is read-only and a separate writable output directory. Assert a valid fixture yields one JSON inspection file, unsafe input exits non-zero with a stable code, and stdout/stderr contain no XML or relationship target text.
 
-- [ ] **Step 5: Implement the narrow worker and verify GREEN**
+- [x] **Step 5: Implement the narrow worker and verify GREEN**
 
 Run: `python -m pytest tests/unit/ingestion/test_ooxml_inspection.py tests/integration/ingestion/test_sandbox_worker.py -q`
 
 Expected: safe DOCX accepted; every malicious fixture rejected before parsing content.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/specpilot/ingestion/ooxml.py src/specpilot/ingestion/sandbox_worker.py tests/helpers tests/unit/ingestion tests/integration/ingestion
@@ -307,7 +307,7 @@ git commit -m "feat: inspect docx packages in a fail-closed boundary"
 - Produces: `canonical_sha256(model: BaseModel) -> str` with stable UTF-8 JSON ordering.
 - Consumes: archive/DOCX hashes from Task 2 and explicit compliance evidence metadata; never derives authorization implicitly.
 
-- [ ] **Step 1: Write failing canonicalization and default-deny tests**
+- [x] **Step 1: Write failing canonicalization and default-deny tests**
 
 ```python
 def test_initial_source_manifest_is_default_deny() -> None:
@@ -322,31 +322,31 @@ def test_manifest_id_is_content_addressed_and_order_independent() -> None:
     assert first == second
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/unit/manifests/test_source_manifest.py -q`
 
 Expected: missing manifest contracts.
 
-- [ ] **Step 3: Implement strict immutable Pydantic contracts and canonical hashing**
+- [x] **Step 3: Implement strict immutable Pydantic contracts and canonical hashing**
 
 Use `ConfigDict(frozen=True, extra="forbid")`, timezone-aware timestamps, `https` download URLs, lowercase 64-hex hashes, explicit document/version fields, and manifest IDs derived from canonical content excluding the ID field itself.
 
-- [ ] **Step 4: Write failing successor invariants**
+- [x] **Step 4: Write failing successor invariants**
 
 Assert an authorized successor must preserve document/version/source hashes, reference the predecessor, bind one provider route plus use (`online_main` or `offline_judge`), include all four compliance-review sections and snapshot hashes, record uncertainty, and use a non-expired decision. Assert old/default-deny manifests remain unchanged and cannot satisfy an authorized route.
 
-- [ ] **Step 5: Implement create-only store and successor validation**
+- [x] **Step 5: Implement create-only store and successor validation**
 
 Write and fsync a mode-`0600` sibling temporary file, install it with an atomic no-replace hard link, fsync the directory, then remove the temporary name. A same-ID replay may return the existing byte-identical object; differing bytes or attempted overwrite fail closed.
 
-- [ ] **Step 6: Verify manifest suite**
+- [x] **Step 6: Verify manifest suite**
 
 Run: `python -m pytest tests/unit/manifests -q`
 
 Expected: canonical, immutability, expiry, purpose/provider mismatch, and successor tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/specpilot/contracts/manifests.py src/specpilot/manifests tests/unit/manifests
@@ -369,39 +369,39 @@ git commit -m "feat: add immutable source manifest chain"
 - Produces: `disclosure_id(corpus_manifest_id, content_hash, quote_hash, normalized_excerpt_span) -> str`, which deliberately excludes run and root so one excerpt has one identity corpus-wide.
 - Consumes: a **stored** source manifest resolved by ID through Task 4's store, and a mandatory model-compatible token counter. The manifest carried on the request is compared against the stored one and is never itself the basis of the decision.
 
-- [ ] **Step 1: Write failing field-allowlist and local-object tests**
+- [x] **Step 1: Write failing field-allowlist and local-object tests**
 
 Assert full clauses, raw retrieval candidates, full TOCs, stack traces, source paths, secrets, and arbitrary extra fields cannot be encoded as an egress payload. Assert only projected query/claim, necessary version metadata, bounded TOC nodes, and `EvidenceExcerpt` values are accepted.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python -m pytest tests/unit/egress/test_policy_projection.py -q`
 
 Expected: missing egress contracts and enforcer.
 
-- [ ] **Step 3: Implement typed whitelist projection and mandatory token counting**
+- [x] **Step 3: Implement typed whitelist projection and mandatory token counting**
 
 No public method accepts `dict[str, Any]`. Pydantic request variants enumerate allowed fields per stage. A missing/failing token counter raises `TokenAccountingUnavailable` before reservation.
 
-- [ ] **Step 4: Write failing unique/transmitted/per-claim tests**
+- [x] **Step 4: Write failing unique/transmitted/per-claim tests**
 
 Cover the exact L1/L2/judge/root caps, 512-token and 8-KiB excerpt caps, different spans from one clause as different disclosures, duplicate disclosures as one unique item but repeated transmitted use, cross-provider resend, TOC 12-per-call/24-per-run limits, and L2 atomic-claim 4/2,048 limits.
 
-- [ ] **Step 5: Implement cap selection and stable disclosure identity**
+- [x] **Step 5: Implement cap selection and stable disclosure identity**
 
 Normalize spans as explicit token/paragraph coordinates, hash the canonical tuple, and return the deltas the ledger must reserve: global unique, per-route unique, stage transmitted, claim unique, and evaluation-root totals.
 
-- [ ] **Step 6: Write the maximum-legal-envelope test before code changes**
+- [x] **Step 6: Write the maximum-legal-envelope test before code changes**
 
 Build three L2 claims, 12 distinct 512-token/8-KiB-safe excerpts, Evidence→Compliance→Verifier calls, one retry, and optional judge. Assert it is accepted exactly at 29,696 root transmitted tokens/464 KiB; adding one token, byte, excerpt, TOC node, or field is rejected with a stable public code.
 
-- [ ] **Step 7: Run the pure policy suite**
+- [x] **Step 7: Run the pure policy suite**
 
 Run: `python -m pytest tests/unit/egress -q`
 
 Expected: normal, boundary, malicious, and maximum-envelope tests pass without database/network access.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/specpilot/contracts/egress.py src/specpilot/egress config/egress tests/unit/egress

@@ -6,6 +6,22 @@
 
 **Delivery rule:** Each week is executed from its own detailed, test-first plan. A later week does not begin until the preceding week’s hard gate is evidenced or the product plan’s pre-registered fallback is selected.
 
+## Current state — 2026-08-07
+
+W0 is in progress on `feat/w0-foundation`. Tasks 1–9 are implemented and their
+plan steps are checked; Task 8 Step 4 (the author's own compliance research and
+assessment prose) is the open item, and Task 10 has not started.
+
+No successor manifest exists, both source manifests remain default-deny, no real
+provider has been called, and the only eligible route decision is therefore
+`extend`. W1 has not begun and must not begin from an undecided W0.
+
+Verification as of this date: 329 tests pass with a local PostgreSQL DSN set
+(24 of them are skipped without one), Ruff and mypy are clean, and the envelope
+and both fixture route smokes pass. A fixture route smoke proves the transport,
+enforcer, and ledger are wired and policy-bound; it proves nothing about any
+real provider, credential, or model, and its own output says so.
+
 ## Milestone sequence
 
 1. **W0 — Safety, manifests, and egress enforcement**

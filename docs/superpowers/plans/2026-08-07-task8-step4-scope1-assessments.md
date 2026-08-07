@@ -174,7 +174,7 @@ proposal or restricted files in a commit.
   conclusion.
 - Produces: one non-contradictory specification for Tasks 1–6.
 
-- [ ] **Step 1: Run assertions that expose the stale text**
+- [x] **Step 1: Run assertions that expose the stale text**
 
 ```bash
 rg -n 'Open item the author must resolve|gpt-5\.6-luna|不得填写.*author_conclusion' \
@@ -184,7 +184,7 @@ rg -n 'Open item the author must resolve|gpt-5\.6-luna|不得填写.*author_conc
 
 Expected: stale model/conclusion language is found.
 
-- [ ] **Step 2: Apply the exact reconciliation**
+- [x] **Step 2: Apply the exact reconciliation**
 
 Use `apply_patch` to update these exact sections in both specifications:
 
@@ -206,7 +206,7 @@ Use `apply_patch` to update these exact sections in both specifications:
   fields in the envelope.
 - Scope 2: retain the route-decision block unchanged.
 
-- [ ] **Step 3: Verify and commit only the reconciled specifications**
+- [x] **Step 3: Verify and commit only the reconciled specifications**
 
 ```bash
 test "$(rg -c 'glm-5\.2' docs/superpowers/specs/2026-08-07-safe-ooxml-derivative-deepseek-assessment-design.md)" -ge 2
@@ -250,7 +250,7 @@ git commit -m "docs: reconcile task8 scope1 assessment contract"
 - Preserves: existing `ComplianceAssessment`, source-manifest/v1, and canonical
   manifest bytes without modification.
 
-- [ ] **Step 1: Write failing contract and swap-refusal tests**
+- [x] **Step 1: Write failing contract and swap-refusal tests**
 
 The test helpers use two stored initial manifests, two routes, and two evidence
 indexes. Include these representative assertions and parameterize the same
@@ -316,7 +316,7 @@ changed statement bytes, different `author_id`, provider, endpoint, authored
 time, or expiry must each fail. Any present conclusion on the ChatAnywhere
 route must fail even when it matches that route.
 
-- [ ] **Step 2: Run the new tests and prove red**
+- [x] **Step 2: Run the new tests and prove red**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/compliance/test_assessment_binding.py -q
@@ -324,7 +324,7 @@ route must fail even when it matches that route.
 
 Expected: collection or import fails because the new contracts do not exist.
 
-- [ ] **Step 3: Implement the minimal frozen contracts**
+- [x] **Step 3: Implement the minimal frozen contracts**
 
 Implement these exact field shapes in `contracts/compliance.py`:
 
@@ -390,7 +390,7 @@ validator to `AuthorizationConclusion.authorization_statement` that rejects a
 non-string or any value unequal to its own `.strip()`; valid existing manifest
 bytes and IDs must remain unchanged.
 
-- [ ] **Step 4: Implement mechanical binding validation**
+- [x] **Step 4: Implement mechanical binding validation**
 
 In `compliance/validation.py`, define the two exact Task 8 route/model pairs and
 the exact seven-field `TASK8_DEEPSEEK_CONCLUSION` from Global Constraints, then
@@ -469,7 +469,7 @@ captured after `authored_at`; validates it as a complete `ComplianceAssessment`;
 returns the resolved manifest; and never writes files or authorizes egress.
 Normalize failures to content-free `AssessmentBindingError` messages.
 
-- [ ] **Step 5: Run focused and regression tests**
+- [x] **Step 5: Run focused and regression tests**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/compliance/test_assessment_binding.py -q
@@ -481,7 +481,7 @@ Normalize failures to content-free `AssessmentBindingError` messages.
 
 Expected: all commands exit 0; existing v1 tests remain green.
 
-- [ ] **Step 6: Commit the contract slice**
+- [x] **Step 6: Commit the contract slice**
 
 ```bash
 git add -- src/specpilot/contracts/compliance.py \
@@ -507,7 +507,7 @@ git commit -m "feat: bind compliance assessments to sources and models"
 - Produces: CLI refusal `unsupported_manifest_version` without adding a v2
   reader or successor path.
 
-- [ ] **Step 1: Write failing store and CLI tests**
+- [x] **Step 1: Write failing store and CLI tests**
 
 Add a mode-`0600` regular file named by a lowercase SHA-256 whose JSON declares
 `schema_version="source-manifest/v2"`. Assert:
@@ -528,7 +528,7 @@ assert err == "unsupported_manifest_version\n"
 Tighten the missing-predecessor test to exactly `manifest_not_found\n`. Add
 malformed JSON and missing-file cases proving they are not misclassified.
 
-- [ ] **Step 2: Run the focused tests and prove red**
+- [x] **Step 2: Run the focused tests and prove red**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -539,7 +539,7 @@ malformed JSON and missing-file cases proving they are not misclassified.
 Expected: the new version-specific assertions fail against the current broad
 exception mapping.
 
-- [ ] **Step 3: Implement one narrow exception path**
+- [x] **Step 3: Implement one narrow exception path**
 
 Define `UnsupportedManifestVersionError(ValueError)` in `store.py`. After the
 secure bounded read and before v1 Pydantic decoding, parse JSON only far enough
@@ -548,7 +548,7 @@ is present and differs from `source-manifest/v1`; otherwise retain current v1
 canonical validation. In `_manifest_authorize`, catch this exception before the
 broad read failure and return `_refuse("unsupported_manifest_version")`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -578,7 +578,7 @@ git commit -m "fix: distinguish unsupported manifest versions"
 - Produces: exactly two initial default-deny manifest IDs. A DOCX refusal is
   recorded but does not block manifest creation.
 
-- [ ] **Step 1: Reconcile instead of overwriting existing state**
+- [x] **Step 1: Reconcile instead of overwriting existing state**
 
 ```bash
 set -euo pipefail
@@ -643,7 +643,7 @@ regular-file/non-symlink, and inspection checks; the 38.321 accepted DOCX and
 capture record are absent; Task 10 outputs are absent; and the index is empty.
 Never move the quarantined DOCX into `data/real`.
 
-- [ ] **Step 2: Download TS 38.321 with private no-replace publication**
+- [x] **Step 2: Download TS 38.321 with private no-replace publication**
 
 Use this exact destination and capture-record shape:
 
@@ -971,7 +971,7 @@ Stop at the author-fact gate after that deletion. Do not create
 the author confirms the newly captured exact TS 38.321 `download_url` and
 `downloaded_at` recorded in the ignored implementer report.
 
-- [ ] **Step 3: Inspect each source independently**
+- [x] **Step 3: Inspect each source independently**
 
 The 38.321 inspection paths are mutually exclusive. Select the
 observed-interrupted/recovery branch only when Step 1 and the reviewed recovery
@@ -1191,7 +1191,7 @@ The sole recursive removal above is the already revalidated exact canonical
 the raw `/var/...` spelling and canonical `/private/var/...` spelling must be
 absent afterward.
 
-- [ ] **Step 4: Apply the author-fact gate and create manifests**
+- [x] **Step 4: Apply the author-fact gate and create manifests**
 
 Use only author-confirmed `download_url` and `downloaded_at` values. The author
 has confirmed these TS 38.300 facts (the timestamp was explicitly identified as
@@ -1211,7 +1211,7 @@ either public status, or a Task 3 commit before that confirmation. Once both
 origins have confirmed facts, invoke `source-manifest create` with archive/DOCX
 hashes even when inspection refused.
 
-- [ ] **Step 5: Verify the two-manifest invariant**
+- [x] **Step 5: Verify the two-manifest invariant**
 
 Use `ManifestStore.read_source` and assert exactly two files, document IDs
 `3gpp-ts-38.300` and `3gpp-ts-38.321`, version `18.10.0`, live origin hashes,
@@ -1219,7 +1219,7 @@ Use `ManifestStore.read_source` and assert exactly two files, document IDs
 `cloud_egress_authorized is False`. Verify restricted paths are ignored,
 private, regular, and non-symlink.
 
-- [ ] **Step 6: Commit a sanitized origin checkpoint**
+- [x] **Step 6: Commit a sanitized origin checkpoint**
 
 Create the public status with only URLs, versions, archive/DOCX hashes,
 manifest IDs, inspection outcomes, `derivative: absent`, `successor_count: 0`,
@@ -1245,7 +1245,7 @@ git commit -m "docs: record task8 frozen origin manifests"
   plan, plus the DeepSeek personal-account setting.
 - Produces: two canonical evidence-index IDs with exact route/model bindings.
 
-- [ ] **Step 1: Create the dated tree safely**
+- [x] **Step 1: Create the dated tree safely**
 
 Require `artifacts/restricted/compliance/2026-08-07` to be absent; an existing
 tree is a separate replay/recovery case and must be inspected before continuing.
@@ -1332,7 +1332,7 @@ trap - EXIT HUP INT TERM
 Run `chmod 700 artifacts/restricted/compliance/2026-08-07/capture-page` and
 `sh -n artifacts/restricted/compliance/2026-08-07/capture-page` before use.
 
-- [ ] **Step 2: Capture the official pages**
+- [x] **Step 2: Capture the official pages**
 
 Capture exact response bytes and metadata for these URLs:
 
@@ -1401,7 +1401,7 @@ test "$(find "$snapshots" -type f | wc -l | tr -d ' ')" = 15
 test "$(find artifacts/restricted/compliance/2026-08-07/capture-metadata -type f | wc -l | tr -d ' ')" = 15
 ```
 
-- [ ] **Step 3: Capture the DeepSeek account gate with the browser skill**
+- [x] **Step 3: Capture the DeepSeek account gate with the browser skill**
 
 Use the user's existing session and navigate only to the data-use/training
 setting. Store no password, API key, account ID, balance, or unrelated content.
