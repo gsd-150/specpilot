@@ -41,9 +41,17 @@ from specpilot.corpus.clauses import (
     ClauseLimits,
     OversizedClauseError,
     build_clauses,
+    iter_clause_texts,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
+from specpilot.embedding.local_encoder import EmbeddingRuntimeUnavailable, load_encoder
+from specpilot.embedding.throughput import (
+    estimate_full_corpus_seconds,
+    evenly_spaced,
+    measure_throughput,
+    weights_sha256,
+)
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
@@ -197,32 +205,44 @@ def _manifest_authorize(arguments: argparse.Namespace) -> int:
     )
 
 
-def _corpus_parse(arguments: argparse.Namespace) -> int:
-    """Parse one frozen specification, reporting counts and never its text.
+def _frozen_source(arguments: argparse.Namespace) -> RfcSourceManifest | str:
+    """Resolve the manifest that froze this document, or return a refusal code.
 
     The manifest is the authority on which bytes are the corpus. A file that
     hashes differently is a different document, whatever its filename says, so
-    it is refused before the parser ever sees it.
+    it is refused before any reader ever sees it.
     """
     store = ManifestStore(arguments.manifest_dir)
     try:
         manifest = store.read_source(arguments.manifest)
     except UnsupportedManifestVersionError:
-        return _refuse("unsupported_manifest_version")
+        return "unsupported_manifest_version"
     except (OSError, ValueError, RuntimeError):
-        return _refuse("manifest_not_found")
+        return "manifest_not_found"
 
     if not isinstance(manifest, RfcSourceManifest):
         # A DOCX-shaped manifest describes a different corpus; it has no XML
         # rendition to be the authority for.
-        return _refuse("unsupported_manifest_version")
+        return "unsupported_manifest_version"
 
     try:
         actual = hashlib.sha256(arguments.xml.read_bytes()).hexdigest()
     except OSError:
-        return _refuse("io_error", EXIT_IO)
+        return "io_error"
     if actual != manifest.xml_sha256:
-        return _refuse("document_hash_mismatch")
+        return "document_hash_mismatch"
+    return manifest
+
+
+def _refuse_source(code: str) -> int:
+    return _refuse(code, EXIT_IO if code == "io_error" else EXIT_REFUSED)
+
+
+def _corpus_parse(arguments: argparse.Namespace) -> int:
+    """Parse one frozen specification, reporting counts and never its text."""
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
 
     try:
         structure = extract_structure(arguments.xml, RfcLimits())
@@ -275,6 +295,82 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
     except OSError:
         return _refuse("io_error", EXIT_IO)
     return _emit(report.payload())
+
+
+def _embedding_measure(arguments: argparse.Namespace) -> int:
+    """Measure encoding throughput on this machine, over the frozen corpus.
+
+    Product plan section 7 forbids writing a full-corpus wall clock down before
+    one has been measured, so the estimate this prints is derived here from an
+    observed rate and the document's real clause count — never from a default.
+
+    The sample is timed after a warm-up batch. A cold first batch on MPS pays
+    for graph compilation and the initial host-to-device copy, which is a real
+    cost but a one-off, and folding it into the rate would misstate every
+    subsequent batch.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        texts = tuple(
+            text
+            for _, text in iter_clause_texts(
+                arguments.xml, RfcLimits(), ClauseLimits()
+            )
+        )
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    try:
+        sample = evenly_spaced(texts, arguments.sample)
+    except ValueError:
+        return _refuse("empty_sample")
+
+    try:
+        digest = weights_sha256(arguments.model_dir)
+        encode = load_encoder(arguments.model_dir, arguments.device)
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+    except (OSError, ValueError):
+        return _refuse("model_dir_unusable")
+
+    encode(sample[: arguments.batch_size])
+    measurement = measure_throughput(
+        sample,
+        encode,
+        model_id=arguments.model_id,
+        weights_sha256=digest,
+        device=arguments.device,
+        batch_size=arguments.batch_size,
+    )
+
+    return _emit(
+        {
+            "status": "measured",
+            "document_id": manifest.document_id,
+            "model_id": measurement.model_id,
+            "weights_sha256": measurement.weights_sha256,
+            "pipeline_version": measurement.pipeline_version,
+            "device": measurement.device,
+            "batch_size": measurement.batch_size,
+            "sample_size": measurement.sample_size,
+            "sample_words": measurement.sample_words,
+            "corpus_words": sum(len(text.split()) for text in texts),
+            "elapsed_seconds": round(measurement.elapsed_seconds, 3),
+            "clauses_per_second": round(measurement.clauses_per_second, 2),
+            "words_per_second": round(measurement.words_per_second, 1),
+            "clause_count": len(texts),
+            "estimated_full_corpus_seconds": round(
+                estimate_full_corpus_seconds(measurement, len(texts)), 1
+            ),
+        }
+    )
 
 
 def _fixture_excerpt(index: int, tokens: int, byte_count: int) -> EvidenceExcerpt:
@@ -706,6 +802,20 @@ def _parser() -> argparse.ArgumentParser:
     progress = annotation.add_parser("progress")
     progress.add_argument("--annotation-dir", type=Path, required=True)
     progress.set_defaults(handler=_annotation_progress)
+
+    embedding = commands.add_parser("embedding").add_subparsers(
+        dest="command", required=True
+    )
+    measure = embedding.add_parser("measure")
+    measure.add_argument("--manifest", required=True)
+    measure.add_argument("--manifest-dir", type=Path, required=True)
+    measure.add_argument("--xml", type=Path, required=True)
+    measure.add_argument("--model-dir", type=Path, required=True)
+    measure.add_argument("--model-id", default="BAAI/bge-m3")
+    measure.add_argument("--device", choices=["mps", "cpu"], required=True)
+    measure.add_argument("--batch-size", type=int, default=16)
+    measure.add_argument("--sample", type=int, default=200)
+    measure.set_defaults(handler=_embedding_measure)
 
     return parser
 

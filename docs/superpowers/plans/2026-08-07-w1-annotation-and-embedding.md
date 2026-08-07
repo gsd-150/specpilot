@@ -203,7 +203,7 @@ a stable code and parses nothing.
 The other half of W1's gate: *progress is checkable — completed counts, source
 paths, and adjudication records all present.*
 
-- [ ] **Step 1: Write failing progress tests**
+- [x] **Step 1: Write failing progress tests**
 
 Assert the report gives per-set completed counts against §8.1 targets, the
 distribution of independent paths used, the clause-first / scenario-first split
@@ -211,9 +211,9 @@ against the 60/40 target, the unanswerable count against the 20% requirement and
 the dev 3 / test 5 and dev 2 / test 4 floors, and how many records are missing
 an adjudication record. Assert no question or clause text appears in the output.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [x] **Step 3: Implement and verify GREEN**
 
 ---
 
