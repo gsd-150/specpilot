@@ -1070,8 +1070,8 @@ else
     # From this point, every failure preserves exact state and prints the
     # recovery instruction instead of rerunning or deleting evidence.
     fresh_refusal_pending=1
-    inspection_attempt_pending=0
     trap 'if test "${fresh_refusal_pending:-0}" = 1; then printf "%s\n" "TASK3_STEP3_FRESH_REFUSAL_RECOVERY_REQUIRED" "preserve fresh=$accepted quarantined=$quarantined stderr=$inspection_stderr exactly as found" "do not rerun, move, overwrite, or delete; record path identities and hashes, then resume link-before-unlink reconciliation" >&2; fi' EXIT
+    inspection_attempt_pending=0
     trap 'exit 128' HUP INT TERM
     test -z "$inspection_out"
     test "$(wc -l < "$inspection_stderr" | tr -d ' ')" = 1
