@@ -1745,7 +1745,7 @@ git commit -m "docs: record source-bound task8 assessments"
 - Consumes: completed Tasks 0–5.
 - Produces: internally consistent local proposal and verified Task 10 boundary.
 
-- [ ] **Step 1: Apply only the approved proposal edits**
+- [x] **Step 1: Apply only the approved proposal edits**
 
 Replace the five `gpt-5.6-luna` judge references with `glm-5.2` over the
 ChatAnywhere API route. Preserve the different-model/human-blind-audit
@@ -1754,7 +1754,7 @@ with ADR 0001: originals with external relationships are refused; only a
 separately reviewed derivative may remove an allowlisted template relationship.
 Do not stage this file.
 
-- [ ] **Step 2: Run focused and full verification**
+- [x] **Step 2: Run focused and full verification**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/compliance \
@@ -1768,7 +1768,7 @@ git diff --check
 Expected: all non-database tests pass; environment-dependent skips are reported
 rather than counted as evidence. Ruff, mypy, and whitespace checks exit 0.
 
-- [ ] **Step 3: Verify the hard safety boundary**
+- [x] **Step 3: Verify the hard safety boundary**
 
 ```bash
 test ! -e artifacts/public/w0-verification.json
@@ -1782,7 +1782,7 @@ Re-read all four envelopes through the validator, recompute every local content
 ID, confirm zero successors/provider calls, and inspect the public status for
 sensitive paths, excerpts, account values, credentials, or approval language.
 
-- [ ] **Step 4: Run task and whole-branch reviews**
+- [x] **Step 4: Run task and whole-branch reviews**
 
 Every implementation task receives specification and quality review. The final
 reviewer checks the complete range from the pre-plan base through HEAD,

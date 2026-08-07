@@ -80,8 +80,10 @@ def _verify_policy_evidence(
     supplied record whose document hash, URL, and capture time all agree, and no
     required document may have been frozen after the conclusion was written.
     """
+    # An empty required set must fail closed too: a route whose gate demands
+    # nothing would accept a conclusion resting on no evidence at all.
     required = TASK8_REQUIRED_POLICY_EVIDENCE_KINDS.get(route)
-    if required is None:
+    if not required:
         raise AssessmentBindingError("policy evidence is invalid")
     supplied = {record.kind: record for record in policy_evidence}
     if len(supplied) != len(policy_evidence):

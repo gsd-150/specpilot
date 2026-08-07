@@ -681,6 +681,32 @@ def test_deepseek_conclusion_refuses_incomplete_or_unbound_policy_evidence(
         )
 
 
+def test_a_route_requiring_no_documents_refuses_rather_than_waves_through(
+    stored_sources: StoredSources,
+    deepseek_index: ComplianceEvidenceIndex,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty required set must fail closed, not accept a bare conclusion."""
+    monkeypatch.setitem(
+        TASK8_REQUIRED_POLICY_EVIDENCE_KINDS, TASK8_DEEPSEEK_ROUTE, frozenset()
+    )
+    envelope = build_envelope(
+        source_manifest_id=stored_sources["38.300"].manifest_id,
+        route_binding=TASK8_DEEPSEEK_ROUTE,
+        model_slug="deepseek-v4-flash",
+        evidence_index_id=canonical_sha256(deepseek_index),
+        author_conclusion=exact_deepseek_conclusion(),
+    )
+
+    with pytest.raises(AssessmentBindingError, match="policy evidence is invalid"):
+        validate_task8_source_bound_assessment(
+            envelope,
+            manifest_store=stored_sources.store,
+            evidence_index=deepseek_index,
+            policy_evidence=(),
+        )
+
+
 def test_deepseek_conclusion_refuses_evidence_captured_after_it_was_authored(
     stored_sources: StoredSources,
     deepseek_index: ComplianceEvidenceIndex,
