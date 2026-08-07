@@ -1,5 +1,12 @@
 # Task 10 Prerequisite: Task 8 Step 4 Evidence Draft Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** This plan predates the Scope 1 / Scope 2
+> split committed in `705e9c5`. Its unsigned-only assessment rule and
+> inspection-gated source-manifest steps conflict with the revised design.
+> Execute
+> `docs/superpowers/plans/2026-08-07-task8-step4-scope1-assessments.md`
+> instead. This file is retained only as an audit record of the earlier plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fill the Task 8 Step 4 evidence gap that currently blocks Task 10 by freezing two exact 3GPP Release 18 sources, capturing content-addressed official-policy evidence, and producing four unsigned compliance-assessment drafts while preserving SpecPilot's default-deny boundary.
