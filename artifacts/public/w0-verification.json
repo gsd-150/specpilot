@@ -1,0 +1,179 @@
+{
+  "all_checks_passed": true,
+  "checks": [
+    {
+      "check": "lint",
+      "command": ".venv/bin/ruff check .",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:00Z",
+      "summary": "All checks passed!"
+    },
+    {
+      "check": "typecheck",
+      "command": ".venv/bin/mypy src",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:00Z",
+      "summary": "Success: no issues found in 29 source files"
+    },
+    {
+      "check": "unit",
+      "command": ".venv/bin/python -m pytest -q tests/unit tests/cli",
+      "exit_code": 0,
+      "passed": 300,
+      "skipped": 0,
+      "started_at": "2026-08-07T07:49:01Z",
+      "summary": "300 passed in 1.07s"
+    },
+    {
+      "check": "integration-postgres",
+      "command": ".venv/bin/python -m pytest -q tests/integration",
+      "exit_code": 0,
+      "passed": 25,
+      "skipped": 0,
+      "started_at": "2026-08-07T07:49:03Z",
+      "summary": "25 passed in 2.75s"
+    },
+    {
+      "check": "fixture-smoke",
+      "command": ".venv/bin/python -m pytest -q tests/smoke",
+      "exit_code": 0,
+      "passed": 5,
+      "skipped": 0,
+      "started_at": "2026-08-07T07:49:06Z",
+      "summary": "5 passed in 0.35s"
+    },
+    {
+      "check": "full-suite",
+      "command": ".venv/bin/python -m pytest -q",
+      "exit_code": 0,
+      "passed": 330,
+      "skipped": 0,
+      "started_at": "2026-08-07T07:49:06Z",
+      "summary": "330 passed in 3.68s"
+    },
+    {
+      "check": "egress-envelope-smoke",
+      "command": ".venv/bin/python -m specpilot.cli egress envelope-smoke",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:10Z",
+      "summary": "{\"corpus_unique_disclosures\":17,\"refusals\":{\"one_more_byte_in_an_excerpt\":\"excerpt_bytes_exceeded\",\"one_more_excerpt\":\"root_unique_excerpts_exceeded\",\"one_more_toc_node\":\"toc_run_exceeded\",\"one_more_t"
+    },
+    {
+      "check": "provider-route-smoke-main",
+      "command": ".venv/bin/python -m specpilot.cli provider route-smoke --fixture-only --route main --ledger-dsn postgresql://localhost:5432/specpilot_task10",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:10Z",
+      "summary": "{\"adapter\":\"fixture\",\"does_not_prove\":\"any real provider route, credential, or model\",\"finish_reason\":\"stop\",\"model_id\":\"fixture-model-v1\",\"proves\":\"transport, enforcer and ledger are wired and policy"
+    },
+    {
+      "check": "provider-route-smoke-judge",
+      "command": ".venv/bin/python -m specpilot.cli provider route-smoke --fixture-only --route judge --ledger-dsn postgresql://localhost:5432/specpilot_task10",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:10Z",
+      "summary": "{\"adapter\":\"fixture\",\"does_not_prove\":\"any real provider route, credential, or model\",\"finish_reason\":\"stop\",\"model_id\":\"fixture-model-v1\",\"proves\":\"transport, enforcer and ledger are wired and policy"
+    },
+    {
+      "check": "compose-demo-config",
+      "command": "docker compose -f compose.yaml -f compose.demo.yaml --profile demo config",
+      "exit_code": 0,
+      "started_at": "2026-08-07T07:49:10Z",
+      "summary": "    name: specpilot_qdrant-data"
+    }
+  ],
+  "commit": "cc73e773c113a3891587d39ecf43bcae24b8d8b6",
+  "compliance_state": {
+    "assessment_envelopes": 4,
+    "authorized_manifests": 0,
+    "chatanywhere_assessments": "unsigned (2)",
+    "conclusion_gate": "api_policy_evidence",
+    "deepseek_assessments": "complete (2)",
+    "evidence_indexes": 2,
+    "ingestion_outcome_both_sources": "embedded_active_content",
+    "provider_calls": 0,
+    "quarantined_originals": 2,
+    "real_corpus_files": 0,
+    "source_manifests": 2,
+    "successors": 0
+  },
+  "config_hashes": {
+    "egress_policy_default_v1": "ef19b1b0edd0344060ff0b8b46ab14987801157222f647cc5bce99940035fdd3",
+    "migration_001_egress_ledger": "0e0f13d1089c611d8c3f272248d1e7032740c6c8a1b25c5909e8301b11b2dd99"
+  },
+  "environment": {
+    "postgres_dsn": "ephemeral local postgres created for this run and dropped after it",
+    "python": "3.14.0"
+  },
+  "generated_at": "2026-08-07T07:49:11Z",
+  "is_approval": false,
+  "notes": [
+    "Fixture route smokes prove the transport, enforcer, and ledger are wired and policy-bound. They prove nothing about any real provider, credential, or model.",
+    "W0 reports no recall, accuracy, F1, or other quality metric by design."
+  ],
+  "quality_metrics_reported": null,
+  "requirements": [
+    {
+      "evidence": "87 ingestion tests pass; both real sources refused with embedded_active_content; data/real empty; 2 originals unchanged in quarantine",
+      "id": 1,
+      "met": true,
+      "requirement": "unsafe archives and ooxml packages are refused and quarantined"
+    },
+    {
+      "evidence": "2 stored source manifests, 0 successors, 0 cloud_egress_authorized",
+      "id": 2,
+      "met": true,
+      "requirement": "initial manifests are default-deny; successor only with a completed bound assessment"
+    },
+    {
+      "evidence": "enforcer resolves manifests through the store it owns; unstored-source refusal test passes",
+      "id": 3,
+      "met": true,
+      "requirement": "an unstored manifest cannot authorize a route"
+    },
+    {
+      "evidence": "29696 transmitted tokens / 475136 bytes accepted; excerpt_tokens_exceeded, excerpt_bytes_exceeded, root_unique_excerpts_exceeded, toc_run_exceeded",
+      "id": 4,
+      "met": true,
+      "requirement": "maximum legal envelope accepted exactly; one more of each unit refused with a stable code"
+    },
+    {
+      "evidence": "25 integration tests pass against a live database",
+      "id": 5,
+      "met": true,
+      "requirement": "multi-round, retry, replay, over-reach, concurrency and restart accounting hold on real postgres"
+    },
+    {
+      "evidence": "13 transport fail-closed tests assert fixture adapter call count stayed zero",
+      "id": 6,
+      "met": true,
+      "requirement": "every refusal is a no-send"
+    },
+    {
+      "evidence": "compose demo config validates; 4 exposure tests pass",
+      "id": 7,
+      "met": true,
+      "requirement": "compose and ci skeletons publish no internal service ports"
+    },
+    {
+      "evidence": "smoke outputs carry none; the only occurrences in the repository are the rules forbidding them",
+      "id": 8,
+      "met": true,
+      "requirement": "no quality-looking number in fixture or ci output"
+    },
+    {
+      "evidence": "signed by author_id chunxue, expires 2026-09-06T14:44:00Z, bound to deepseek/online-main-deepseek-v4-flash-api/online_main",
+      "id": 9,
+      "met": true,
+      "requirement": "compliance conclusion written, signed with an author_id, carrying an expiry"
+    }
+  ],
+  "route_decision": "extend",
+  "route_decision_rationale": {
+    "A": "not met: zero authorized successor manifests",
+    "B": "not met: the cloud-egress conclusion is yes, and B requires no",
+    "C": "trigger fires (corpus cannot be safely ingested) but the two cheaper variants have not been tried",
+    "D": "does not move W0 to a pass by its own definition; still priced against C",
+    "selected": "extend"
+  },
+  "schema_version": "w0-verification/v1",
+  "tracked_tree_clean": true
+}

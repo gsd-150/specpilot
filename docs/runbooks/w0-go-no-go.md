@@ -8,6 +8,23 @@ sign-off, or legal advice — to a reviewer, an interviewer, or yourself.
 W0 ends with exactly one recorded state: **A**, **B**, **C**, or **extend**.
 There is no undecided state, and W1 does not begin from one.
 
+## Recorded decision — 2026-08-07
+
+**`extend`**, at commit `cc73e773c113a3891587d39ecf43bcae24b8d8b6`.
+
+Every checklist item below is met and all ten verification commands exit 0 from
+a clean state, and the answer is still `extend`: A needs an authorized successor
+manifest that does not exist, B needs a cloud-egress conclusion of *no* when the
+recorded one is *yes*, and C's corpus trigger fires but its two cheaper variants
+have not been tried.
+
+The blocker is ingestion, not compliance. Both chosen sources are refused with
+`embedded_active_content` and sit in quarantine, while the main-chain conclusion
+is written and signed.
+
+Evidence: `../../artifacts/public/w0-verification.json` and
+`../reports/w0-foundation-report.md`.
+
 ## Evidence to gather
 
 Re-run everything from a clean state and record the command, timestamp, code
@@ -32,22 +49,22 @@ python -m specpilot.cli provider route-smoke --fixture-only --route main --ledge
 
 ### Checklist
 
-- [ ] Unsafe archives and OOXML packages are refused and quarantined, and no
+- [x] Unsafe archives and OOXML packages are refused and quarantined, and no
       rejected input was ever repaired into an accepted one.
-- [ ] An initial source manifest is default-deny, and a successor exists only
+- [x] An initial source manifest is default-deny, and a successor exists only
       where a completed assessment binds one route.
-- [ ] A manifest that was never stored cannot authorize a route, even when it is
+- [x] A manifest that was never stored cannot authorize a route, even when it is
       internally consistent and says `authorized=true`.
-- [ ] The maximum legal envelope is accepted at exactly the documented totals,
+- [x] The maximum legal envelope is accepted at exactly the documented totals,
       and one more excerpt, TOC node, token, and byte are each refused with a
       stable code.
-- [ ] Multi-round, retry, replay, over-reach, concurrency, and restart
+- [x] Multi-round, retry, replay, over-reach, concurrency, and restart
       accounting all hold against a real PostgreSQL.
-- [ ] Every refusal is a no-send: the fixture adapter's call count stayed zero.
-- [ ] Compose and CI skeletons exist and publish no internal service ports.
-- [ ] Fixture and CI output contains no recall, accuracy, F1, or other
+- [x] Every refusal is a no-send: the fixture adapter's call count stayed zero.
+- [x] Compose and CI skeletons exist and publish no internal service ports.
+- [x] Fixture and CI output contains no recall, accuracy, F1, or other
       quality-looking number.
-- [ ] The compliance conclusion is written, signed with an `author_id`, and
+- [x] The compliance conclusion is written, signed with an `author_id`, and
       carries an expiry.
 
 ## Route decision

@@ -629,22 +629,22 @@ git commit -m "ci: add isolated w0 service and fixture checks"
 - Produces one explicit route decision: `A`, `B`, `C`, or `extend`; no undecided state may enter W1.
 - Consumes fresh outputs from Tasks 1–9 plus the compliance/provider evidence from Task 8.
 
-- [ ] **Step 1: Re-run every hard verification from a clean test state**
+- [x] **Step 1: Re-run every hard verification from a clean test state**
 
 Capture command, timestamp, code/config hash, exit code, test counts, and sanitized artifact hashes. Do not copy source text, payload text, credentials, or unrestricted logs into the report.
 
-- [ ] **Step 2: Check W0 requirements line by line**
+- [x] **Step 2: Check W0 requirements line by line**
 
 Confirm safe archive/OOXML rejection, initial manifests, successor/default-deny behavior, multi-round/retry/overreach/concurrency/recovery accounting, maximum legal envelope, fixture provider route evidence, Compose/CI skeleton, and explicit compliance conclusion.
 
-- [ ] **Step 3: Record the only valid next state**
+- [x] **Step 3: Record the only valid next state**
 
 - Route A only when both actual provider routes are fixture-smoked and separately bound authorized successor manifests exist for their uses.
 - Route B only when cloud egress conclusion is no and the local structured-output/tool-calling/latency/cost smoke is evidenced.
 - Route C only when cloud egress conclusion is no and target hardware cannot sustain B; create a new RFC-specific design/plan before W1.
 - Otherwise record `extend` and do not start W1.
 
-- [ ] **Step 4: Run verification-before-completion and commit the sanitized evidence**
+- [x] **Step 4: Run verification-before-completion and commit the sanitized evidence**
 
 Run: `make check && make test-integration && python -m pytest tests/smoke/test_fixture_pipeline.py -q`
 
