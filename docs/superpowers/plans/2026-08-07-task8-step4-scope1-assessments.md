@@ -561,15 +561,67 @@ git commit -m "fix: distinguish unsupported manifest versions"
 - [ ] **Step 1: Reconcile instead of overwriting existing state**
 
 ```bash
+set -euo pipefail
+umask 077
+source_dir=artifacts/restricted/sources/3gpp/38.321/18.10.0
+archive="$source_dir/38321-ia0.zip"
+inspection="$source_dir/inspection.json"
+quarantine_dir=data/quarantine/3gpp/38.321
+quarantined=data/quarantine/3gpp/38.321/38321-ia0.docx
+accepted=data/real/3gpp/38.321/18.10.0/38321-ia0.docx
+record="$source_dir/source-capture.json"
 test "$(shasum -a 256 artifacts/restricted/sources/3gpp/38.300/18.10.0/38300-ia0.zip | awk '{print $1}')" = cd99c7a86796046d906c73e52f375a4bcda1bec8003ca6f158adb2bb669f8145
 test "$(shasum -a 256 data/quarantine/3gpp/38.300/38300-ia0.docx | awk '{print $1}')" = c287873582310c0f609eab0ff2ee33634c4a2a1d10dd6ce6e74d7e96e2a83819
+test -d "$source_dir"
+test ! -L "$source_dir"
+test "$(/usr/bin/stat -f '%Lp' "$source_dir")" = 700
+test "$(/usr/bin/stat -f '%Su' "$source_dir")" = "$(id -un)"
+test -f "$archive"
+test ! -L "$archive"
+test "$(/usr/bin/stat -f '%Lp' "$archive")" = 600
+test "$(/usr/bin/stat -f '%Su' "$archive")" = "$(id -un)"
+test "$(shasum -a 256 "$archive" | awk '{print $1}')" = fc77636b28c57293688e854a3585fcf6056da77d5570d51835d8772eedbe9446
+test "$(wc -c < "$archive" | tr -d ' ')" = 3015837
+test -d "$quarantine_dir"
+test ! -L "$quarantine_dir"
+test "$(/usr/bin/stat -f '%Lp' "$quarantine_dir")" = 700
+test "$(/usr/bin/stat -f '%Su' "$quarantine_dir")" = "$(id -un)"
+test -f "$quarantined"
+test ! -L "$quarantined"
+test "$(/usr/bin/stat -f '%Lp' "$quarantined")" = 600
+test "$(/usr/bin/stat -f '%Su' "$quarantined")" = "$(id -un)"
+test "$(shasum -a 256 "$quarantined" | awk '{print $1}')" = 6c98d03d5c3936c251edaa4148e3536bff80addc918c8a5416624aeda82ab9ff
+test "$(wc -c < "$quarantined" | tr -d ' ')" = 3857056
+test -f "$inspection"
+test ! -L "$inspection"
+test "$(/usr/bin/stat -f '%Lp' "$inspection")" = 600
+test "$(/usr/bin/stat -f '%Su' "$inspection")" = "$(id -un)"
+.venv/bin/python - "$inspection" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {
+    "inspection_code": "embedded_active_content",
+    "docx_sha256": "6c98d03d5c3936c251edaa4148e3536bff80addc918c8a5416624aeda82ab9ff",
+}
+if value != expected:
+    raise SystemExit("unexpected 38.321 inspection record")
+PY
+test ! -e "$accepted"
+test ! -L "$accepted"
+test ! -e "$record"
+test ! -L "$record"
 test ! -e artifacts/public/w0-verification.json
 test ! -e docs/reports/w0-foundation-report.md
 test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: retained 38.300 hashes match, Task 10 outputs are absent, and the
-index is empty. Never move the quarantined DOCX into `data/real`.
+Expected: both retained origins pass their exact hash/size, mode, ownership,
+regular-file/non-symlink, and inspection checks; the 38.321 accepted DOCX and
+capture record are absent; Task 10 outputs are absent; and the index is empty.
+Never move the quarantined DOCX into `data/real`.
 
 - [ ] **Step 2: Download TS 38.321 with private no-replace publication**
 
@@ -617,6 +669,99 @@ as printed by the same shell, then `chmod 600` it. Do not reconstruct or rerun
 the time. If a final path appears before publication, stop; securely reread and
 compare it before deciding whether the attempt is an exact replay.
 
+**Observed interrupted-state recovery branch:** Select this branch, and do not
+run the fresh-publication shell above, only after Step 1 proves the retained
+38.321 archive, quarantined DOCX, and `inspection.json` are exactly the
+interrupted state described there and `source-capture.json` is absent. The
+author explicitly approves deletion only of the validated replay temporary file
+below; do not publish to, link over, move over, truncate, unlink, or otherwise
+change either retained file.
+
+Run this exact fail-fast replay shell. It uses the same official URL and curl
+options, writes only a new private temporary file in the restricted source
+directory, and creates a unique no-replace replay filename that durably embeds
+the newly captured UTC timestamp and hash before the shell exits:
+
+```bash
+set -euo pipefail
+umask 077
+source_dir=artifacts/restricted/sources/3gpp/38.321/18.10.0
+archive="$source_dir/38321-ia0.zip"
+record="$source_dir/source-capture.json"
+url=https://www.3gpp.org/ftp/Specs/archive/38_series/38.321/38321-ia0.zip
+retained_sha=fc77636b28c57293688e854a3585fcf6056da77d5570d51835d8772eedbe9446
+retained_bytes=3015837
+test -d "$source_dir"
+test ! -L "$source_dir"
+test "$(/usr/bin/stat -f '%Lp' "$source_dir")" = 700
+test "$(/usr/bin/stat -f '%Su' "$source_dir")" = "$(id -un)"
+test -f "$archive"
+test ! -L "$archive"
+test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$retained_sha"
+test "$(wc -c < "$archive" | tr -d ' ')" = "$retained_bytes"
+test ! -e "$record"
+test ! -L "$record"
+download_tmp="$(mktemp "$source_dir/.38321-ia0.replay-download.XXXXXX")"
+test -f "$download_tmp"
+test ! -L "$download_tmp"
+chmod 600 "$download_tmp"
+trap 'test ! -e "$download_tmp" || /bin/rm -- "$download_tmp"' EXIT HUP INT TERM
+curl --fail --location --silent --show-error --compressed \
+  --remove-on-error --user-agent 'SpecPilot-W0-evidence/1.0' \
+  --output "$download_tmp" "$url"
+downloaded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+replay_sha="$(shasum -a 256 "$download_tmp" | awk '{print $1}')"
+replay_bytes="$(wc -c < "$download_tmp" | tr -d ' ')"
+timestamp_tag="$(printf '%s' "$downloaded_at" | tr -d ':-')"
+replay="$source_dir/.38321-ia0.replay-${timestamp_tag}-${replay_sha}.zip"
+test ! -e "$replay"
+test ! -L "$replay"
+ln "$download_tmp" "$replay"
+test -f "$replay"
+test ! -L "$replay"
+chmod 600 "$replay"
+/bin/rm -- "$download_tmp"
+trap - EXIT HUP INT TERM
+test "$replay_sha" = "$retained_sha"
+test "$replay_bytes" = "$retained_bytes"
+printf 'download_url=%s\ndownloaded_at=%s\narchive_sha256=%s\nbyte_count=%s\nreplay_path=%s\n' \
+  "$url" "$downloaded_at" "$replay_sha" "$replay_bytes" "$replay"
+```
+
+Before deleting `"$replay"`, use `apply_patch` to append the just-printed
+`download_url`, `downloaded_at`, `archive_sha256`, and `byte_count` values,
+plus these exact equality results, to the ignored
+`.superpowers/sdd/2026-08-07-task8-step4-scope1-assessments/task-3-implementer-report.md`:
+
+```text
+replay_archive_sha256 == retained_archive_sha256: true
+replay_byte_count == retained_archive_byte_count: true
+```
+
+Then validate and remove only the exact replay child. This removal is covered
+by the author's explicit non-destructive-replay approval:
+
+```bash
+set -euo pipefail
+replay_dir="$(realpath "$source_dir")"
+replay_real="$(realpath "$replay")"
+test "$(dirname "$replay_real")" = "$replay_dir"
+test -f "$replay"
+test ! -L "$replay"
+test "$(/usr/bin/stat -f '%Lp' "$replay")" = 600
+test "$(/usr/bin/stat -f '%Su' "$replay")" = "$(id -un)"
+test "$(shasum -a 256 "$replay" | awk '{print $1}')" = "$retained_sha"
+test "$(wc -c < "$replay" | tr -d ' ')" = "$retained_bytes"
+/bin/rm -- "$replay"
+test ! -e "$replay"
+test ! -L "$replay"
+```
+
+Stop at the author-fact gate after that deletion. Do not create
+`source-capture.json`, either manifest, public status, or a Task 3 commit until
+the author confirms the newly captured exact TS 38.321 `download_url` and
+`downloaded_at` recorded in the ignored implementer report.
+
 - [ ] **Step 3: Inspect each source independently**
 
 Run the existing inspector for 38.321. If it accepts, retain the DOCX in the
@@ -654,13 +799,60 @@ fi
 ```
 
 After extracting the stable refusal code into `inspection.json`, remove the
-temporary stderr file. For 38.300, create `tmp_root=$(mktemp -d)` and pass the
-nonexistent child `--destination "$tmp_root/extracted"` plus a separate
-nonexistent child `--quarantine "$tmp_root/quarantine"`. Capture the same exact
-outputs, require exit 2 and `embedded_active_content\n`, compare
-`$tmp_root/extracted/38300-ia0.docx` with the retained quarantine hash, verify
-`tmp_root` is the private temporary directory created by this step, then delete
-only that validated `tmp_root`.
+temporary stderr file. For 38.300, use this exact macOS-safe temporary-root
+sequence. On macOS, `/var` is a symlink to `/private/var`; the secure path
+walker correctly refuses symlinked parent components, so pass only canonical
+`tmp_root` children to the inspector. Do not change product code or weaken
+`O_NOFOLLOW` behavior.
+
+```bash
+set -euo pipefail
+umask 077
+tmp_root_raw="$(mktemp -d)"
+tmp_root="$(realpath "$tmp_root_raw")"
+current_tmp_raw="${TMPDIR:?TMPDIR must be set}"
+current_tmp="$(realpath "$current_tmp_raw")"
+test "$(/usr/bin/stat -f '%d:%i' "$tmp_root_raw")" = \
+  "$(/usr/bin/stat -f '%d:%i' "$tmp_root")"
+test -d "$tmp_root"
+test ! -L "$tmp_root"
+test "$(/usr/bin/stat -f '%Lp' "$tmp_root")" = 700
+test "$(/usr/bin/stat -f '%Su' "$tmp_root")" = "$(id -un)"
+test "$(dirname "$tmp_root")" = "$current_tmp"
+set +e
+inspection_out="$(.venv/bin/python -m specpilot.cli archive inspect \
+  --archive artifacts/restricted/sources/3gpp/38.300/18.10.0/38300-ia0.zip \
+  --destination "$tmp_root/extracted" \
+  --quarantine "$tmp_root/quarantine" \
+  --expect-docx 38300-ia0.docx 2>"$tmp_root/inspection.stderr")"
+inspection_exit=$?
+set -e
+test "$inspection_exit" -eq 2
+test -z "$inspection_out"
+test "$(wc -l < "$tmp_root/inspection.stderr" | tr -d ' ')" = 1
+test "$(/bin/cat "$tmp_root/inspection.stderr")" = embedded_active_content
+test -f "$tmp_root/extracted/38300-ia0.docx"
+test ! -L "$tmp_root/extracted/38300-ia0.docx"
+test "$(shasum -a 256 "$tmp_root/extracted/38300-ia0.docx" | awk '{print $1}')" = \
+  c287873582310c0f609eab0ff2ee33634c4a2a1d10dd6ce6e74d7e96e2a83819
+test "$(/usr/bin/stat -f '%d:%i' "$tmp_root_raw")" = \
+  "$(/usr/bin/stat -f '%d:%i' "$tmp_root")"
+test -d "$tmp_root"
+test ! -L "$tmp_root"
+test "$(/usr/bin/stat -f '%Lp' "$tmp_root")" = 700
+test "$(/usr/bin/stat -f '%Su' "$tmp_root")" = "$(id -un)"
+test "$(dirname "$tmp_root")" = "$current_tmp"
+/bin/rm -rf -- "$tmp_root"
+test ! -e "$tmp_root_raw"
+test ! -L "$tmp_root_raw"
+test ! -e "$tmp_root"
+test ! -L "$tmp_root"
+```
+
+The sole recursive removal above is the already revalidated exact canonical
+`tmp_root`, a direct child of the canonical current temporary directory; both
+the raw `/var/...` spelling and canonical `/private/var/...` spelling must be
+absent afterward.
 
 For a 38.321 refusal, use exact paths and link-before-unlink publication:
 
@@ -684,16 +876,23 @@ relationship target, or unrestricted path.
 
 - [ ] **Step 4: Apply the author-fact gate and create manifests**
 
-Use only author-confirmed `download_url` and `downloaded_at` values. If the
-retained 38.300 time is not confirmed, record its filesystem observation
-separately and stop before inventing that manifest field. For every confirmed
-source invoke `source-manifest create` with archive/DOCX hashes even when
-inspection refused.
+Use only author-confirmed `download_url` and `downloaded_at` values. The author
+has confirmed these TS 38.300 facts (the timestamp was explicitly identified as
+a filesystem-mtime observation before confirmation):
 
-The 38.300 candidate observation is the archive's local completion mtime
-`2026-08-06T20:23:31Z`; label it `filesystem_mtime_observation` until the author
-confirms it. The URL candidate is exactly
-`https://www.3gpp.org/ftp/Specs/archive/38_series/38.300/38300-ia0.zip`.
+```text
+download_url: https://www.3gpp.org/ftp/Specs/archive/38_series/38.300/38300-ia0.zip
+downloaded_at: 2026-08-06T20:23:31Z
+```
+
+For TS 38.321, `downloaded_at` remains pending: do not substitute the lost
+original value or any filesystem mtime/ctime observation. After the recovery
+branch captures a new exact value, keep both its printed `download_url` and
+`downloaded_at` in the ignored implementer report and stop until the author
+confirms those newly captured facts. Do not create either source manifest,
+either public status, or a Task 3 commit before that confirmation. Once both
+origins have confirmed facts, invoke `source-manifest create` with archive/DOCX
+hashes even when inspection refused.
 
 - [ ] **Step 5: Verify the two-manifest invariant**
 
