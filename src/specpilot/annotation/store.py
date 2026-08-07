@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -99,11 +100,20 @@ class AnnotationStore:
             raise ValueError("stored annotation ID does not match its content")
         return record.model_copy(update={"annotation_id": annotation_id})
 
-    def _find_by_item_id(self, item_id: str) -> Annotation | None:
+    def iter_records(self) -> Iterator[Annotation]:
+        """Yield every stored record, each verified against its own content ID.
+
+        Successors are yielded alongside their predecessors: this is the whole
+        store, not one record per item. Callers that count items resolve the
+        chains themselves.
+        """
         if not self._directory.exists():
-            return None
+            return
         for path in sorted(self._directory.glob("*.json")):
-            candidate = self.read(path.stem)
+            yield self.read(path.stem)
+
+    def _find_by_item_id(self, item_id: str) -> Annotation | None:
+        for candidate in self.iter_records():
             is_root = candidate.predecessor_annotation_id is None
             if candidate.item_id == item_id and is_root:
                 return candidate

@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from specpilot.annotation.progress import read_progress
 from specpilot.contracts.archive import ArchivePolicy, UnsafeArchiveError
 from specpilot.contracts.egress import (
     EgressRequest,
@@ -254,6 +255,26 @@ class _FixtureCounter:
 
     def count_tokens(self, text: str) -> int:
         return max(len(text.split()), 1)
+
+
+def _annotation_progress(arguments: argparse.Namespace) -> int:
+    """Report how far gold annotation has got, without reporting any of it.
+
+    Every record is re-verified against its own content ID on the way in, so a
+    count is only ever reported over records that are still what they were when
+    written. One tampered file refuses the whole report rather than quietly
+    dropping a record and reporting a smaller number.
+    """
+    directory: Path = arguments.annotation_dir
+    if not directory.is_dir():
+        return _refuse("annotation_dir_not_found")
+    try:
+        report = read_progress(directory)
+    except ValueError:
+        return _refuse("invalid_annotation_record")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    return _emit(report.payload())
 
 
 def _fixture_excerpt(index: int, tokens: int, byte_count: int) -> EvidenceExcerpt:
@@ -678,6 +699,13 @@ def _parser() -> argparse.ArgumentParser:
     parse.add_argument("--manifest-dir", type=Path, required=True)
     parse.add_argument("--xml", type=Path, required=True)
     parse.set_defaults(handler=_corpus_parse)
+
+    annotation = commands.add_parser("annotation").add_subparsers(
+        dest="command", required=True
+    )
+    progress = annotation.add_parser("progress")
+    progress.add_argument("--annotation-dir", type=Path, required=True)
+    progress.set_defaults(handler=_annotation_progress)
 
     return parser
 
