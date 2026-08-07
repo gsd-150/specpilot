@@ -47,6 +47,7 @@ from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolatio
 from specpilot.egress.policy import EgressPolicy
 from specpilot.embedding.local_encoder import EmbeddingRuntimeUnavailable, load_encoder
 from specpilot.embedding.throughput import (
+    BatchOrder,
     estimate_full_corpus_seconds,
     evenly_spaced,
     measure_throughput,
@@ -347,6 +348,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
         model_id=arguments.model_id,
         weights_sha256=digest,
         device=arguments.device,
+        batch_order=arguments.batch_order,
         batch_size=arguments.batch_size,
     )
 
@@ -358,6 +360,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
             "weights_sha256": measurement.weights_sha256,
             "pipeline_version": measurement.pipeline_version,
             "device": measurement.device,
+            "batch_order": measurement.batch_order.value,
             "batch_size": measurement.batch_size,
             "sample_size": measurement.sample_size,
             "sample_words": measurement.sample_words,
@@ -813,6 +816,9 @@ def _parser() -> argparse.ArgumentParser:
     measure.add_argument("--model-dir", type=Path, required=True)
     measure.add_argument("--model-id", default="BAAI/bge-m3")
     measure.add_argument("--device", choices=["mps", "cpu"], required=True)
+    measure.add_argument(
+        "--batch-order", type=BatchOrder, choices=list(BatchOrder), default="document"
+    )
     measure.add_argument("--batch-size", type=int, default=16)
     measure.add_argument("--sample", type=int, default=200)
     measure.set_defaults(handler=_embedding_measure)

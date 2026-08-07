@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from specpilot.embedding.throughput import (
+    BatchOrder,
     NoMeasurementError,
     ThroughputMeasurement,
     embedding_cache_key,
@@ -28,6 +29,7 @@ def measurement(**overrides: object) -> ThroughputMeasurement:
         "weights_sha256": WEIGHTS,
         "pipeline_version": PIPELINE,
         "device": "mps",
+        "batch_order": BatchOrder.DOCUMENT,
         "batch_size": 16,
         "sample_size": 200,
         "sample_words": 12_000,
@@ -142,6 +144,47 @@ def test_the_measurement_record_holds_no_clause_text() -> None:
     )
 
     assert "freshness" not in json.dumps(asdict(result))
+
+
+def test_length_ordering_regroups_the_batches_without_dropping_a_clause() -> None:
+    """Every batch pads to its longest member, so grouping by length matters."""
+    texts = ("aa bb cc", "dd", "ee ff", "gg hh ii jj", "kk")
+    batches: list[Sequence[str]] = []
+
+    result = measure_throughput(
+        texts,
+        lambda batch: batches.append(tuple(batch)),
+        model_id="BAAI/bge-m3",
+        weights_sha256=WEIGHTS,
+        pipeline_version=PIPELINE,
+        device="cpu",
+        batch_order=BatchOrder.LENGTH,
+        batch_size=2,
+    )
+
+    assert batches == [("dd", "kk"), ("ee ff", "aa bb cc"), ("gg hh ii jj",)]
+    assert sorted(text for batch in batches for text in batch) == sorted(texts)
+    assert result.batch_order is BatchOrder.LENGTH
+    assert result.sample_size == 5
+    assert result.sample_words == 11
+
+
+def test_document_order_is_the_default_and_leaves_the_batches_alone() -> None:
+    texts = ("aa bb cc", "dd", "ee ff")
+    batches: list[Sequence[str]] = []
+
+    result = measure_throughput(
+        texts,
+        lambda batch: batches.append(tuple(batch)),
+        model_id="BAAI/bge-m3",
+        weights_sha256=WEIGHTS,
+        pipeline_version=PIPELINE,
+        device="cpu",
+        batch_size=2,
+    )
+
+    assert batches == [("aa bb cc", "dd"), ("ee ff",)]
+    assert result.batch_order is BatchOrder.DOCUMENT
 
 
 def test_the_words_per_second_figure_accompanies_the_clause_rate() -> None:
