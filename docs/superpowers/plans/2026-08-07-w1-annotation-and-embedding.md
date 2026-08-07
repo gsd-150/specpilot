@@ -100,23 +100,23 @@ section cannot be the unit that leaves the machine, and a token window cannot
 be the unit a citation names. The clause carries both: a stable citable
 identity from the section, and a bounded span that the enforcer can price.
 
-- [ ] **Step 1: Write failing tests for identity and boundedness**
+- [x] **Step 1: Write failing tests for identity and boundedness**
 
 Assert a clause ID is stable across two builds of the same document and changes
 when the section number changes; that every clause's span is within the excerpt
 cap; that a section longer than the cap yields several clauses sharing one
 section number with distinct ordinals; and that clause IDs never collide.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement the clause model**
+- [x] **Step 3: Implement the clause model**
 
 Derive the citable identity from `document_id`, `document_version`, and section
 number. Split only at paragraph boundaries the source already defines — the `pn`
 anchors R0 resolves — so a clause never begins mid-sentence. Record the parent
 section for every clause so parent-child chunking in W2 has a real parent.
 
-- [ ] **Step 4: Verify GREEN against the frozen corpus**
+- [x] **Step 4: Verify GREEN against the frozen corpus**
 
 Build clauses for RFC 9110 and 9112 and record counts, the longest clause, and
 how many sections needed splitting. Numbers go in the task report, not in Git.
