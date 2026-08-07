@@ -7,8 +7,7 @@ from pydantic import ValidationError
 
 from specpilot.contracts.compliance import (
     ComplianceEvidenceIndex,
-    DeepSeekAccountNotCaptured,
-    DeepSeekAccountObservation,
+    ProviderPolicyEvidence,
     SourceBoundAssessment,
 )
 from specpilot.contracts.manifests import (
@@ -45,17 +44,62 @@ TASK8_DEEPSEEK_CONCLUSION = AuthorizationConclusion(
     author_id="chunxue",
     provider_id="deepseek",
     endpoint_purpose="online-main-deepseek-v4-flash-api",
-    authored_at=datetime(2026, 8, 6, 20, tzinfo=UTC),
-    expires_at=datetime(2026, 9, 5, 20, tzinfo=UTC),
+    authored_at=datetime(2026, 8, 7, 14, 44, tzinfo=UTC),
+    expires_at=datetime(2026, 9, 6, 14, 44, tzinfo=UTC),
 )
 _TASK8_DEEPSEEK_STATEMENT_BYTES = 268
 _TASK8_DEEPSEEK_STATEMENT_SHA256 = (
     "b88021706a85f89dd98aa91e2233a404a1396f8f2a831fc33e6686f31fadc215"
 )
 
+# A conclusion authorizes an API route, so the evidence that gates it must be
+# the provider's own documents governing that API. An account-level toggle in a
+# provider's consumer chat product governs a different surface and is recorded
+# as optional context, never as the gate.
+TASK8_REQUIRED_POLICY_EVIDENCE_KINDS: dict[ProviderRouteBinding, frozenset[str]] = {
+    TASK8_DEEPSEEK_ROUTE: frozenset(
+        {"deepseek-api-docs", "deepseek-privacy", "deepseek-terms"}
+    ),
+}
+
 
 class AssessmentBindingError(ValueError):
     """A source-bound assessment failed mechanical binding validation."""
+
+
+def _verify_policy_evidence(
+    route: ProviderRouteBinding,
+    evidence_index: ComplianceEvidenceIndex,
+    policy_evidence: tuple[ProviderPolicyEvidence, ...],
+    *,
+    authored_at: datetime,
+) -> None:
+    """Require the index to hash-bind every document the route's gate needs.
+
+    Coverage alone is not enough: each required index entry must be backed by a
+    supplied record whose document hash, URL, and capture time all agree, and no
+    required document may have been frozen after the conclusion was written.
+    """
+    required = TASK8_REQUIRED_POLICY_EVIDENCE_KINDS.get(route)
+    if required is None:
+        raise AssessmentBindingError("policy evidence is invalid")
+    supplied = {record.kind: record for record in policy_evidence}
+    if len(supplied) != len(policy_evidence):
+        raise AssessmentBindingError("policy evidence is invalid")
+    entries = {entry.kind: entry for entry in evidence_index.entries}
+    for kind in sorted(required):
+        entry = entries.get(kind)
+        record = supplied.get(kind)
+        if entry is None or record is None:
+            raise AssessmentBindingError("policy evidence is invalid")
+        if (
+            entry.sha256 != record.document_sha256
+            or str(entry.url) != str(record.url)
+            or entry.captured_at != record.captured_at
+        ):
+            raise AssessmentBindingError("policy evidence is invalid")
+        if entry.captured_at > authored_at:
+            raise AssessmentBindingError("policy evidence postdates the conclusion")
 
 
 def validate_task8_source_bound_assessment(
@@ -63,9 +107,7 @@ def validate_task8_source_bound_assessment(
     *,
     manifest_store: ManifestStore,
     evidence_index: ComplianceEvidenceIndex,
-    account_evidence: (
-        DeepSeekAccountObservation | DeepSeekAccountNotCaptured | None
-    ) = None,
+    policy_evidence: tuple[ProviderPolicyEvidence, ...] = (),
 ) -> SourceManifest:
     try:
         manifest = manifest_store.read_source(envelope.source_manifest_id)
@@ -98,23 +140,12 @@ def validate_task8_source_bound_assessment(
             statement
         ).hexdigest() != _TASK8_DEEPSEEK_STATEMENT_SHA256:
             raise AssessmentBindingError("conclusion content is invalid")
-        if not isinstance(account_evidence, DeepSeekAccountObservation):
-            raise AssessmentBindingError("account evidence is invalid")
-        account_entry = next(
-            (
-                entry
-                for entry in evidence_index.entries
-                if entry.kind == "deepseek-account-setting"
-            ),
-            None,
+        _verify_policy_evidence(
+            envelope.route_binding,
+            evidence_index,
+            policy_evidence,
+            authored_at=conclusion.authored_at,
         )
-        if (
-            account_entry is None
-            or account_entry.sha256 != canonical_sha256(account_evidence)
-            or str(account_entry.url) != str(account_evidence.url)
-            or account_entry.captured_at != account_evidence.captured_at
-        ):
-            raise AssessmentBindingError("account evidence is invalid")
         try:
             ComplianceAssessment.model_validate(envelope.assessment.model_dump())
         except ValidationError as error:

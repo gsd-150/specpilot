@@ -61,9 +61,12 @@ The author made these decisions explicitly:
 
 1. Use the frozen DeepSeek route identifiers: `provider_id=deepseek` and
    `endpoint_purpose=online-main-deepseek-v4-flash-api`.
-2. Interpret the supplied timestamps as Beijing time 2026-08-07 04:00 through
-   2026-09-06 04:00, stored as `2026-08-06T20:00:00Z` through
-   `2026-09-05T20:00:00Z`.
+2. Re-author the conclusion at `2026-08-07T14:44:00Z` through
+   `2026-09-06T14:44:00Z` (Beijing time 2026-08-07 22:44 through
+   2026-09-06 22:44). The original `2026-08-06T20:00:00Z` predated the evidence
+   capture at `2026-08-07T05:41Z`, which the policy-evidence gate now refuses:
+   a conclusion cannot rest on documents frozen after it was written. The
+   statement bytes are unchanged.
 3. Apply the conclusion independently to both TS 38.300 v18.10.0 and
    TS 38.321 v18.10.0.
 4. Use the resolved ChatAnywhere judge route: `provider_id=chatanywhere`,
@@ -84,8 +87,8 @@ differ from the author's initially supplied JSON:
   "author_id": "chunxue",
   "provider_id": "deepseek",
   "endpoint_purpose": "online-main-deepseek-v4-flash-api",
-  "authored_at": "2026-08-06T20:00:00Z",
-  "expires_at": "2026-09-05T20:00:00Z"
+  "authored_at": "2026-08-07T14:44:00Z",
+  "expires_at": "2026-09-06T14:44:00Z"
 }
 ```
 
@@ -139,12 +142,21 @@ and enforcer still lack a route-to-model allowlist.
 
 ## Scope 1 gates
 
-Exactly two DeepSeek envelopes become complete only when both have hash-bound
-`status=observed` personal-account evidence and every other gate passes.
-Otherwise both remain unsigned. If account evidence cannot establish the policy
-and settings applicable to the personal DeepSeek account, generation stops
-before adding the conclusion; it never fabricates or infers an account state. A
-`blocked` or `not_captured` record leaves both DeepSeek envelopes unsigned.
+Exactly two DeepSeek envelopes become complete only when the evidence index
+hash-binds every provider document that governs the authorized API route —
+`deepseek-api-docs`, `deepseek-privacy`, and `deepseek-terms` — with each
+entry's document hash, URL, and capture time matching a supplied
+`ProviderPolicyEvidence` record, no required document captured after the
+conclusion's `authored_at`, and every other gate passing. Otherwise both remain
+unsigned. Generation never fabricates or infers a provider policy state.
+
+The gate binds API-governing documents rather than an account toggle on
+purpose. The conclusion authorizes an API route; a data-use switch inside a
+provider's consumer chat product governs a different surface, so it cannot
+carry that decision. `deepseek-account-setting` is therefore recorded as
+optional context, and an `observed`, `blocked`, or `not_captured` record alone
+neither completes nor blocks any envelope. Where the author does rely on such a
+setting, the surface mismatch belongs in `uncertainty`.
 
 The two ChatAnywhere envelopes always remain valid drafts without a conclusion
 in this scope, and their nested assessment objects must fail complete
@@ -571,8 +583,8 @@ or a raw relationship target.
   the author ID, normalized route IDs, and normalized timestamps.
 - Verify the two ChatAnywhere files fail complete validation only because
   `author_conclusion` is absent.
-- Verify `status=observed` account evidence is hash-bound before either DeepSeek
-  conclusion is present.
+- Verify every required API-governing document is hash-bound and was captured no
+  later than `authored_at` before either DeepSeek conclusion is present.
 - Verify every evidence hash and time, and the `default-v1` premise and policy
   hashes.
 - Verify zero successors, no real provider calls, and no source-bearing egress.

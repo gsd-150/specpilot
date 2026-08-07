@@ -42,8 +42,16 @@ session used only for the DeepSeek personal-account setting.
   real provider transport, and send no 3GPP content or excerpt.
 - The two ChatAnywhere envelopes always omit `author_conclusion`.
 - Add `author_conclusion` to both DeepSeek envelopes together only when the
-  DeepSeek evidence index hash-binds a personal-account record with
-  `status=observed`. `blocked` or `not_captured` leaves both unsigned.
+  DeepSeek evidence index hash-binds every API-governing document the route
+  requires (`deepseek-api-docs`, `deepseek-privacy`, `deepseek-terms`), each
+  matching a supplied `ProviderPolicyEvidence` record by document hash, URL, and
+  capture time, and none captured after the conclusion's `authored_at`. Any
+  missing, unbound, or post-dating document leaves both unsigned.
+- `deepseek-account-setting` is optional context, not a gate. The chat product's
+  data-use switch governs a different surface than the API route being
+  authorized, so `observed`, `blocked`, and `not_captured` all leave completion
+  unchanged. A conclusion that does lean on that setting must record the surface
+  mismatch in `uncertainty`.
 - The copied DeepSeek conclusion has exact fields:
 
 ```json
@@ -53,8 +61,8 @@ session used only for the DeepSeek personal-account setting.
   "author_id": "chunxue",
   "provider_id": "deepseek",
   "endpoint_purpose": "online-main-deepseek-v4-flash-api",
-  "authored_at": "2026-08-06T20:00:00Z",
-  "expires_at": "2026-09-05T20:00:00Z"
+  "authored_at": "2026-08-07T14:44:00Z",
+  "expires_at": "2026-09-06T14:44:00Z"
 }
 ```
 
@@ -186,9 +194,10 @@ Use `apply_patch` to update these exact sections in both specifications:
   or old `gpt-5.6-luna` reference.
 - Envelope schema: add `evidence_index_id`; add `model_slug` to the canonical
   evidence-index shape.
-- Completion matrix: observed account evidence permits exactly two complete
-  DeepSeek assessments; blocked/not-captured leaves those two unsigned; the two
-  ChatAnywhere assessments are always unsigned.
+- Completion matrix: fully hash-bound, non-post-dating API-governing documents
+  permit exactly two complete DeepSeek assessments; any missing or unbound
+  required document leaves those two unsigned; the two ChatAnywhere assessments
+  are always unsigned.
 - Author boundary: tools may mechanically copy only the exact confirmed
   conclusion after all gates, while source/policy prose still comes from the
   author.
@@ -233,9 +242,10 @@ git commit -m "docs: reconcile task8 scope1 assessment contract"
 
 **Interfaces:**
 - Produces: `ComplianceAssessmentDraft`, `ComplianceEvidenceIndex`,
-  `EvidenceIndexEntry`, `DeepSeekAccountObservation`,
-  `DeepSeekAccountNotCaptured`, `SourceBoundAssessment`,
-  `AssessmentBindingError`, exact Task 8 route/conclusion constants, and
+  `EvidenceIndexEntry`, `ProviderPolicyEvidence`,
+  `DeepSeekAccountObservation`, `DeepSeekAccountNotCaptured`,
+  `SourceBoundAssessment`, `AssessmentBindingError`, exact Task 8
+  route/conclusion constants, `TASK8_REQUIRED_POLICY_EVIDENCE_KINDS`, and
   `validate_task8_source_bound_assessment(...) -> SourceManifest`.
 - Preserves: existing `ComplianceAssessment`, source-manifest/v1, and canonical
   manifest bytes without modification.
@@ -294,9 +304,10 @@ Also require tests for a complete DeepSeek envelope with the exact route and
 conclusion; provider/endpoint mismatch; unstored or successor source; index ID,
 route, use, and model mismatch; extra fields; unsafe URLs; invalid timestamps;
 non-strict booleans; duplicate or unsorted evidence kinds; and a canonical
-index ID change when `model_slug` changes. A DeepSeek conclusion without an
-exactly hash-bound `status=observed` account record, with a blocked record, or
-with a mismatched record hash must fail. Leading/trailing whitespace in an
+index ID change when `model_slug` changes. A DeepSeek conclusion missing any
+required API-governing document, supplying one whose hash, URL, or capture time
+disagrees with its index entry, supplying a kind twice, or resting on a document
+captured after `authored_at` must fail. Leading/trailing whitespace in an
 authorization statement must fail before Pydantic can normalize it. Preserve a
 golden v1 canonical-byte/manifest-ID test.
 
@@ -339,6 +350,13 @@ class ComplianceEvidenceIndex(FrozenComplianceModel):
     route: ProviderRouteBinding
     model_slug: Identifier
     entries: Annotated[tuple[EvidenceIndexEntry, ...], Field(min_length=1)]
+
+
+class ProviderPolicyEvidence(FrozenComplianceModel):
+    kind: Identifier
+    url: HttpsUrl
+    captured_at: datetime
+    document_sha256: Sha256
 
 
 class DeepSeekAccountObservation(FrozenComplianceModel):
@@ -384,9 +402,7 @@ def validate_task8_source_bound_assessment(
     *,
     manifest_store: ManifestStore,
     evidence_index: ComplianceEvidenceIndex,
-    account_evidence: (
-        DeepSeekAccountObservation | DeepSeekAccountNotCaptured | None
-    ) = None,
+    policy_evidence: tuple[ProviderPolicyEvidence, ...] = (),
 ) -> SourceManifest:
     try:
         manifest = manifest_store.read_source(envelope.source_manifest_id)
@@ -419,23 +435,27 @@ def validate_task8_source_bound_assessment(
             "b88021706a85f89dd98aa91e2233a404a1396f8f2a831fc33e6686f31fadc215"
         ):
             raise AssessmentBindingError("conclusion content is invalid")
-        if not isinstance(account_evidence, DeepSeekAccountObservation):
-            raise AssessmentBindingError("account evidence is invalid")
-        account_entry = next(
-            (
-                entry
-                for entry in evidence_index.entries
-                if entry.kind == "deepseek-account-setting"
-            ),
-            None,
-        )
-        if (
-            account_entry is None
-            or account_entry.sha256 != canonical_sha256(account_evidence)
-            or str(account_entry.url) != str(account_evidence.url)
-            or account_entry.captured_at != account_evidence.captured_at
-        ):
-            raise AssessmentBindingError("account evidence is invalid")
+        required = TASK8_REQUIRED_POLICY_EVIDENCE_KINDS.get(envelope.route_binding)
+        if required is None:
+            raise AssessmentBindingError("policy evidence is invalid")
+        supplied = {record.kind: record for record in policy_evidence}
+        if len(supplied) != len(policy_evidence):
+            raise AssessmentBindingError("policy evidence is invalid")
+        entries = {entry.kind: entry for entry in evidence_index.entries}
+        for kind in sorted(required):
+            entry, record = entries.get(kind), supplied.get(kind)
+            if entry is None or record is None:
+                raise AssessmentBindingError("policy evidence is invalid")
+            if (
+                entry.sha256 != record.document_sha256
+                or str(entry.url) != str(record.url)
+                or entry.captured_at != record.captured_at
+            ):
+                raise AssessmentBindingError("policy evidence is invalid")
+            if entry.captured_at > conclusion.authored_at:
+                raise AssessmentBindingError(
+                    "policy evidence postdates the conclusion"
+                )
         ComplianceAssessment.model_validate(envelope.assessment.model_dump())
     return manifest
 ```
@@ -443,11 +463,11 @@ def validate_task8_source_bound_assessment(
 The function resolves `source_manifest_id`; requires an initial default-deny v1
 manifest; recomputes and compares the evidence index ID; compares the complete
 route and exact model; rejects every conclusion outside the exact DeepSeek
-route; requires a DeepSeek conclusion to equal all seven confirmed fields and
-have a canonical hash-bound observed account record; validates it as a complete
-`ComplianceAssessment`; returns the resolved manifest; and never writes files
-or authorizes egress. Normalize failures to content-free
-`AssessmentBindingError` messages.
+route; requires a DeepSeek conclusion to equal all seven confirmed fields and to
+hash-bind every API-governing document that route requires, none of them
+captured after `authored_at`; validates it as a complete `ComplianceAssessment`;
+returns the resolved manifest; and never writes files or authorizes egress.
+Normalize failures to content-free `AssessmentBindingError` messages.
 
 - [ ] **Step 5: Run focused and regression tests**
 
@@ -1483,9 +1503,13 @@ entries[]: {kind, url, captured_at, sha256, summary, scope}
 ```
 
 Canonicalize with the shared helper, name each file by its canonical SHA-256,
-and validate with `ComplianceEvidenceIndex`. The DeepSeek index includes the
-account-record hash, URL, and capture time; the ChatAnywhere index does not.
-Apply the page-retention rule only after every index validates.
+and validate with `ComplianceEvidenceIndex`. The DeepSeek index must carry all
+three required API-governing entries (`deepseek-api-docs`, `deepseek-privacy`,
+`deepseek-terms`) with each page's own document hash, URL, and capture time,
+because those are what the conclusion gate binds. It also includes the
+account-record hash, URL, and capture time as optional context; the ChatAnywhere
+index has neither. Apply the page-retention rule only after every index
+validates.
 
 The construction script must load every web URL/time/hash from its generated
 metadata JSON and every summary/scope from the author-input JSON, sort entries
@@ -1508,8 +1532,10 @@ else:
     raise RuntimeError("account evidence state is invalid")
 ```
 
-The DeepSeek entry uses `canonical_sha256(account)`, `account.url`, and
-`account.captured_at`. After publication, securely reread each index, require
+The `deepseek-account-setting` entry uses `canonical_sha256(account)`,
+`account.url`, and `account.captured_at`. Either record kind is acceptable there
+— it is context, not a gate, so neither state changes which assessments become
+complete. After publication, securely reread each index, require
 its filename stem to equal `canonical_sha256(parsed_index)`, and require
 `canonical_json(parsed_index)` to equal the stored bytes.
 
@@ -1655,7 +1681,9 @@ for document_id, (filename_prefix, document_label) in SOURCE_FILES.items():
             envelope,
             manifest_store=manifest_store,
             evidence_index=index,
-            account_evidence=account if provider_id == "deepseek" else None,
+            policy_evidence=(
+                policy_records if provider_id == "deepseek" else ()
+            ),
         )
         output_name = (
             f"{filename_prefix}__{provider_id}__"
@@ -1669,21 +1697,24 @@ loads manifests/indexes by parsing their canonical contents, validates the
 author-input keys exactly, and implements `publish_private_no_replace` with
 `O_EXCL|O_NOFOLLOW`, mode `0600`, file fsync, and directory fsync.
 
-- [ ] **Step 3: Apply the account/conclusion branch exactly**
+- [ ] **Step 3: Apply the policy-evidence/conclusion branch exactly**
 
-If and only if the DeepSeek index hash-binds `status=observed`, mechanically
-copy the exact conclusion into both DeepSeek nested assessments and verify the
-268-byte length and SHA-256. Otherwise omit it from both. Always omit it from
-both ChatAnywhere assessments.
+If and only if the DeepSeek index hash-binds all three required API-governing
+documents and none of them was captured after the conclusion's `authored_at`,
+mechanically copy the exact conclusion into both DeepSeek nested assessments and
+verify the 268-byte length and SHA-256. Otherwise omit it from both. Always omit
+it from both ChatAnywhere assessments. The account record never decides this
+branch.
 
 - [ ] **Step 4: Validate every binding and completion state**
 
 For each file, parse the envelope, load the index whose exact ID appears in the
-envelope, and load the account record as in Task 4. Call
-`validate_task8_source_bound_assessment` with `account_evidence=account` only
-for the DeepSeek files and `None` for ChatAnywhere. Do not trust filenames.
+envelope, and build the `ProviderPolicyEvidence` records from the same
+capture-metadata that produced the index entries. Call
+`validate_task8_source_bound_assessment` with `policy_evidence=policy_records`
+only for the DeepSeek files and `()` for ChatAnywhere. Do not trust filenames.
 
-In the observed branch, both DeepSeek nested assessments validate as complete
+In the fully bound branch, both DeepSeek nested assessments validate as complete
 `ComplianceAssessment`; otherwise each fails only at `author_conclusion`. Both
 ChatAnywhere nested assessments always fail complete validation only at that
 field. Assert two initial manifests, zero successors, zero provider calls, no

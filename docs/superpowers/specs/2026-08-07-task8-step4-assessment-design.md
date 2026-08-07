@@ -191,7 +191,8 @@ hashes。
 CLI 返回 `invalid_authorization_evidence`，因此不修改 schema 来绕过它。
 
 DeepSeek route 使用同一原则，只描述作者已确认的官方公开政策、抓取时的账户设置和
-适用范围；工具不补写政策未明确披露的事实。
+适用范围；工具不补写政策未明确披露的事实。若账户开关约束的产品面与本 route
+授权的接口不一致，该落差必须写入 `uncertainty`，不得默认二者等同。
 
 ## 数据流和门禁
 
@@ -202,10 +203,15 @@ DeepSeek route 使用同一原则，只描述作者已确认的官方公开政�
    SHA-256 写入每份 envelope 的 `evidence_index_id`。
 4. 生成四份 source-bound envelopes；验证每份 manifest、route、model 和 evidence
    index 的结构化绑定，不从文件名或 prose 推断身份。
-5. 当 DeepSeek evidence index hash-binds personal-account
-   `status=observed` 且全部其他门禁通过时，机械复制作者已确认的精确结论到恰好两份
-   DeepSeek assessments；`blocked` 或 `not_captured` 时两份均保持未签署。两份
+5. 当 DeepSeek evidence index hash-binds 该 route 所需的全部 API 侧政策文档
+   （`deepseek-api-docs`、`deepseek-privacy`、`deepseek-terms`），每份文档的
+   哈希、URL 与抓取时间都与索引条目一致，抓取时间不晚于结论的 `authored_at`，
+   且全部其他门禁通过时，机械复制作者已确认的精确结论到恰好两份 DeepSeek
+   assessments；任一必需文档缺失、绑定不符或晚于结论时两份均保持未签署。两份
    ChatAnywhere assessments 在本 scope 始终保持未签署。
+
+   个人账户的对话产品数据开关（`deepseek-account-setting`）约束的是对话产品，
+   不约束本 route 授权的 API 接口。它作为可选上下文证据如实记录，不构成门禁。
 6. `authorized=false` 时不创建 successor。`authorized=true` 也只表示作者完成了
    自评；必须等真实 provider smoke 和 route-to-model 强绑定另行实现并验证后，
    才可调用 CLI 创建 successor。
@@ -218,8 +224,11 @@ DeepSeek route 使用同一原则，只描述作者已确认的官方公开政�
 ## 失败处理
 
 - 页面不可达、响应不完整或哈希无法复核：记录 blocked，不生成授权候选。
-- DeepSeek 账户记录为 `blocked` 或 `not_captured`：两份 DeepSeek assessments 保持
-  未签署；ChatAnywhere assessments 仍保持未签署。
+- 任一必需的 DeepSeek API 政策文档缺失、哈希/URL/时间绑定不符，或抓取时间晚于
+  结论的 `authored_at`：两份 DeepSeek assessments 保持未签署；ChatAnywhere
+  assessments 仍保持未签署。
+- DeepSeek 账户记录为 `blocked` 或 `not_captured`：如实记入 evidence index 作为
+  上下文，不影响任何 assessment 的签署状态。
 - route smoke 发现 `glm-5.2` 被重定向、替换或返回不同实际 slug：停止该路由并
   重新评估；当前系统不会自动发现该变化。
 - 人工复核发现政策页面或 `default-v1` 出站上限变化：生成新快照和新评估。
@@ -237,7 +246,8 @@ DeepSeek route 使用同一原则，只描述作者已确认的官方公开政�
   `offline_judge`，但不虚构当前代码已经强绑定 `model_id`；
 - 四份文件均为 source-bound envelopes，显式绑定 initial-v1 manifest、route、
   model 和 `evidence_index_id`，且不重复 origin fields；
-- `status=observed` 的账户证据和其他门禁通过时，恰好两份 DeepSeek assessments
-  完整；`blocked` 或 `not_captured` 时两份保持未签署，ChatAnywhere 两份始终未签署；
+- 全部必需的 DeepSeek API 政策文档 hash-bound、不晚于结论，且其他门禁通过时，
+  恰好两份 DeepSeek assessments 完整；否则两份保持未签署，ChatAnywhere 两份
+  始终未签署；
 - 本轮不创建 successor，任何 3GPP 内容都无法到达 provider；
 - 验收结果明确记录为 `extend`，并列出真实路由 smoke 与模型强绑定两个后续阻断项。

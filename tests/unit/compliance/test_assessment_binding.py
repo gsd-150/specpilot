@@ -13,6 +13,7 @@ from specpilot.compliance.validation import (
     TASK8_CHATANYWHERE_ROUTE,
     TASK8_DEEPSEEK_CONCLUSION,
     TASK8_DEEPSEEK_ROUTE,
+    TASK8_REQUIRED_POLICY_EVIDENCE_KINDS,
     AssessmentBindingError,
     validate_task8_source_bound_assessment,
 )
@@ -22,6 +23,7 @@ from specpilot.contracts.compliance import (
     DeepSeekAccountNotCaptured,
     DeepSeekAccountObservation,
     EvidenceIndexEntry,
+    ProviderPolicyEvidence,
     SourceBoundAssessment,
 )
 from specpilot.contracts.manifests import (
@@ -49,8 +51,8 @@ _DEEPSEEK_CONCLUSION_FIELDS: dict[str, object] = {
     "author_id": "chunxue",
     "provider_id": "deepseek",
     "endpoint_purpose": "online-main-deepseek-v4-flash-api",
-    "authored_at": "2026-08-06T20:00:00Z",
-    "expires_at": "2026-09-05T20:00:00Z",
+    "authored_at": "2026-08-07T14:44:00Z",
+    "expires_at": "2026-09-06T14:44:00Z",
 }
 _DEEPSEEK_ROUTE_FIELDS: dict[str, object] = {
     "provider_id": "deepseek",
@@ -193,23 +195,52 @@ def chatanywhere_index() -> ComplianceEvidenceIndex:
     )
 
 
+def policy_evidence_record(kind: str) -> ProviderPolicyEvidence:
+    return ProviderPolicyEvidence(
+        kind=kind,
+        url=f"https://evidence.example/{kind}.html",
+        captured_at="2026-08-06T19:00:00Z",
+        document_sha256=hashlib.sha256(f"{kind}:document".encode()).hexdigest(),
+    )
+
+
+@pytest.fixture
+def deepseek_policy_evidence() -> tuple[ProviderPolicyEvidence, ...]:
+    return tuple(
+        policy_evidence_record(kind)
+        for kind in sorted(TASK8_REQUIRED_POLICY_EVIDENCE_KINDS[TASK8_DEEPSEEK_ROUTE])
+    )
+
+
+def policy_index_entry(evidence: ProviderPolicyEvidence) -> EvidenceIndexEntry:
+    return index_entry(
+        evidence.kind,
+        url=str(evidence.url),
+        captured_at=evidence.captured_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        sha256=evidence.document_sha256,
+    )
+
+
 @pytest.fixture
 def deepseek_index(
     account_observation: DeepSeekAccountObservation,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
 ) -> ComplianceEvidenceIndex:
+    entries = (
+        index_entry(
+            "deepseek-account-setting",
+            url=str(account_observation.url),
+            captured_at="2026-08-06T19:30:00Z",
+            sha256=canonical_sha256(account_observation),
+        ),
+        index_entry("deepseek-policy"),
+        *(policy_index_entry(record) for record in deepseek_policy_evidence),
+    )
     return ComplianceEvidenceIndex(
         schema_version="compliance-evidence-index/v1",
         route=ProviderRouteBinding(**_DEEPSEEK_ROUTE_FIELDS),
         model_slug="deepseek-v4-flash",
-        entries=(
-            index_entry(
-                "deepseek-account-setting",
-                url=str(account_observation.url),
-                captured_at="2026-08-06T19:30:00Z",
-                sha256=canonical_sha256(account_observation),
-            ),
-            index_entry("deepseek-policy"),
-        ),
+        entries=tuple(sorted(entries, key=lambda entry: entry.kind)),
     )
 
 
@@ -243,10 +274,10 @@ def test_unsigned_chatanywhere_envelope_is_bound_but_not_complete(
     }
 
 
-def test_complete_deepseek_envelope_requires_exact_hash_bound_account_evidence(
+def test_complete_deepseek_envelope_requires_exact_hash_bound_policy_evidence(
     stored_sources: StoredSources,
     deepseek_index: ComplianceEvidenceIndex,
-    account_observation: DeepSeekAccountObservation,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
 ) -> None:
     envelope = build_envelope(
         source_manifest_id=stored_sources["38.300"].manifest_id,
@@ -261,13 +292,50 @@ def test_complete_deepseek_envelope_requires_exact_hash_bound_account_evidence(
         envelope,
         manifest_store=stored_sources.store,
         evidence_index=deepseek_index,
-        account_evidence=account_observation,
+        policy_evidence=deepseek_policy_evidence,
     )
 
     assert resolved == stored_sources["38.300"]
     assert tuple(sorted(stored_sources.directory.iterdir())) == existing_files
     assert envelope.route_binding == TASK8_DEEPSEEK_ROUTE
     assert envelope.assessment.author_conclusion == TASK8_DEEPSEEK_CONCLUSION
+
+
+def test_deepseek_conclusion_no_longer_gates_on_the_account_setting(
+    stored_sources: StoredSources,
+    deepseek_index: ComplianceEvidenceIndex,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
+) -> None:
+    """A blocked account record is documentation, not a gate.
+
+    The chat-product data-use toggle does not govern the API route this
+    conclusion authorizes, so its absence must not decide the outcome.
+    """
+    without_account = deepseek_index.model_copy(
+        update={
+            "entries": tuple(
+                entry
+                for entry in deepseek_index.entries
+                if entry.kind != "deepseek-account-setting"
+            )
+        }
+    )
+    envelope = build_envelope(
+        source_manifest_id=stored_sources["38.300"].manifest_id,
+        route_binding=TASK8_DEEPSEEK_ROUTE,
+        model_slug="deepseek-v4-flash",
+        evidence_index_id=canonical_sha256(without_account),
+        author_conclusion=exact_deepseek_conclusion(),
+    )
+
+    resolved = validate_task8_source_bound_assessment(
+        envelope,
+        manifest_store=stored_sources.store,
+        evidence_index=without_account,
+        policy_evidence=deepseek_policy_evidence,
+    )
+
+    assert resolved == stored_sources["38.300"]
 
 
 def test_envelope_refuses_a_model_not_bound_by_its_index(
@@ -408,7 +476,7 @@ def test_envelope_refuses_an_unstored_source_swap(
 def test_envelope_refuses_a_stored_successor_source(
     stored_sources: StoredSources,
     deepseek_index: ComplianceEvidenceIndex,
-    account_observation: DeepSeekAccountObservation,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
 ) -> None:
     successor = stored_sources.store.create_successor(
         stored_sources["38.300"],
@@ -418,7 +486,7 @@ def test_envelope_refuses_a_stored_successor_source(
             ).model_dump()
         ),
         route_binding=TASK8_DEEPSEEK_ROUTE,
-        created_at=datetime(2026, 8, 7, tzinfo=UTC),
+        created_at=datetime(2026, 8, 7, 15, tzinfo=UTC),
     )
     envelope = build_envelope(
         source_manifest_id=successor.manifest_id,
@@ -433,7 +501,7 @@ def test_envelope_refuses_a_stored_successor_source(
             envelope,
             manifest_store=stored_sources.store,
             evidence_index=deepseek_index,
-            account_evidence=account_observation,
+            policy_evidence=deepseek_policy_evidence,
         )
 
 
@@ -445,14 +513,14 @@ def test_envelope_refuses_a_stored_successor_source(
         ("author_id", "another-author"),
         ("provider_id", "another-provider"),
         ("endpoint_purpose", "another-endpoint"),
-        ("authored_at", "2026-08-06T20:00:01Z"),
-        ("expires_at", "2026-09-05T20:00:01Z"),
+        ("authored_at", "2026-08-07T14:44:01Z"),
+        ("expires_at", "2026-09-06T14:44:01Z"),
     ],
 )
 def test_deepseek_conclusion_refuses_every_changed_confirmed_field(
     stored_sources: StoredSources,
     deepseek_index: ComplianceEvidenceIndex,
-    account_observation: DeepSeekAccountObservation,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
     field: str,
     replacement: object,
 ) -> None:
@@ -470,7 +538,7 @@ def test_deepseek_conclusion_refuses_every_changed_confirmed_field(
             envelope,
             manifest_store=stored_sources.store,
             evidence_index=deepseek_index,
-            account_evidence=account_observation,
+            policy_evidence=deepseek_policy_evidence,
         )
 
 
@@ -499,45 +567,186 @@ def test_chatanywhere_refuses_any_present_conclusion(
         )
 
 
+GateInput = tuple[ComplianceEvidenceIndex, tuple[ProviderPolicyEvidence, ...]]
+
+
+def _drop_index_kind(
+    index: ComplianceEvidenceIndex, kind: str
+) -> ComplianceEvidenceIndex:
+    return index.model_copy(
+        update={"entries": tuple(e for e in index.entries if e.kind != kind)}
+    )
+
+
+def _replace_index_entry(
+    index: ComplianceEvidenceIndex,
+    kind: str,
+    update: dict[str, object],
+) -> ComplianceEvidenceIndex:
+    return index.model_copy(
+        update={
+            "entries": tuple(
+                e.model_copy(update=update) if e.kind == kind else e
+                for e in index.entries
+            )
+        }
+    )
+
+
 @pytest.mark.parametrize(
-    "account_evidence_factory",
+    ("case", "mutate"),
     [
-        lambda observation: None,
-        lambda observation: DeepSeekAccountNotCaptured(
-            status="not_captured",
-            reason="blocked",
-            captured_at=observation.captured_at,
-            url=str(observation.url),
+        (
+            "required kind missing from the index",
+            lambda index, records: (
+                _drop_index_kind(index, "deepseek-terms"),
+                records,
+            ),
         ),
-        lambda observation: observation.model_copy(
-            update={"screenshot_sha256": "e" * 64}
+        (
+            "required record not supplied",
+            lambda index, records: (
+                index,
+                tuple(r for r in records if r.kind != "deepseek-terms"),
+            ),
+        ),
+        (
+            "document hash does not match the index entry",
+            lambda index, records: (
+                index,
+                tuple(
+                    r.model_copy(update={"document_sha256": "e" * 64})
+                    if r.kind == "deepseek-terms"
+                    else r
+                    for r in records
+                ),
+            ),
+        ),
+        (
+            "url does not match the index entry",
+            lambda index, records: (
+                index,
+                tuple(
+                    r.model_copy(update={"url": "https://evidence.example/other.html"})
+                    if r.kind == "deepseek-terms"
+                    else r
+                    for r in records
+                ),
+            ),
+        ),
+        (
+            "capture time does not match the index entry",
+            lambda index, records: (
+                index,
+                tuple(
+                    r.model_copy(
+                        update={"captured_at": datetime(2026, 8, 6, 18, tzinfo=UTC)}
+                    )
+                    if r.kind == "deepseek-terms"
+                    else r
+                    for r in records
+                ),
+            ),
+        ),
+        (
+            "the same kind is supplied twice",
+            lambda index, records: (index, records + (records[0],)),
         ),
     ],
 )
-def test_deepseek_conclusion_refuses_missing_blocked_or_hash_mismatched_account_record(
+def test_deepseek_conclusion_refuses_incomplete_or_unbound_policy_evidence(
     stored_sources: StoredSources,
     deepseek_index: ComplianceEvidenceIndex,
-    account_observation: DeepSeekAccountObservation,
-    account_evidence_factory: Callable[
-        [DeepSeekAccountObservation],
-        DeepSeekAccountObservation | DeepSeekAccountNotCaptured | None,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
+    case: str,
+    mutate: Callable[
+        [ComplianceEvidenceIndex, tuple[ProviderPolicyEvidence, ...]], GateInput
     ],
 ) -> None:
+    index, records = mutate(deepseek_index, deepseek_policy_evidence)
     envelope = build_envelope(
         source_manifest_id=stored_sources["38.300"].manifest_id,
         route_binding=TASK8_DEEPSEEK_ROUTE,
         model_slug="deepseek-v4-flash",
-        evidence_index_id=canonical_sha256(deepseek_index),
+        evidence_index_id=canonical_sha256(index),
         author_conclusion=exact_deepseek_conclusion(),
     )
 
-    with pytest.raises(AssessmentBindingError, match="account evidence is invalid"):
+    with pytest.raises(AssessmentBindingError, match="policy evidence is invalid"):
         validate_task8_source_bound_assessment(
             envelope,
             manifest_store=stored_sources.store,
-            evidence_index=deepseek_index,
-            account_evidence=account_evidence_factory(account_observation),
+            evidence_index=index,
+            policy_evidence=records,
         )
+
+
+def test_deepseek_conclusion_refuses_evidence_captured_after_it_was_authored(
+    stored_sources: StoredSources,
+    deepseek_index: ComplianceEvidenceIndex,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
+) -> None:
+    """A conclusion cannot rest on evidence frozen after it was written."""
+    after = TASK8_DEEPSEEK_CONCLUSION.authored_at.replace(
+        second=1
+    )  # one second past authored_at
+    index = _replace_index_entry(
+        deepseek_index, "deepseek-terms", {"captured_at": after}
+    )
+    records = tuple(
+        record.model_copy(update={"captured_at": after})
+        if record.kind == "deepseek-terms"
+        else record
+        for record in deepseek_policy_evidence
+    )
+    envelope = build_envelope(
+        source_manifest_id=stored_sources["38.300"].manifest_id,
+        route_binding=TASK8_DEEPSEEK_ROUTE,
+        model_slug="deepseek-v4-flash",
+        evidence_index_id=canonical_sha256(index),
+        author_conclusion=exact_deepseek_conclusion(),
+    )
+
+    with pytest.raises(
+        AssessmentBindingError, match="policy evidence postdates the conclusion"
+    ):
+        validate_task8_source_bound_assessment(
+            envelope,
+            manifest_store=stored_sources.store,
+            evidence_index=index,
+            policy_evidence=records,
+        )
+
+
+def test_deepseek_conclusion_accepts_evidence_captured_exactly_at_authored_at(
+    stored_sources: StoredSources,
+    deepseek_index: ComplianceEvidenceIndex,
+    deepseek_policy_evidence: tuple[ProviderPolicyEvidence, ...],
+) -> None:
+    at = TASK8_DEEPSEEK_CONCLUSION.authored_at
+    index = _replace_index_entry(deepseek_index, "deepseek-terms", {"captured_at": at})
+    records = tuple(
+        record.model_copy(update={"captured_at": at})
+        if record.kind == "deepseek-terms"
+        else record
+        for record in deepseek_policy_evidence
+    )
+    envelope = build_envelope(
+        source_manifest_id=stored_sources["38.300"].manifest_id,
+        route_binding=TASK8_DEEPSEEK_ROUTE,
+        model_slug="deepseek-v4-flash",
+        evidence_index_id=canonical_sha256(index),
+        author_conclusion=exact_deepseek_conclusion(),
+    )
+
+    resolved = validate_task8_source_bound_assessment(
+        envelope,
+        manifest_store=stored_sources.store,
+        evidence_index=index,
+        policy_evidence=records,
+    )
+
+    assert resolved == stored_sources["38.300"]
 
 
 @pytest.mark.parametrize(
@@ -589,6 +798,12 @@ def test_evidence_index_id_changes_when_model_slug_changes(
             captured_at="2026-08-06T19:30:00Z",
             url="http://platform.deepseek.com/settings",
         ),
+        lambda: ProviderPolicyEvidence(
+            **{
+                **policy_evidence_record("deepseek-terms").model_dump(),
+                "url": "http://evidence.example/unsafe",
+            }
+        ),
     ],
 )
 def test_evidence_contracts_reject_unsafe_urls(factory: Callable[[], object]) -> None:
@@ -618,6 +833,12 @@ def test_evidence_contracts_reject_unsafe_urls(factory: Callable[[], object]) ->
             captured_at=True,
             url="https://platform.deepseek.com/settings",
         ),
+        lambda: ProviderPolicyEvidence(
+            **{
+                **policy_evidence_record("deepseek-terms").model_dump(),
+                "captured_at": 1_723_000_000,
+            }
+        ),
     ],
 )
 def test_evidence_contracts_reject_invalid_timestamps(
@@ -635,6 +856,7 @@ def test_evidence_contracts_reject_invalid_timestamps(
         (EvidenceIndexEntry, {"unexpected": "value"}),
         (ComplianceEvidenceIndex, {"unexpected": "value"}),
         (SourceBoundAssessment, {"unexpected": "value"}),
+        (ProviderPolicyEvidence, {"unexpected": "value"}),
     ],
 )
 def test_compliance_contracts_forbid_extra_fields(
@@ -658,6 +880,7 @@ def test_compliance_contracts_forbid_extra_fields(
             "url": "https://platform.deepseek.com/settings",
         },
         EvidenceIndexEntry: index_entry("entry").model_dump(),
+        ProviderPolicyEvidence: policy_evidence_record("deepseek-terms").model_dump(),
         ComplianceEvidenceIndex: chatanywhere_index.model_dump(),
         SourceBoundAssessment: build_envelope(
             source_manifest_id=stored_sources["38.300"].manifest_id,

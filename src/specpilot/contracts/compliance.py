@@ -83,6 +83,33 @@ class ComplianceEvidenceIndex(FrozenComplianceModel):
         return self
 
 
+class ProviderPolicyEvidence(FrozenComplianceModel):
+    """One frozen provider document that governs a route's data handling.
+
+    ``document_sha256`` is the hash of the captured snapshot itself, so an
+    auditor can reopen the exact bytes an assessment was written against.
+    """
+
+    kind: Identifier
+    url: HttpsUrl
+    captured_at: datetime
+    document_sha256: Sha256
+
+    @field_validator("url")
+    @classmethod
+    def _require_https_url(cls, value: AnyUrl) -> AnyUrl:
+        return _require_https(value, "policy evidence URL")
+
+    @field_validator("captured_at", mode="before")
+    @classmethod
+    def _normalize_timestamp(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> datetime:
+        return _validated_timestamp_input(value, info.field_name)
+
+
 class DeepSeekAccountObservation(FrozenComplianceModel):
     status: Literal["observed"]
     setting_state: Literal["enabled", "disabled"]
