@@ -33,6 +33,39 @@ SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+DANGLING_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Dangling</title></front>
+  <middle>
+    <section anchor="alpha" numbered="true">
+      <name>Alpha</name>
+      <t>Points at <xref target="nowhere"/>, which nothing defines.</t>
+    </section>
+  </middle>
+</rfc>
+"""
+
+DUPLICATE_ANCHOR_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Duplicate</title></front>
+  <middle>
+    <section anchor="same" numbered="true"><name>First</name></section>
+    <section anchor="same" numbered="true"><name>Second</name></section>
+  </middle>
+</rfc>
+"""
+
+UNNUMBERED_SECTION_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Mixed</title></front>
+  <middle>
+    <section anchor="counted" numbered="true"><name>Counted</name></section>
+    <section anchor="uncounted" numbered="false"><name>Uncounted</name></section>
+    <section anchor="counted-again" numbered="true"><name>Counted Again</name></section>
+  </middle>
+</rfc>
+"""
+
 DOCTYPE_XML = """<?xml version='1.0' encoding='utf-8'?>
 <!DOCTYPE rfc>
 <rfc number="9999" version="3"><front><title>T</title></front></rfc>

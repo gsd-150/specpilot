@@ -174,21 +174,21 @@ document hash, byte count, and root element only — never document text.
   sections carrying anchor, number, and title, plus resolved cross-references
   separating intra-document from inter-document targets.
 
-- [ ] **Step 1: Write failing structure tests against synthetic fixtures**
+- [x] **Step 1: Write failing structure tests against synthetic fixtures**
 
 Cover nested sections, an `<xref>` to a local anchor, an `<xref>` to another
 RFC, a dangling anchor, and duplicate anchors. Cross-reference extraction is the
 reason this corpus was chosen, so a dangling target must be reported, not
 silently dropped.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement extraction**
+- [x] **Step 3: Implement extraction**
 
 Walk the parsed tree only. Never re-read the file, never fetch a target, and
 never resolve an external reference over the network.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 ---
 
