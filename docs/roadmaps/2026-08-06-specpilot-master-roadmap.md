@@ -64,6 +64,7 @@ real provider, credential, or model, and its own output says so.
      when the source numbers sections but the outbound caps count tokens.
    - Build independent-path L1/L2 annotation schemas and review logs.
    - Measure local embedding throughput without committing model weights.
+   - Detailed plan: `../superpowers/plans/2026-08-07-w1-annotation-and-embedding.md`.
 
 4. **W2 — Frozen corpus and retrieval baseline**
    - One XML parser rather than two DOCX parsers: section/tree/table/reference
