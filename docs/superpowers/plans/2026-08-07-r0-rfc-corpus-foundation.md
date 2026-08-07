@@ -230,7 +230,7 @@ Two manifests, zero successors, zero authorized, private modes, Git-ignored.
 - Modify: the DOCX-shaped test modules that describe corpus inputs
 - Modify: `docs/roadmaps/2026-08-06-specpilot-master-roadmap.md`
 
-- [ ] **Step 1: Separate boundary tests from corpus tests**
+- [x] **Step 1: Separate boundary tests from corpus tests**
 
 Thirteen test modules mention DOCX or archive shapes. Most of them —
 `test_archive_limits`, `test_archive_preflight`, `test_ooxml_inspection`,
@@ -238,14 +238,14 @@ Thirteen test modules mention DOCX or archive shapes. Most of them —
 boundary and must not change. Only the modules that assert a *corpus* is
 DOCX-shaped are retargeted. List which is which before editing anything.
 
-- [ ] **Step 2: Retarget only the corpus-shaped assertions**
+- [x] **Step 2: Retarget only the corpus-shaped assertions**
 
-- [ ] **Step 3: Full verification**
+- [x] **Step 3: Full verification**
 
 Run the full suite with a PostgreSQL DSN, Ruff, mypy, and both smokes. Confirm
 the OOXML boundary tests still pass unchanged and no cap was relaxed.
 
-- [ ] **Step 4: Update the roadmap state and commit**
+- [x] **Step 4: Update the roadmap state and commit**
 
 ---
 

@@ -18,10 +18,22 @@ real provider has been called.
 **The recorded route decision is `C` — the corpus moves to IETF RFCs.** Both
 chosen 3GPP sources are refused by the ingestion boundary with
 `embedded_active_content`, and three further specifications measured the same
-way, so the blocker is ingestion rather than compliance. Everything
-provider-side carries over; the source side needs new manifests and a
-source-terms assessment against BCP 78. W1 does not begin until an
-RFC-specific design and plan exists.
+way, so the blocker is ingestion rather than compliance.
+
+**R0 has since carried out that decision.** RFC 9110 and 9112 are frozen in
+both renditions, both pass the same ingestion boundary that refused all five
+DOCX distributions, and both hold default-deny `source-manifest/v2` records
+alongside an author-written BCP 78 source-terms assessment. Sections and
+cross-references now come out of the v3 XML as elements — 288 sections and
+2,519 cross-references for RFC 9110, none dangling.
+
+The archive and OOXML boundary is retained unchanged, limits included. It is
+the evidence that produced route `C`, and deleting it would erase a
+demonstrated capability. The 3GPP manifests and their source-terms assessment
+stay as records of what was assessed.
+
+W1 may now begin against the RFC corpus. No successor manifest exists, every
+source manifest is default-deny, and no real provider has been called.
 
 Verification as of this date: 329 tests pass with a local PostgreSQL DSN set
 (24 of them are skipped without one), Ruff and mypy are clean, and the envelope
