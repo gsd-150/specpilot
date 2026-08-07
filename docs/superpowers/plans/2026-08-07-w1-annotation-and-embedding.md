@@ -136,7 +136,7 @@ how many sections needed splitting. Numbers go in the task report, not in Git.
 - Preserves: the create-only, content-addressed, `0600` storage discipline W0
   established for manifests.
 
-- [ ] **Step 1: Write failing committable-field tests**
+- [x] **Step 1: Write failing committable-field tests**
 
 Assert the contract forbids extra fields; that `L1Annotation` holds question,
 key scoring points, clause IDs, section paths, document version, and an
@@ -146,15 +146,15 @@ Verifier pair's `proposed_verdict` / `supports_verdict` as separate fields that
 cannot substitute for one another; and that every record names the
 `IndependentPath` its initial gold came from.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement the contracts and the store**
+- [x] **Step 3: Implement the contracts and the store**
 
 `IndependentPath` is an enum of exactly the §8.2.1 permitted paths. There is no
 value for retrieval, so a record whose gold came from the retriever cannot be
 represented — which is the point.
 
-- [ ] **Step 4: Write and pass the pooling-audit invariants**
+- [x] **Step 4: Write and pass the pooling-audit invariants**
 
 A completeness-audit addition records the candidate's origin and the author's
 adjudication, and the store refuses any update that removes an existing gold
