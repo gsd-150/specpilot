@@ -678,9 +678,11 @@ below; do not publish to, link over, move over, truncate, unlink, or otherwise
 change either retained file.
 
 Run this exact fail-fast replay shell. It uses the same official URL and curl
-options, writes only a new private temporary file in the restricted source
-directory, and creates a unique no-replace replay filename that durably embeds
-the newly captured UTC timestamp and hash before the shell exits:
+options. It does not install a deletion trap: a protected hard link preserves
+any pre-publication curl bytes even though curl retains `--remove-on-error`.
+No replay/download bytes are unlinked before the complete replay's facts and
+identity are durably appended to the ignored implementer report with
+`apply_patch`.
 
 ```bash
 set -euo pipefail
@@ -702,13 +704,48 @@ test "$(wc -c < "$archive" | tr -d ' ')" = "$retained_bytes"
 test ! -e "$record"
 test ! -L "$record"
 download_tmp="$(mktemp "$source_dir/.38321-ia0.replay-download.XXXXXX")"
+download_guard="$source_dir/.38321-ia0.replay-guard-$(basename "$download_tmp")"
 test -f "$download_tmp"
 test ! -L "$download_tmp"
 chmod 600 "$download_tmp"
-trap 'test ! -e "$download_tmp" || /bin/rm -- "$download_tmp"' EXIT HUP INT TERM
+test ! -e "$download_guard"
+test ! -L "$download_guard"
+ln "$download_tmp" "$download_guard"
+test -f "$download_guard"
+test ! -L "$download_guard"
+chmod 600 "$download_guard"
+trap 'printf "replay interrupted; preserve guard for reconciliation: %s\n" "$download_guard" >&2; exit 128' HUP INT TERM
+set +e
 curl --fail --location --silent --show-error --compressed \
   --remove-on-error --user-agent 'SpecPilot-W0-evidence/1.0' \
   --output "$download_tmp" "$url"
+curl_exit=$?
+set -e
+if test "$curl_exit" -ne 0; then
+  partial_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  partial_sha="$(shasum -a 256 "$download_guard" | awk '{print $1}')"
+  partial_bytes="$(wc -c < "$download_guard" | tr -d ' ')"
+  partial_tag="$(printf '%s' "$partial_at" | tr -d ':-')"
+  partial="$source_dir/.38321-ia0.replay-partial-${partial_tag}-${partial_sha}.zip"
+  test ! -e "$partial"
+  test ! -L "$partial"
+  ln "$download_guard" "$partial"
+  test -f "$partial"
+  test ! -L "$partial"
+  chmod 600 "$partial"
+  partial_real="$(realpath "$partial")"
+  partial_identity="$(/usr/bin/stat -f '%d:%i' "$partial")"
+  printf '%s\n' \
+    BEGIN_TASK3_REPLAY_PARTIAL_V1 \
+    "download_url=$url" \
+    "captured_at=$partial_at" \
+    "partial_sha256=$partial_sha" \
+    "partial_byte_count=$partial_bytes" \
+    "partial_path=$partial_real" \
+    "partial_device_inode=$partial_identity" \
+    END_TASK3_REPLAY_PARTIAL_V1
+  exit "$curl_exit"
+fi
 downloaded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 replay_sha="$(shasum -a 256 "$download_tmp" | awk '{print $1}')"
 replay_bytes="$(wc -c < "$download_tmp" | tr -d ' ')"
@@ -717,44 +754,196 @@ replay="$source_dir/.38321-ia0.replay-${timestamp_tag}-${replay_sha}.zip"
 test ! -e "$replay"
 test ! -L "$replay"
 ln "$download_tmp" "$replay"
+replay_real="$(realpath "$replay")"
+replay_identity="$(/usr/bin/stat -f '%d:%i' "$replay")"
+retained_identity="$(/usr/bin/stat -f '%d:%i' "$archive")"
+test "$replay_sha" = "$retained_sha"
+test "$replay_bytes" = "$retained_bytes"
 test -f "$replay"
 test ! -L "$replay"
 chmod 600 "$replay"
-/bin/rm -- "$download_tmp"
-trap - EXIT HUP INT TERM
-test "$replay_sha" = "$retained_sha"
-test "$replay_bytes" = "$retained_bytes"
-printf 'download_url=%s\ndownloaded_at=%s\narchive_sha256=%s\nbyte_count=%s\nreplay_path=%s\n' \
-  "$url" "$downloaded_at" "$replay_sha" "$replay_bytes" "$replay"
+test "$(dirname "$replay_real")" = "$(realpath "$source_dir")"
+test "$replay_identity" != "$retained_identity"
+printf '%s\n' \
+  BEGIN_TASK3_REPLAY_RECOVERY_V1 \
+  'state=complete' \
+  "download_url=$url" \
+  "downloaded_at=$downloaded_at" \
+  "archive_sha256=$replay_sha" \
+  "byte_count=$replay_bytes" \
+  "replay_path=$replay_real" \
+  "replay_device_inode=$replay_identity" \
+  "retained_archive_device_inode=$retained_identity" \
+  'replay_archive_sha256_equals_retained=true' \
+  'replay_byte_count_equals_retained=true' \
+  END_TASK3_REPLAY_RECOVERY_V1
 ```
 
-Before deleting `"$replay"`, use `apply_patch` to append the just-printed
-`download_url`, `downloaded_at`, `archive_sha256`, and `byte_count` values,
-plus these exact equality results, to the ignored
-`.superpowers/sdd/2026-08-07-task8-step4-scope1-assessments/task-3-implementer-report.md`:
+On a curl failure, do not delete `download_guard`, `download_tmp` if curl left
+it present, or the timestamp/hash-bearing `partial` path. Use `apply_patch` to
+append the one verbatim `BEGIN_TASK3_REPLAY_PARTIAL_V1` block printed above to
+the ignored implementer report, then stop for later reconciliation. A signal
+before the partial block leaves the guard as private recovery state; do not
+infer an unprinted timestamp or delete it. The later reconciliation must read
+and validate that exact guard path, then capture a new fact rather than
+inventing one.
 
-```text
-replay_archive_sha256 == retained_archive_sha256: true
-replay_byte_count == retained_archive_byte_count: true
-```
+On a successful replay, before any unlink, use `apply_patch` to append exactly
+the one verbatim `BEGIN_TASK3_REPLAY_RECOVERY_V1` block printed above to the
+ignored `.superpowers/sdd/2026-08-07-task8-step4-scope1-assessments/task-3-implementer-report.md`.
+Do not hand-edit, reformat, duplicate, or combine this machine-readable block;
+it is the durable record of the replay path, device/inode identity, capture
+facts, and both equality results. Preserve `download_tmp` and `download_guard`
+as private recovery state in this attempt; this approved cleanup deletes only
+the separately validated replay child.
 
 Then validate and remove only the exact replay child. This removal is covered
 by the author's explicit non-destructive-replay approval:
 
 ```bash
 set -euo pipefail
+source_dir=artifacts/restricted/sources/3gpp/38.321/18.10.0
+archive="$source_dir/38321-ia0.zip"
+inspection="$source_dir/inspection.json"
+record="$source_dir/source-capture.json"
+quarantined=data/quarantine/3gpp/38.321/38321-ia0.docx
+retained_38300_archive=artifacts/restricted/sources/3gpp/38.300/18.10.0/38300-ia0.zip
+retained_38300_quarantined=data/quarantine/3gpp/38.300/38300-ia0.docx
+report=.superpowers/sdd/2026-08-07-task8-step4-scope1-assessments/task-3-implementer-report.md
+url=https://www.3gpp.org/ftp/Specs/archive/38_series/38.321/38321-ia0.zip
+retained_sha=fc77636b28c57293688e854a3585fcf6056da77d5570d51835d8772eedbe9446
+retained_bytes=3015837
+state=
+download_url=
+downloaded_at=
+archive_sha256=
+byte_count=
+replay_path=
+replay_device_inode=
+retained_archive_device_inode=
+replay_archive_sha256_equals_retained=
+replay_byte_count_equals_retained=
+report_fields="$(.venv/bin/python - "$report" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+begin = "BEGIN_TASK3_REPLAY_RECOVERY_V1"
+end = "END_TASK3_REPLAY_RECOVERY_V1"
+keys = (
+    "state",
+    "download_url",
+    "downloaded_at",
+    "archive_sha256",
+    "byte_count",
+    "replay_path",
+    "replay_device_inode",
+    "retained_archive_device_inode",
+    "replay_archive_sha256_equals_retained",
+    "replay_byte_count_equals_retained",
+)
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+if text.count(begin) != 1 or text.count(end) != 1:
+    raise SystemExit("expected one complete replay report block")
+block = text.split(begin + "\n", 1)[1].split("\n" + end, 1)[0]
+lines = block.splitlines()
+if len(lines) != len(keys):
+    raise SystemExit("unexpected replay report block length")
+values = {}
+for expected_key, line in zip(keys, lines, strict=True):
+    key, separator, value = line.partition("=")
+    if separator != "=" or key != expected_key or not value or "\n" in value:
+        raise SystemExit("unexpected replay report field")
+    values[key] = value
+if values["state"] != "complete":
+    raise SystemExit("replay report is not complete")
+if values["download_url"] != "https://www.3gpp.org/ftp/Specs/archive/38_series/38.321/38321-ia0.zip":
+    raise SystemExit("unexpected replay URL")
+if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", values["downloaded_at"]):
+    raise SystemExit("unexpected replay timestamp")
+if not re.fullmatch(r"[0-9a-f]{64}", values["archive_sha256"]):
+    raise SystemExit("unexpected replay hash")
+if not re.fullmatch(r"[0-9]+", values["byte_count"]):
+    raise SystemExit("unexpected replay size")
+if not re.fullmatch(r"/[A-Za-z0-9._/-]+", values["replay_path"]):
+    raise SystemExit("unexpected replay path")
+for key in ("replay_device_inode", "retained_archive_device_inode"):
+    if not re.fullmatch(r"[0-9]+:[0-9]+", values[key]):
+        raise SystemExit("unexpected replay identity")
+if values["replay_archive_sha256_equals_retained"] != "true" or values["replay_byte_count_equals_retained"] != "true":
+    raise SystemExit("replay equality is not recorded")
+for key in keys:
+    print(f"{key}={values[key]}")
+PY
+)"
+while IFS='=' read -r key value; do
+  case "$key" in
+    state) state="$value" ;;
+    download_url) download_url="$value" ;;
+    downloaded_at) downloaded_at="$value" ;;
+    archive_sha256) archive_sha256="$value" ;;
+    byte_count) byte_count="$value" ;;
+    replay_path) replay_path="$value" ;;
+    replay_device_inode) replay_device_inode="$value" ;;
+    retained_archive_device_inode) retained_archive_device_inode="$value" ;;
+    replay_archive_sha256_equals_retained) replay_archive_sha256_equals_retained="$value" ;;
+    replay_byte_count_equals_retained) replay_byte_count_equals_retained="$value" ;;
+    *) exit 1 ;;
+  esac
+done <<EOF
+$report_fields
+EOF
+test "$state" = complete
+test "$download_url" = "$url"
+test "$archive_sha256" = "$retained_sha"
+test "$byte_count" = "$retained_bytes"
+test "$replay_archive_sha256_equals_retained" = true
+test "$replay_byte_count_equals_retained" = true
+timestamp_tag="$(printf '%s' "$downloaded_at" | tr -d ':-')"
+expected_basename=".38321-ia0.replay-${timestamp_tag}-${archive_sha256}.zip"
 replay_dir="$(realpath "$source_dir")"
-replay_real="$(realpath "$replay")"
-test "$(dirname "$replay_real")" = "$replay_dir"
-test -f "$replay"
-test ! -L "$replay"
-test "$(/usr/bin/stat -f '%Lp' "$replay")" = 600
-test "$(/usr/bin/stat -f '%Su' "$replay")" = "$(id -un)"
-test "$(shasum -a 256 "$replay" | awk '{print $1}')" = "$retained_sha"
-test "$(wc -c < "$replay" | tr -d ' ')" = "$retained_bytes"
-/bin/rm -- "$replay"
-test ! -e "$replay"
-test ! -L "$replay"
+expected_replay="$replay_dir/$expected_basename"
+test "$replay_path" = "$expected_replay"
+replay_basename="$(basename "$replay_path")"
+.venv/bin/python - "$replay_basename" "$downloaded_at" "$archive_sha256" <<'PY'
+import re
+import sys
+
+basename, downloaded_at, archive_sha256 = sys.argv[1:]
+timestamp_tag = downloaded_at.replace("-", "").replace(":", "")
+expected = f".38321-ia0.replay-{timestamp_tag}-{archive_sha256}.zip"
+if basename != expected or not re.fullmatch(
+    r"\.38321-ia0\.replay-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\.zip",
+    basename,
+):
+    raise SystemExit("unexpected replay basename")
+PY
+test "$(dirname "$replay_path")" = "$replay_dir"
+for forbidden in \
+  "$(realpath "$archive")" \
+  "$(realpath "$inspection")" \
+  "$replay_dir/$(basename "$record")" \
+  "$(realpath "$quarantined")" \
+  "$(realpath "$retained_38300_archive")" \
+  "$(realpath "$retained_38300_quarantined")"; do
+  test "$replay_path" != "$forbidden"
+done
+test -f "$replay_path"
+test ! -L "$replay_path"
+test "$(/usr/bin/stat -f '%Lp' "$replay_path")" = 600
+test "$(/usr/bin/stat -f '%Su' "$replay_path")" = "$(id -un)"
+test "$(shasum -a 256 "$replay_path" | awk '{print $1}')" = "$retained_sha"
+test "$(wc -c < "$replay_path" | tr -d ' ')" = "$retained_bytes"
+current_replay_identity="$(/usr/bin/stat -f '%d:%i' "$replay_path")"
+current_retained_identity="$(/usr/bin/stat -f '%d:%i' "$archive")"
+test "$current_replay_identity" = "$replay_device_inode"
+test "$current_retained_identity" = "$retained_archive_device_inode"
+replay_inode="${current_replay_identity#*:}"
+retained_inode="${current_retained_identity#*:}"
+test "$replay_inode" != "$retained_inode"
+/bin/rm -- "$replay_path"
+test ! -e "$replay_path"
+test ! -L "$replay_path"
 ```
 
 Stop at the author-fact gate after that deletion. Do not create
