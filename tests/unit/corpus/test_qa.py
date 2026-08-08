@@ -18,8 +18,20 @@ def document(tmp_path: Path) -> Path:
 
 
 def report(document: Path, **overrides: object):  # type: ignore[no-untyped-def]
+    """Every line measured, including `excerpt_fit`.
+
+    The whitespace counter stands in for the real tokenizer, which this suite
+    must run without. `excerpt_fit` fails when nothing was counted, so a helper
+    that omitted it would fail every case here for the wrong reason.
+    """
     thresholds = QaThresholds(**overrides)  # type: ignore[arg-type]
-    return run_parse_qa(document, RfcLimits(), ClauseLimits(), thresholds)
+    return run_parse_qa(
+        document,
+        RfcLimits(),
+        ClauseLimits(),
+        thresholds,
+        count_tokens=lambda text: len(text.split()),
+    )
 
 
 def test_a_clean_document_passes_every_line(document: Path) -> None:
@@ -145,3 +157,76 @@ def test_the_report_carries_no_clause_text(document: Path) -> None:
 
     assert "Prose" not in rendered
     assert "token" not in rendered
+
+
+# --- the excerpt-cap line -------------------------------------------------
+#
+# A unit longer than the outbound excerpt cap is indexable, retrievable, and
+# un-sendable: the enforcer refuses it with `excerpt_tokens_exceeded` and the
+# run degrades to "insufficient evidence" for a reason no trace explains. The
+# clause builder cannot catch this, because clause boundaries must not move
+# when the model does, so the exact check belongs to the pre-freeze gate where
+# a real tokenizer is available.
+
+
+def words(count: int) -> str:
+    return " ".join(f"w{index}" for index in range(count))
+
+
+def test_a_unit_over_the_excerpt_token_cap_fails_the_gate(document: Path) -> None:
+    result = run_parse_qa(
+        document,
+        RfcLimits(),
+        ClauseLimits(),
+        QaThresholds(),
+        count_tokens=lambda text: 513 if "One" in text or text else 1,
+    )
+
+    line = next(item for item in result.lines if item.name == "excerpt_fit")
+    assert line.passed is False
+    assert result.passed is False
+
+
+def test_a_corpus_within_the_excerpt_cap_passes_the_gate(document: Path) -> None:
+    result = run_parse_qa(
+        document,
+        RfcLimits(),
+        ClauseLimits(),
+        QaThresholds(),
+        count_tokens=lambda text: len(text.split()),
+    )
+
+    line = next(item for item in result.lines if item.name == "excerpt_fit")
+    assert line.passed is True
+    assert line.numerator == line.denominator, "every unit fits"
+
+
+def test_the_excerpt_line_counts_bytes_as_well_as_tokens(document: Path) -> None:
+    """Bytes are the tokenizer-independent half and must fail on their own."""
+    result = run_parse_qa(
+        document,
+        RfcLimits(),
+        ClauseLimits(),
+        QaThresholds(excerpt_bytes=4),
+        count_tokens=lambda text: 1,
+    )
+
+    line = next(item for item in result.lines if item.name == "excerpt_fit")
+    assert line.passed is False
+
+
+def test_the_gate_refuses_to_pass_the_excerpt_line_without_a_tokenizer(
+    document: Path,
+) -> None:
+    """An unmeasured blocking line is not a passing one.
+
+    The rest of this suite runs with no model runtime installed, so the counter
+    is optional at the call site -- but it must then report the line as failed
+    rather than silently absent, for the same reason `make integration-db`
+    refuses to run without a DSN.
+    """
+    result = run_parse_qa(document, RfcLimits(), ClauseLimits(), QaThresholds())
+
+    line = next(item for item in result.lines if item.name == "excerpt_fit")
+    assert line.passed is False
+    assert line.denominator == 0, "nothing was measured"

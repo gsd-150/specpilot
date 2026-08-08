@@ -45,7 +45,7 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
 from specpilot.corpus.clauses import (
-    RFC_9110_EXCLUDED_SECTIONS,
+    EXCLUDED_SECTIONS,
     ClauseLimits,
     OversizedClauseError,
     build_clauses,
@@ -284,18 +284,17 @@ def _refuse_source(code: str) -> int:
 
 
 def _clause_limits(manifest: RfcSourceManifest) -> ClauseLimits:
-    """Clause bounds for one document, with its recorded exclusions applied.
+    """Clause bounds, with the corpus's exclusions applied.
 
-    Exclusions are per document and evidenced where they are declared. Reading
-    them from the manifest's identity, rather than from a flag, means a run
-    cannot quietly index a section this corpus decided to leave out.
+    Exclusions are declared once, by anchor, and applied to every document. The
+    earlier version keyed them on `manifest.document_id`, which silently let RFC
+    9112's identical collected-ABNF appendix into the index; the reason for the
+    exclusion is a property of the content, not of which RFC happens to carry
+    it. Reading them from a constant rather than a flag still means a run cannot
+    quietly index a section this corpus decided to leave out.
     """
-    excluded = (
-        RFC_9110_EXCLUDED_SECTIONS
-        if manifest.document_id == "ietf-rfc-9110"
-        else frozenset()
-    )
-    return ClauseLimits(excluded_sections=excluded)
+    del manifest  # identity no longer selects the exclusion set
+    return ClauseLimits(excluded_sections=EXCLUDED_SECTIONS)
 
 
 def _corpus_parse(arguments: argparse.Namespace) -> int:
@@ -393,6 +392,11 @@ def _corpus_qa(arguments: argparse.Namespace) -> int:
     Exits non-zero when any line fails, so `corpus freeze` can depend on it
     rather than on someone remembering. Every value is printed whether it passed
     or not: a gate that only says "pass" cannot show a regression coming.
+
+    `--model-dir` is required rather than optional. The `excerpt_fit` line needs
+    the tokenizer that the index will actually use, and without one it reports
+    zero of zero and fails -- so making it optional would only offer a way to
+    reach a failing gate more slowly.
     """
     source = _frozen_source(arguments)
     if isinstance(source, str):
@@ -400,11 +404,19 @@ def _corpus_qa(arguments: argparse.Namespace) -> int:
     manifest = source.manifest
 
     try:
+        count_tokens = load_token_counter(arguments.model_dir)
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    try:
         report = run_parse_qa(
             source.document,
             RfcLimits(),
             _clause_limits(manifest),
             QaThresholds(),
+            count_tokens=count_tokens,
         )
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
@@ -1272,6 +1284,7 @@ def _parser() -> argparse.ArgumentParser:
     qa.add_argument("--manifest", required=True)
     qa.add_argument("--manifest-dir", type=Path, required=True)
     qa.add_argument("--xml", type=Path, required=True)
+    qa.add_argument("--model-dir", type=Path, required=True)
     qa.set_defaults(handler=_corpus_qa)
 
     normative = corpus.add_parser("normative")

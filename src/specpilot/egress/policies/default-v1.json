@@ -20,8 +20,8 @@
   "l2_root_transmitted": {"excerpts": 0, "tokens": 29696, "bytes": 475136},
   "corpus_unique": {"excerpts": 1024, "tokens": 524288, "bytes": 8388608},
   "corpus_document_unique": {
-    "ietf-rfc-9110": {"excerpts": 311, "tokens": 17509, "bytes": 75073},
-    "ietf-rfc-9112": {"excerpts": 70, "tokens": 3906, "bytes": 16334},
+    "ietf-rfc-9110": {"excerpts": 314, "tokens": 18412, "bytes": 76113},
+    "ietf-rfc-9112": {"excerpts": 70, "tokens": 3943, "bytes": 16069},
     "synthetic-fixture-spec": {"excerpts": 64, "tokens": 32768, "bytes": 524288}
   },
   "toc_per_call": 12,

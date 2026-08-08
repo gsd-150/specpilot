@@ -39,14 +39,27 @@ from tests.unit.egress.test_policy_projection import (
 )
 from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
-# Measured on the frozen corpus at the current exclusion set, summing BGE-M3
-# tokens and UTF-8 bytes over `iter_clause_texts(...)`. The denominator is the
-# indexable clause text rather than the whole published file, which makes every
-# derived cap strictly more conservative than measuring the document as
-# distributed.
+# Measured over every indexable unit -- clauses plus tables -- at the current
+# exclusion set, with `specpilot corpus qa --model-dir ...` as the reproducer.
+# Two things about these units are worth stating, because the cap's argument
+# rests on them:
+#
+# `bytes` is the load-bearing measure. It is exact, tokenizer independent, and
+# counted the same way on both sides: this constant and the enforcer both take
+# `len(text.encode("utf-8"))`. The one-fifth argument therefore holds in bytes
+# without any conversion.
+#
+# `tokens` is a secondary guard in a unit the two sides do not share. Here it
+# is BGE-M3 with special tokens, the project's own counter; the enforcer counts
+# an excerpt with the provider model's tokenizer, which is a different
+# vocabulary. It tracks the other caps and is deliberately conservative, but it
+# is not the measure the licence argument leans on.
+#
+# The denominator is the indexable text, not the published file, which makes
+# every derived cap stricter than measuring the document as distributed.
 MEASURED_CORPUS = {
-    "ietf-rfc-9110": {"units": 1559, "tokens": 87548, "bytes": 375367},
-    "ietf-rfc-9112": {"units": 350, "tokens": 19531, "bytes": 81671},
+    "ietf-rfc-9110": {"units": 1571, "tokens": 92064, "bytes": 380569},
+    "ietf-rfc-9112": {"units": 351, "tokens": 19717, "bytes": 80345},
 }
 
 GENEROUS = {"excerpts": 1024, "tokens": 524288, "bytes": 8388608}

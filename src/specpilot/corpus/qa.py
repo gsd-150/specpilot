@@ -21,6 +21,7 @@ other angle.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from specpilot.contracts.rfc import RfcLimits
@@ -54,6 +55,10 @@ class QaThresholds:
     min_table_fidelity: float = 0.9
     max_uncaptured: float = 0.02
     max_orphan_normatives: float = 0.01
+    # The outbound single-excerpt cap, mirrored from `default-v1.json`. These
+    # are not dials either: they are the numbers the enforcer refuses above.
+    excerpt_tokens: int = 512
+    excerpt_bytes: int = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,11 +101,51 @@ def _at_most(name: str, hit: int, total: int, threshold: float) -> QaLine:
     return QaLine(name, measured, threshold, measured <= threshold, hit, total)
 
 
+def _excerpt_fit(
+    source: RfcInput,
+    rfc_limits: RfcLimits,
+    clause_limits: ClauseLimits,
+    thresholds: QaThresholds,
+    count_tokens: Callable[[str], int] | None,
+) -> QaLine:
+    """How many indexable units the outbound gate would actually accept.
+
+    A unit longer than the single-excerpt cap is indexable and retrievable but
+    un-sendable: the enforcer refuses it and the run degrades to insufficient
+    evidence for a reason no trace explains. The clause builder cannot catch
+    this — its word bound is a cheap pre-filter, and at 2.9 tokens per word for
+    a grammar block it is roughly three times looser than it reads — so the
+    exact check lives here, where a real tokenizer is available and where the
+    corpus cannot be frozen without passing.
+
+    With no counter the line reports zero of zero and fails. An unmeasured
+    blocking line is not a passing one.
+    """
+    if count_tokens is None:
+        return QaLine("excerpt_fit", 0.0, 1.0, False, 0, 0)
+
+    total = 0
+    fitting = 0
+    for _, text in iter_clause_texts(source, rfc_limits, clause_limits):
+        total += 1
+        within_tokens = count_tokens(text) <= thresholds.excerpt_tokens
+        within_bytes = len(text.encode("utf-8")) <= thresholds.excerpt_bytes
+        fitting += 1 if within_tokens and within_bytes else 0
+    for _, rows in iter_table_rows(source, rfc_limits, clause_limits):
+        text = " ".join(cell for row in rows for cell in row)
+        total += 1
+        within_tokens = count_tokens(text) <= thresholds.excerpt_tokens
+        within_bytes = len(text.encode("utf-8")) <= thresholds.excerpt_bytes
+        fitting += 1 if within_tokens and within_bytes else 0
+    return _at_least("excerpt_fit", fitting, total, 1.0)
+
+
 def run_parse_qa(
     source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
     thresholds: QaThresholds,
+    count_tokens: Callable[[str], int] | None = None,
 ) -> QaReport:
     """Measure every blocking line and report all of them."""
     root = parse_verified(source, rfc_limits)
@@ -196,5 +241,6 @@ def run_parse_qa(
         _at_most(
             "orphan_normatives", orphan, normative, thresholds.max_orphan_normatives
         ),
+        _excerpt_fit(source, rfc_limits, clause_limits, thresholds, count_tokens),
     )
     return QaReport(document_id, all(line.passed for line in lines), lines)

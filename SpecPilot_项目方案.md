@@ -31,7 +31,7 @@ v5 把上述承诺收紧为可执行契约：所有 provider 调用统一经过�
 
 **SpecPilot：面向通信标准长文档的可验证 Agent 服务，支持条款问答与规范一致性核查原型；每项结论必须绑定版本明确的条款证据，证据不足时拒答，并提供可追踪、可评测、可部署的完整工程链路。L2 是技术验证原型，不代表法律、认证或商用合规结论。**
 
-> **[已变更｜定位重写]** 换语料后“长文档”这个前提已经不成立。实测：RFC 9110 = 90,666 tokens，RFC 9112 = 20,231 tokens，冻结语料合计 **110,897 tokens**，一个现代模型的上下文窗口装得下数遍；最长 clause 250 tokens。上方定义中的“长文档”，以及 §2.1 与 §14 的“长文档 RAG”行、§13 的长上下文风险行、§15.2 第 8 问，一律按下述重写理解：
+> **[已变更｜定位重写]** 换语料后“长文档”这个前提已经不成立。实测（可索引单元 = 条款 + 表格，BGE-M3 含特殊 token）：RFC 9110 = 92,064 tokens，RFC 9112 = 19,717 tokens，冻结语料合计 **111,781 tokens**，一个现代模型的上下文窗口装得下数遍；最长单元 357 tokens。上方定义中的“长文档”，以及 §2.1 与 §14 的“长文档 RAG”行、§13 的长上下文风险行、§15.2 第 8 问，一律按下述重写理解：
 >
 > **SpecPilot：面向公开技术规范的可验证引用服务，在不可绕过的披露上限下完成条款问答与规范一致性核查原型；每项结论必须绑定版本明确的条款证据与可审计的披露记录，证据不足时拒答。L2 是技术验证原型，不代表法律、认证或商用合规结论。**
 >
@@ -135,13 +135,13 @@ L1 和 L2 构成 W0–W6 主线。L3 不进入首发验收，也不占用主工�
 - **敏感输入预检。** query/L2 设计描述出站前先在本地检查显式 secret、凭据和可配置的业务标识符；命中时要求用户确认脱敏版本或转本地 LLM。服务端硬限制 L1 query 为 1,024 model tokens、L2 设计描述为 2,048 tokens，首发 API 不接收文档附件；更长输入必须拆分或走本地路线。该规则只是额外防线，不宣称能识别所有敏感信息；真实 profile 必须在输入界面明确提示哪些字段会被发送给哪个 provider。
 - **强制出站闸门。** 主链、Verifier、评分器与所有重试必须经过同一个本地 `EgressPolicyEnforcer`。唯一披露单元按 `(corpus_manifest_id, content_hash, quote_hash, normalized_excerpt_span)` 计数，不能把同一长条款切成多个 span 后仍只占一个名额。在线主链硬上限为：L1 每次运行最多 5 个唯一 excerpt、唯一 excerpt 合计最多 2,560 model tokens；L2 每个原子主张最多 4 个/2,048 tokens、每次运行最多 12 个/6,144 tokens；每个 excerpt 同时不得超过 512 tokens 和 8 KiB UTF-8。离线 judge 只能接收最终答案、采分点和最多 5 个/2,560 tokens 的唯一 gold excerpts。若做云端 judge，在线账本与 judge 子账本共同归入同一个 evaluation-case 根账本；根级唯一上限为 L1 10 个/5,120 tokens、L2 17 个/8,704 tokens。每个阶段和根级还执行 `unique_count × 8 KiB` 的 byte cap。transmitted 账本按真实阶段 fan-out 另计：在线链允许 Evidence 选择、答案/Compliance 和 Verifier 三次正常传输，再为一次重试留余量，故上限为在线唯一 token/byte cap 的 4 倍；judge 本身含一次正常调用和一次重试，上限为 judge 唯一 cap 的 2 倍。evaluation-case 根 transmitted 上限因此为 L1 15,360 tokens/240 KiB、L2 29,696 tokens/464 KiB，而不是简单乘根级唯一数。最终答案中再次出现的引文、相同 payload 重试或改发另一 provider 都累计 transmitted 用量。账本同时记录全局唯一内容与每条 provider route 的披露；重检索、交叉引用、角色切换和重试都不重置额度。任一上限超出都 fail closed，改用本地 LLM、要求用户缩小任务、转人工评分或返回证据不足，不得悄然扩大出站范围。
 
-> **[已收紧｜待落配置]** 上方各级上限换语料后仍然适用，但实现里还有一层本节从未记载的**语料级上限** `corpus_unique`，当前值为 1,024 excerpt / 524,288 tokens / 8 MiB。那是按 3GPP 语料量级设的：对 110,897 tokens 的 RFC 语料，它允许把全文完整披露 4.7 遍，作为最外层 tripwire 完全不 bind。
+> **[已收紧｜待落配置]** 上方各级上限换语料后仍然适用，但实现里还有一层本节从未记载的**语料级上限** `corpus_unique`，当前值为 1,024 excerpt / 524,288 tokens / 8 MiB。那是按 3GPP 语料量级设的：对 111,781 tokens 的 RFC 语料，它允许把全文完整披露 4.7 遍，作为最外层 tripwire 完全不 bind。
 >
 > 改为**逐文档**计量，并设在 TLP §3.c.iii(y) 五分之一阈值之下：RFC 9110 上限 18,000 tokens（该文 90,666 的五分之一为 18,133），RFC 9112 上限 4,000 tokens（20,231 的五分之一为 4,046）。
 >
 > 收紧的理由不是“少发更安全”，而是它把 `docs/compliance/rfc-source-terms.md` 记录的 uncertainty #1 机械地解掉。该条原文说：五分之一以整份文档计量、本项目以 token 与字节计量，两套口径条款未规定如何换算，因此“累计摘录是否已触及该阈值”无法仅凭现有上限判定。**分母现在已经实测**，把上限设在其下即意味着 §3.c.iii(y) 的附加归属义务在任何运行下都不会产生。措辞须准确：超过五分之一触发的是“须一并包含全部 IETF 声明”的附加**义务**，不是禁止；此处收紧是让义务不产生，不是声称超过即违规。
 >
-> **[已落地 2026-08-08]** 四步全部完成。`default-v1.json` 新增 `corpus_document_unique`，两份 RFC 的上限取实测量的整数五分之一：9110 = 311 excerpt / 17,509 tokens / 75,073 bytes（实测 1559 / 87,548 / 375,367），9112 = 70 / 3,906 / 16,334（实测 350 / 19,531 / 81,671）；合成 fixture 语料另立一档，因为 demo profile 必须能在无 key 下跑通。分母取的是**可索引条款文本**而非整份发布文件，比按分发原件计量更严。enforcer 按 `request.version.document_id` 分账，该键可信是因为 `_validate_version_binding` 已要求它等于 enforcer 从自有 store 解析出的 source manifest 的 `document_id`；账目存在同一行 corpus ledger 内，因此 ADR 0001 的单锁序列化不变。未被计价的 document 一律 fail closed（`corpus_document_cap_missing`），理由是没有实测分母就没有可辩护的上限，默认一个等于连许可论证一起默认了。测试覆盖逐文档独立累计、越限拒绝、未计价拒绝、jsonb 持久化往返（经变异验证：去掉该字段该测试即失败），以及一条**上限断言测试** —— 任何人调高上限而不重新测量，都会当场红。
+> **[已落地 2026-08-08]** 四步全部完成。`default-v1.json` 新增 `corpus_document_unique`，两份 RFC 的上限取实测量的整数五分之一：9110 = 314 excerpt / 18,412 tokens / 76,113 bytes（实测 1571 单元 / 92,064 tokens / 380,569 bytes），9112 = 70 / 3,943 / 16,069（实测 351 / 19,717 / 80,345）；三维都按可索引单元（条款 + 表格）计。**bytes 是承重的那一维**——它精确、与分词器无关，且两侧同法计量（都取该字符串的 UTF-8 字节数），五分之一论证在字节上无需换算即成立；tokens 只是次级守卫，此处用 BGE-M3，而 enforcer 计量 excerpt 用的是 provider 模型的分词器，两者词表不同。合成 fixture 语料另立一档，因为 demo profile 必须能在无 key 下跑通。分母取的是**可索引条款文本**而非整份发布文件，比按分发原件计量更严。enforcer 按 `request.version.document_id` 分账，该键可信是因为 `_validate_version_binding` 已要求它等于 enforcer 从自有 store 解析出的 source manifest 的 `document_id`；账目存在同一行 corpus ledger 内，因此 ADR 0001 的单锁序列化不变。未被计价的 document 一律 fail closed（`corpus_document_cap_missing`），理由是没有实测分母就没有可辩护的上限，默认一个等于连许可论证一起默认了。测试覆盖逐文档独立累计、越限拒绝、未计价拒绝、jsonb 持久化往返（经变异验证：去掉该字段该测试即失败），以及一条**上限断言测试** —— 任何人调高上限而不重新测量，都会当场红。
 - **合规评估门禁（自评，无外部审批方）。** 每个真实语料 source_manifest 默认 `cloud_egress_authorized=false`。**先说清这道门是什么：没有任何机构会为本项目签字。** 3GPP 不会答复“能否用 API 处理其规范”这类询问，项目也没有法务或 DPO 参与。因此该字段的取值是作者本人的判断——这道门禁的价值不在于取得许可，而在于让判断被记录、可回溯、推理过程可被第三方复核。把它当成等待外部回复的动作，W0 会卡在一个永远不会到来的信号上。
 
   W0 内必须完成并留档的四项：
@@ -172,7 +172,7 @@ L1 和 L2 构成 W0–W6 主线。L3 不进入首发验收，也不占用主工�
 
 ### 4.1 离线文档管线
 
-> **[已变更｜当前生效]** 下方 OOXML、TR 21.801 与 3GPP 抽样 QA 是原路线设计。当前实现已切换为 RFCXML 章节树、条款、表格、规范性关键词和交叉引用抽取；RFC 9110 smoke 得到 288 sections / 1,559 clauses / 2,519 cross-references，RFC 9112 得到 56 / 350 / 458，二者 dangling cross-reference 均为 0。独立 BM25、dense route 与 RRF 已实现；冻结 corpus manifest、一次性 pooling 和完整质量评测尚未完成。
+> **[已变更｜当前生效]** 下方 OOXML、TR 21.801 与 3GPP 抽样 QA 是原路线设计。当前实现已切换为 RFCXML 章节树、条款、表格、规范性关键词和交叉引用抽取；RFC 9110 smoke 得到 288 sections / 1,559 clauses / 2,519 cross-references，RFC 9112 得到 56 / 348 / 458（收集式 ABNF 附录已按 anchor 排除，对两份文档一致生效），二者 dangling cross-reference 均为 0。独立 BM25、dense route 与 RRF 已实现；冻结 corpus manifest、一次性 pooling 和完整质量评测尚未完成。
 
 文档管线负责把公开规范变成可检索、可定位和可校验的数据：
 
@@ -687,7 +687,7 @@ nDCG@10 不纳入首发指标：单标注者的二元相关性标签支撑不了
 
 #### 8.5.2 核心对照 A：512-token excerpt 的窗口选择策略
 
-> **[已失效｜已替换]** 本组对照的前提是语料中存在超过 512 tokens 的条款。RFC 语料实测不成立：1909 个 clause 中仅 1 个超限（RFC 9112 附录 A 的收集式 ABNF，683 tokens，不可能是任何 QA 题的 gold），p50 为 50 tokens，p99 为 169（9110）/ 173（9112）。W-head 与 W-query 在 25 道 L1 锁定题上会输出逐 bit 相同的结果，下方要求的“超过 512 tokens 的条款”分层是空集。这不是“效应量小、需在报告中直说”，是本组在当前语料上没有可测量对象。
+> **[已失效｜已替换]** 本组对照的前提是语料中存在超过 512 tokens 的条款。RFC 语料实测不成立：唯一超过 512 tokens 的单元是两份文档的收集式 ABNF 附录，现已按 anchor 排除出索引，`corpus qa` 的 `excerpt_fit` 线在 1571/1571 与 351/351 上全数通过 —— 也就是说**没有任何可检索单元超过 512 tokens**，p50 约 50，最长单元 357。W-head 与 W-query 在 25 道 L1 锁定题上会输出逐 bit 相同的结果，下方要求的“超过 512 tokens 的条款”分层是空集。这不是“效应量小、需在报告中直说”，是本组在当前语料上没有可测量对象。
 >
 > **替换为「核心对照 A′：Evidence 预算分配」。** 原设计的框架不变——把“为了数据最小化付出多少代价”从一个必须突破自身约束才能测的问题，变成一个在约束内可优化的工程问题——换的只是可优化的变量。RFC clause 是段落级的，截断不再是瓶颈；瓶颈是配额闲置：L1 上限为 5 个 excerpt / 2560 tokens，而 top-5 命中按中位数只用掉约 250 tokens，九成配额没有用出去。两条臂：
 >

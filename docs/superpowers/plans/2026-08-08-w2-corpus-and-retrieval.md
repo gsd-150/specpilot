@@ -21,8 +21,11 @@ extra. BM25 is a local pure-statistical implementation with no model.
 
 ## What W1 already settled
 
-- Clauses, their identities, and their section paths — 1559 in RFC 9110, 350 in
-  RFC 9112, every one under 252 tokens.
+- Clauses, their identities, and their section paths — 1559 in RFC 9110, 348 in
+  RFC 9112 after the collected-ABNF appendix was excluded from both documents
+  rather than only from 9110. Longest indexable unit 357 tokens, all under the
+  512-token excerpt cap, now checked exhaustively by `corpus qa`'s
+  `excerpt_fit` line rather than assumed.
 - BCP 14 attribution: 445 of 445 and 149 of 149 keywords belong to a clause.
 - Measured encoding cost: 40–100 s for the whole corpus, batches grouped by
   token count.
@@ -41,8 +44,11 @@ The product plan's pipeline section is written for 3GPP DOCX. Four of its
 clauses mean something different here, and saying so is part of the work rather
 than a licence to skip it.
 
-1. **The 7168-token child-chunk rule never fires.** Measured: the longest clause
-   is 208 tokens in RFC 9110 and 220 in RFC 9112. §4.1.3's overlap windows exist
+1. **The 7168-token child-chunk rule never fires.** Measured: the longest
+   indexable unit is 357 tokens in RFC 9110 and 222 in RFC 9112. (An earlier
+   revision recorded 208 and 220. Both were wrong: they were taken over clauses
+   only, before tables joined the corpus, and 9112's collected-ABNF appendix —
+   683 tokens — was outside the exclusion set at the time and was missed.) §4.1.3's overlap windows exist
    because a 3GPP clause is a whole numbered subsection; an RFC clause is a
    paragraph. The parent-child structure §4.1.3 asks for is already present as
    section → clause, and it splits at boundaries the document published rather
@@ -166,7 +172,7 @@ below it. A gate whose failure path is untested is a gate nobody has seen refuse
 
 Report every line's measured value, not just pass/fail.
 
-**Both documents pass all five lines.** Section numbering 1559/1559 and 350/350
+**Both documents pass all six lines.** Section numbering 1559/1559 and 348/348
 against the source's own `pn`; cross-reference targets 2519/2519 and 458/458;
 table fidelity 714/714 and 82/82 words; uncaptured text 0.09% and 0.76% against
 the 2% ceiling; orphan normative keywords 0 of 445 and 0 of 149.
@@ -244,7 +250,7 @@ length-grouped batching W1 measured.
 
 - [x] **Step 4: Build both documents and record the wall clock**
 
-1924 points (1909 clauses + 15 tables), 1024 dimensions, cosine. Encoding and
+1922 points (1907 clauses + 15 tables), 1024 dimensions, cosine. Encoding and
 upserting both documents took 46.4 s end to end on MPS.
 
 **The indexable-text decision deferred from Task 3 is settled and measured.**

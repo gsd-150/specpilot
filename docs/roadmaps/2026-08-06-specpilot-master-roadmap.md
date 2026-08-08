@@ -64,7 +64,7 @@ real provider, credential, or model, and its own output says so.
      when the source numbers sections but the outbound caps count tokens.
    - Build provenance-audited L1/L2 annotation schemas and review logs.
    - Measure local embedding throughput without committing model weights.
-     Measured: the whole 1909-clause corpus encodes in 40–100 s on this
+     Measured: the whole corpus (1907 clauses after the ABNF exclusion) encodes in 40–100 s on this
      machine. Grouping batches by token count matters; batch size does not —
      `../reports/w1-embedding-throughput.md`.
    - Detailed plan: `../superpowers/plans/2026-08-07-w1-annotation-and-embedding.md`.

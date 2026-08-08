@@ -36,17 +36,23 @@ from specpilot.ingestion.rfc import RfcInput
 
 CLAUSE_KIND = "clause"
 
-# RFC 9110's Appendix A is a single 1221-word ABNF block — the only unit in
-# either document that breaches the excerpt cap. It is excluded by anchor
-# rather than by size, and on evidence rather than convenience: all 143 rule
-# names it defines already appear in body grammar blocks, and none appears only
-# there. Indexing it would add 143 near-duplicate candidates competing with the
-# clauses that actually state the rules, which is exactly the near-duplicate
-# hazard §8.1 groups against.
+# A collected-ABNF appendix restates grammar the body already defines, rule for
+# rule. Indexing it adds near-duplicate candidates competing with the clauses
+# that actually state those rules — the hazard §8.1 groups against — and the
+# block is long enough to breach the outbound excerpt cap on its own.
 #
-# Nothing else is excluded. Any other oversized block still raises, because a
-# second one would mean something changed that nobody has looked at.
-RFC_9110_EXCLUDED_SECTIONS = frozenset({"collected.abnf"})
+# Excluded by anchor, and for every document. Keying this on one document ID
+# was a defect: RFC 9112 publishes the same appendix under the same anchor, so
+# it stayed in the index at 683 tokens against a 512-token outbound cap —
+# reachable by retrieval and refused at the gate, which reads to a user as an
+# unexplained "insufficient evidence". The reason for excluding it is a
+# property of the content, so the rule is a property of the content too.
+#
+# Nothing else is excluded, and nothing here is a size check. `ClauseLimits`
+# bounds a clause in words as a cheap pre-filter; the exact token and byte
+# check against the excerpt cap is `corpus.qa`'s `excerpt_fit` line, which runs
+# with a real tokenizer and blocks the freeze.
+EXCLUDED_SECTIONS = frozenset({"collected.abnf"})
 
 
 @dataclass(frozen=True, slots=True)
