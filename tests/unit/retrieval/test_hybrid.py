@@ -132,6 +132,7 @@ def test_get_clause_returns_the_whole_clause_locally(corpus: LocalCorpus) -> Non
     unit = corpus.get_clause(unit_id)
 
     assert unit.text
+    assert unit.document_version == "2026-08"
     assert unit.text == corpus.get_clause(unit_id).text
 
 

@@ -32,7 +32,7 @@ def payload(unit_id: str, number: str) -> dict[str, object]:
         "unit_id": unit_id,
         "kind": "clause",
         "document_id": "ietf-rfc-9110",
-        "document_version": "3",
+        "document_version": "2022-06",
         "section_number": number,
         "section_path": "Fields",
     }

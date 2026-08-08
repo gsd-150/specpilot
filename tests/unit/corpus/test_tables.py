@@ -42,6 +42,12 @@ def test_the_identity_is_stable_across_two_builds(document: Path) -> None:
     assert first == second
 
 
+def test_tables_carry_the_publication_version(document: Path) -> None:
+    versions = {table.document_version for table in tables(document)}  # type: ignore[attr-defined]
+
+    assert versions == {"2026-08"}
+
+
 def test_a_table_and_a_clause_in_the_same_position_are_not_the_same_thing(
     document: Path,
 ) -> None:

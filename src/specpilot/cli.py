@@ -49,6 +49,11 @@ from specpilot.corpus.clauses import (
 )
 from specpilot.corpus.overlap import question_gold_jaccard, restates
 from specpilot.corpus.qa import QaThresholds, run_parse_qa
+from specpilot.corpus.walk import (
+    InvalidDocumentIdentityError,
+    document_identity,
+    parse_verified,
+)
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
 from specpilot.embedding.local_encoder import (
@@ -244,6 +249,20 @@ def _frozen_source(arguments: argparse.Namespace) -> RfcSourceManifest | str:
         return "io_error"
     if actual != manifest.xml_sha256:
         return "document_hash_mismatch"
+
+    try:
+        root = parse_verified(arguments.xml, RfcLimits())
+        document_id, document_version = document_identity(root)
+    except UnsafeRfcError as error:
+        return error.code.value
+    except InvalidDocumentIdentityError:
+        return "invalid_document_identity"
+    except OSError:
+        return "io_error"
+    if manifest.document_id != document_id:
+        return "document_id_mismatch"
+    if manifest.document_version != document_version:
+        return "document_version_mismatch"
     return manifest
 
 
@@ -555,6 +574,8 @@ def _check_gold_against_source(
         # A record pointed at the wrong document would resolve its gold against
         # clauses from a specification it does not cite.
         return "document_id_mismatch"
+    if manifest.document_version != record.document_version:
+        return "document_version_mismatch"
 
     try:
         texts = {

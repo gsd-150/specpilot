@@ -19,12 +19,18 @@ def corpus(tmp_path: Path) -> Path:
     return directory
 
 
-def stored_manifest(tmp_path: Path, xml: Path) -> tuple[Path, str]:
+def stored_manifest(
+    tmp_path: Path,
+    xml: Path,
+    *,
+    document_id: str = "ietf-rfc-9999",
+    document_version: str = "2026-08",
+) -> tuple[Path, str]:
     directory = tmp_path / "manifests"
     manifest = ManifestStore(directory).create_source_v2(
         RfcSourceManifestDraft(
-            document_id="ietf-rfc-9999",
-            document_version="2026-08",
+            document_id=document_id,
+            document_version=document_version,
             text_url="https://www.rfc-editor.org/rfc/rfc9999.txt",
             xml_url="https://www.rfc-editor.org/rfc/rfc9999.xml",
             text_sha256="a" * 64,
@@ -116,6 +122,120 @@ def test_a_document_that_is_not_the_frozen_one_is_refused(
     assert code == 2
     assert captured.out == ""
     assert captured.err == "document_hash_mismatch\n"
+
+
+def test_hash_mismatch_precedes_an_invalid_document_identity(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+    xml.write_text(
+        rfc_factory.SAFE_RFC_XML.replace(
+            '<date month="08" year="2026"/>',
+            "",
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_hash_mismatch\n"
+
+
+def test_manifest_version_must_name_the_xml_publication_version(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(
+        tmp_path,
+        xml,
+        document_version="2025-01",
+    )
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_version_mismatch\n"
+
+
+def test_manifest_document_id_must_name_the_xml_rfc_number(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(
+        tmp_path,
+        xml,
+        document_id="ietf-rfc-9112",
+    )
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_id_mismatch\n"
+
+
+def test_a_source_without_a_publication_identity_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write(
+        corpus,
+        "missing-date.xml",
+        rfc_factory.SAFE_RFC_XML.replace(
+            '<date month="08" year="2026"/>',
+            "",
+        ),
+    )
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+
+    code = main(
+        [
+            "corpus", "parse",
+            "--manifest", manifest_id,
+            "--manifest-dir", str(directory),
+            "--xml", str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "invalid_document_identity\n"
 
 
 def test_a_hostile_document_is_refused_with_its_boundary_code(

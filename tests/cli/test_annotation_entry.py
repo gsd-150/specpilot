@@ -264,6 +264,34 @@ def test_a_record_pointed_at_the_wrong_document_is_refused(
     assert capsys.readouterr().err == "document_id_mismatch\n"
 
 
+def test_a_record_pointed_at_the_wrong_document_version_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record, arguments = gold_record(
+        tmp_path,
+        corpus,
+        document_version="2025-01",
+    )
+    directory = tmp_path / "annotations"
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(directory),
+            *arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_version_mismatch\n"
+    assert not directory.exists()
+
+
 def test_a_key_point_that_restates_its_clause_is_refused(
     corpus: Path,
     tmp_path: Path,

@@ -62,6 +62,10 @@ def test_every_unit_id_is_distinct(document: Path) -> None:
     assert len({unit.unit_id for unit in all_units}) == len(all_units)
 
 
+def test_every_index_unit_carries_the_publication_version(document: Path) -> None:
+    assert {unit.document_version for unit in units(document)} == {"2026-08"}
+
+
 def test_the_collection_name_carries_the_corpus_and_pipeline_versions() -> None:
     name = collection_name("c" * 64, "clause/v1", "index-text/v1")
 

@@ -6,7 +6,12 @@ import pytest
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, iter_clause_texts
-from specpilot.corpus.walk import unit_identity
+from specpilot.corpus.walk import (
+    InvalidDocumentIdentityError,
+    document_identity,
+    parse_verified,
+    unit_identity,
+)
 from tests.helpers import rfc_factory
 
 
@@ -68,3 +73,45 @@ def test_a_units_identity_cannot_be_forged_by_moving_a_boundary() -> None:
     assert unit_identity("clause", "d", "v", "1", 12) != unit_identity(
         "clause", "d", "v", "11", 2
     )
+
+
+@pytest.mark.parametrize(
+    "xml",
+    [
+        rfc_factory.SAFE_RFC_XML.replace('number="9999"', 'number=""'),
+        rfc_factory.SAFE_RFC_XML.replace('number="9999"', 'number="９９９９"'),
+        rfc_factory.SAFE_RFC_XML.replace('number="9999"', 'number="RFC9999"'),
+        rfc_factory.SAFE_RFC_XML.replace('<date month="08" year="2026"/>', ""),
+        rfc_factory.SAFE_RFC_XML.replace(' month="08"', ""),
+        rfc_factory.SAFE_RFC_XML.replace(' year="2026"', ""),
+        rfc_factory.SAFE_RFC_XML.replace(
+            '<date month="08" year="2026"/>',
+            '<date month="08" year="2026"/><date month="09" year="2026"/>',
+        ),
+        rfc_factory.SAFE_RFC_XML.replace('month="08"', 'month="13"'),
+        rfc_factory.SAFE_RFC_XML.replace(
+            'month="08"',
+            'month="' + ("1" * 4301) + '"',
+        ),
+    ],
+    ids=(
+        "missing-number",
+        "non-ascii-number",
+        "non-numeric-number",
+        "missing-date",
+        "missing-month",
+        "missing-year",
+        "duplicate",
+        "invalid-month",
+        "oversized-month",
+    ),
+)
+def test_document_identity_requires_a_valid_rfc_number_and_publication_date(
+    tmp_path: Path,
+    xml: str,
+) -> None:
+    document = rfc_factory.write(tmp_path, "identity.xml", xml)
+    root = parse_verified(document, RfcLimits())
+
+    with pytest.raises(InvalidDocumentIdentityError):
+        document_identity(root)

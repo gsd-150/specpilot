@@ -176,6 +176,8 @@ What the contract will refuse, all of them worth knowing before you hit them:
 | `invalid_annotation_record` | Any field the contract does not declare |
 | `source_required_for_gold` | The record carries gold but no source was given |
 | `document_id_mismatch` | The record names a different document than the source |
+| `document_version_mismatch` | The record, manifest, and XML publication version do not agree |
+| `invalid_document_identity` | The RFC number or unique publication date is missing or invalid |
 | `unknown_gold_clause` | A gold clause id the document does not contain |
 | `key_point_restates_clause` | A criterion reproducing its clause's wording |
 | `item_id_already_annotated` | That `item_id` already owns a different record |

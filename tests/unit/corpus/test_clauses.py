@@ -11,6 +11,7 @@ from specpilot.corpus.clauses import (
     build_clauses,
     iter_clause_texts,
 )
+from specpilot.corpus.walk import document_identity, parse_verified
 from tests.helpers import rfc_factory
 
 
@@ -23,7 +24,7 @@ def workspace(tmp_path: Path) -> Path:
 
 MULTI_PARAGRAPH_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Multi</title></front>
+  <front><title>Multi</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true" pn="section-1">
       <name>First</name>
@@ -55,6 +56,20 @@ def test_a_clause_is_a_paragraph_carrying_its_section_identity(
     assert all(c.document_id for c in clauses)
 
 
+def test_clause_identity_uses_the_publication_version_not_the_xml_format(
+    workspace: Path,
+) -> None:
+    """RFCXML ``version=3`` names the XML grammar, not this RFC edition."""
+    path = rfc_factory.write(workspace, "multi.xml", MULTI_PARAGRAPH_XML)
+
+    first = build_clauses(path, RfcLimits(), ClauseLimits())[0]
+
+    assert first.document_version == "2026-08"
+    assert first.clause_id == (
+        "60cdaf6edfc2975ab6797c26540c0ecc1ec26808d7dd5c68b17f88004d79a448"
+    )
+
+
 def test_clause_ids_are_stable_across_builds_and_never_collide(
     workspace: Path,
 ) -> None:
@@ -68,9 +83,39 @@ def test_clause_ids_are_stable_across_builds_and_never_collide(
     assert all(len(c.clause_id) == 64 for c in first)
 
 
+def test_rfcxml_format_version_is_not_part_of_the_document_identity(
+    workspace: Path,
+) -> None:
+    document = rfc_factory.write(workspace, "v3.xml", MULTI_PARAGRAPH_XML)
+    root = parse_verified(document, RfcLimits())
+    first = document_identity(root)
+
+    root.set("version", "4")
+
+    assert document_identity(root) == first
+
+
+def test_changing_the_publication_version_changes_unit_ids(
+    workspace: Path,
+) -> None:
+    august = rfc_factory.write(workspace, "august.xml", MULTI_PARAGRAPH_XML)
+    september = rfc_factory.write(
+        workspace,
+        "september.xml",
+        MULTI_PARAGRAPH_XML.replace('month="08"', 'month="09"'),
+    )
+
+    first = build_clauses(august, RfcLimits(), ClauseLimits())
+    second = build_clauses(september, RfcLimits(), ClauseLimits())
+
+    assert [clause.clause_id for clause in first] != [
+        clause.clause_id for clause in second
+    ]
+
+
 COLLIDING_SHAPE_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Collide</title></front>
+  <front><title>Collide</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="section-1" numbered="true">
       <name>One</name>
@@ -111,6 +156,7 @@ NESTED_CONTAINERS_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front>
     <title>Containers</title>
+    <date month="08" year="2026"/>
     <abstract><t>Front matter, not a citable section.</t></abstract>
   </front>
   <middle>
@@ -160,7 +206,7 @@ def test_paragraphs_inside_lists_and_asides_are_citable(workspace: Path) -> None
 
 BACK_MATTER_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Back</title></front>
+  <front><title>Back</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="body" numbered="true">
       <name>Body</name>

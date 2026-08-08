@@ -50,6 +50,36 @@ LABEL_TAGS = frozenset({"dt", "td", "th"})
 # distinct — concatenating them directly makes both "1112".
 SEPARATOR = "\x1f"
 
+_MONTH_NUMBERS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+class InvalidDocumentIdentityError(ValueError):
+    """An RFC does not carry the publication identity a unit ID requires."""
+
 
 @dataclass(frozen=True, slots=True)
 class SectionRef:
@@ -92,8 +122,36 @@ def parse_verified(path: Path, rfc_limits: RfcLimits) -> Element:
 
 
 def document_identity(root: Element) -> tuple[str, str]:
-    number = root.get("number") or "unknown"
-    return f"ietf-rfc-{number}", root.get("version") or "3"
+    """Return the RFC number and publication month used by source manifests.
+
+    The root's ``version`` attribute is the RFCXML grammar version. Using it
+    here would make every RFCXML v3 publication look like document version
+    ``3`` and would hash clause IDs under metadata that disagrees with the
+    frozen source manifest.
+    """
+    number = root.get("number") or ""
+    if not number.isascii() or not number.isdecimal():
+        raise InvalidDocumentIdentityError("RFC number is missing or invalid")
+    dates = root.findall("./front/date")
+    if len(dates) != 1:
+        raise InvalidDocumentIdentityError("exactly one publication date is required")
+    year = dates[0].get("year")
+    month = dates[0].get("month")
+    if year is None or not year.isascii() or len(year) != 4 or not year.isdecimal():
+        raise InvalidDocumentIdentityError("publication year is missing or invalid")
+    if month is None:
+        raise InvalidDocumentIdentityError("publication month is missing")
+
+    normalized = month.strip().lower()
+    if normalized.isascii() and normalized.isdecimal():
+        if len(normalized) > 2:
+            raise InvalidDocumentIdentityError("publication month is invalid")
+        month_number = int(normalized)
+    else:
+        month_number = _MONTH_NUMBERS.get(normalized, 0)
+    if not 1 <= month_number <= 12:
+        raise InvalidDocumentIdentityError("publication month is invalid")
+    return f"ietf-rfc-{number}", f"{year}-{month_number:02d}"
 
 
 def _parts(element: Element) -> Iterator[str]:

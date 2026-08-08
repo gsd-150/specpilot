@@ -13,6 +13,7 @@ SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc xmlns:xi="http://www.w3.org/2001/XInclude" number="9999" version="3">
   <front>
     <title abbrev="Synthetic">A Synthetic Specification</title>
+    <date month="08" year="2026"/>
   </front>
   <middle>
     <section anchor="intro" numbered="true">
@@ -35,7 +36,7 @@ SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 NORMATIVE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Normative</title></front>
+  <front><title>Normative</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
@@ -56,7 +57,7 @@ NORMATIVE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Unwrapped</title></front>
+  <front><title>Unwrapped</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
@@ -77,7 +78,7 @@ UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 QA_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Quality</title></front>
+  <front><title>Quality</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
@@ -100,7 +101,7 @@ QA_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 CODE_BLOCK_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Grammar</title></front>
+  <front><title>Grammar</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
@@ -119,7 +120,7 @@ CODE_BLOCK_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 DERIVED_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>References</title></front>
+  <front><title>References</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
@@ -135,7 +136,7 @@ DERIVED_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 TABLE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
-  <front><title>Tables</title></front>
+  <front><title>Tables</title><date month="08" year="2026"/></front>
   <middle>
     <section anchor="one" numbered="true">
       <name>One</name>
