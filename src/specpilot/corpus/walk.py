@@ -30,6 +30,15 @@ from specpilot.ingestion.rfc import inspect_rfc_xml
 # clause at all, citable by nothing and reachable by no retriever.
 UNWRAPPED_PROSE_TAGS = frozenset({"li", "dd"})
 
+# Blocks the source numbers in the same paragraph sequence as <t>. RFC 9110's
+# §3.9 runs section-3.9-1 (t), -2 (t), -3 (sourcecode), -4 (t), -5 (sourcecode):
+# the document itself counts an ABNF block as a numbered paragraph, so it is a
+# clause and not a unit of its own. 366 sourcecode and 81 artwork blocks in RFC
+# 9110 carry a `pn`, holding 2913 words that were in no clause before —
+# including every ABNF rule name, which §4.1.6 calls this corpus's
+# highest-signal sparse retrieval term.
+BLOCK_TAGS = frozenset({"t", "sourcecode", "artwork"})
+
 # Deliberately excluded. <dt> is a definition's term, 482 of them in RFC 9110
 # averaging under two words and stating no requirement; <td> and <th> are
 # reference-table cells, meaningless as a citation on their own. Tables are a
@@ -126,7 +135,7 @@ def owned_paragraphs(section: Element) -> Iterator[Element]:
     for child in section:
         if child.tag == "section":
             continue
-        if child.tag == "t":
+        if child.tag in BLOCK_TAGS:
             yield child
         elif child.tag in LABEL_TAGS:
             continue

@@ -40,6 +40,7 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
 from specpilot.corpus.clauses import (
+    RFC_9110_EXCLUDED_SECTIONS,
     ClauseLimits,
     OversizedClauseError,
     build_clauses,
@@ -243,6 +244,21 @@ def _refuse_source(code: str) -> int:
     return _refuse(code, EXIT_IO if code == "io_error" else EXIT_REFUSED)
 
 
+def _clause_limits(manifest: RfcSourceManifest) -> ClauseLimits:
+    """Clause bounds for one document, with its recorded exclusions applied.
+
+    Exclusions are per document and evidenced where they are declared. Reading
+    them from the manifest's identity, rather than from a flag, means a run
+    cannot quietly index a section this corpus decided to leave out.
+    """
+    excluded = (
+        RFC_9110_EXCLUDED_SECTIONS
+        if manifest.document_id == "ietf-rfc-9110"
+        else frozenset()
+    )
+    return ClauseLimits(excluded_sections=excluded)
+
+
 def _corpus_parse(arguments: argparse.Namespace) -> int:
     """Parse one frozen specification, reporting counts and never its text."""
     manifest = _frozen_source(arguments)
@@ -251,7 +267,7 @@ def _corpus_parse(arguments: argparse.Namespace) -> int:
 
     try:
         structure = extract_structure(arguments.xml, RfcLimits())
-        clauses = build_clauses(arguments.xml, RfcLimits(), ClauseLimits())
+        clauses = build_clauses(arguments.xml, RfcLimits(), _clause_limits(manifest))
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
     except OversizedClauseError:
@@ -299,7 +315,7 @@ def _corpus_clauses(arguments: argparse.Namespace) -> int:
         return _refuse_source(manifest)
 
     try:
-        clauses = build_clauses(arguments.xml, RfcLimits(), ClauseLimits())
+        clauses = build_clauses(arguments.xml, RfcLimits(), _clause_limits(manifest))
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
     except OversizedClauseError:
@@ -347,7 +363,9 @@ def _corpus_normative(arguments: argparse.Namespace) -> int:
         return _refuse_source(manifest)
 
     try:
-        index = build_normative_index(arguments.xml, RfcLimits(), ClauseLimits())
+        index = build_normative_index(
+            arguments.xml, RfcLimits(), _clause_limits(manifest)
+        )
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
     except OversizedClauseError:
@@ -395,7 +413,7 @@ def _corpus_overlap(arguments: argparse.Namespace) -> int:
         texts = {
             clause.clause_id: text
             for clause, text in iter_clause_texts(
-                arguments.xml, RfcLimits(), ClauseLimits()
+                arguments.xml, RfcLimits(), _clause_limits(manifest)
             )
         }
     except UnsafeRfcError as error:
@@ -554,7 +572,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
         texts = tuple(
             text
             for _, text in iter_clause_texts(
-                arguments.xml, RfcLimits(), ClauseLimits()
+                arguments.xml, RfcLimits(), _clause_limits(manifest)
             )
         )
     except UnsafeRfcError as error:

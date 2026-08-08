@@ -75,6 +75,25 @@ UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+CODE_BLOCK_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Grammar</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t pn="section-1-1">Prose before the grammar.</t>
+      <sourcecode pn="section-1-2" type="abnf">token = 1*tchar</sourcecode>
+      <t pn="section-1-3">Prose after the grammar.</t>
+      <figure><artwork pn="section-1-4">a diagram</artwork></figure>
+    </section>
+    <section anchor="collected.abnf" numbered="true">
+      <name>Collected ABNF</name>
+      <sourcecode pn="section-appendix.a-1">token = 1*tchar</sourcecode>
+    </section>
+  </middle>
+</rfc>
+"""
+
 DERIVED_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>References</title></front>

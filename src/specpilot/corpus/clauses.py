@@ -36,6 +36,18 @@ from specpilot.corpus.walk import (
 
 CLAUSE_KIND = "clause"
 
+# RFC 9110's Appendix A is a single 1221-word ABNF block — the only unit in
+# either document that breaches the excerpt cap. It is excluded by anchor
+# rather than by size, and on evidence rather than convenience: all 143 rule
+# names it defines already appear in body grammar blocks, and none appears only
+# there. Indexing it would add 143 near-duplicate candidates competing with the
+# clauses that actually state the rules, which is exactly the near-duplicate
+# hazard §8.1 groups against.
+#
+# Nothing else is excluded. Any other oversized block still raises, because a
+# second one would mean something changed that nobody has looked at.
+RFC_9110_EXCLUDED_SECTIONS = frozenset({"collected.abnf"})
+
 
 @dataclass(frozen=True, slots=True)
 class ClauseLimits:
@@ -49,6 +61,7 @@ class ClauseLimits:
 
     max_bytes: int = 8192
     max_words: int = 512
+    excluded_sections: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +163,8 @@ def _clauses_with_text(
     document_id, document_version = document_identity(root)
 
     for section in sections(root):
+        if section.anchor in clause_limits.excluded_sections:
+            continue
         ordinal = 0
         for paragraph in owned_paragraphs(section.element):
             text = element_text(paragraph)
