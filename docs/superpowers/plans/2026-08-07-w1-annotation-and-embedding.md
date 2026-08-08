@@ -250,12 +250,12 @@ or clause text enter Git.
 - [x] **Step 4: Record the measurement and derive the estimate**
 
 Only now may a full-corpus encoding time be written down anywhere, per §7.
-Recorded in `../../reports/w1-embedding-throughput.md`: **40–80 s for the whole
-1712-clause corpus on this machine**, measured end to end rather than
-extrapolated. Batch order turned out to matter where batch size did not —
-grouping clauses by length before batching cuts padding waste from 60% to 5%
-and roughly doubles throughput on both devices, while batch size between 8 and
-32 is indistinguishable once runs are interleaved.
+Recorded in `../../reports/w1-embedding-throughput.md`: **40–100 s for the whole
+1909-clause corpus on this machine**, measured end to end rather than
+extrapolated. What to batch by turned out to matter where how many did not:
+grouping by token count cuts padding waste from 61.6% to 4.3%, grouping by word
+count only reaches 33.9% once the corpus mixes prose with grammar, and batch
+size between 8 and 32 is indistinguishable once runs are interleaved.
 
 ---
 
