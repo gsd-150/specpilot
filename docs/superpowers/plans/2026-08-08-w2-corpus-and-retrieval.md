@@ -21,11 +21,19 @@ extra. BM25 is a local pure-statistical implementation with no model.
 
 ## What W1 already settled
 
-- Clauses, their identities, and their section paths — 1400 in RFC 9110, 312 in
-  RFC 9112, every one under 220 tokens.
+- Clauses, their identities, and their section paths — 1559 in RFC 9110, 350 in
+  RFC 9112, every one under 252 tokens.
 - BCP 14 attribution: 445 of 445 and 149 of 149 keywords belong to a clause.
-- Measured encoding cost: 40–80 s for the whole corpus, length-grouped batches.
+- Measured encoding cost: 40–100 s for the whole corpus, batches grouped by
+  token count.
 - The annotation contract, store, entry path, and progress report.
+
+Three of those figures moved while W2 Task 1 was being built, because building
+it measured things W1 had not. Cross-reference text was being dropped wherever
+the source rendered it from an attribute; grammar blocks the source numbers as
+paragraphs were in no clause at all; and the batch sort key was words, which
+stopped tracking tokens the moment grammar joined the corpus. All three are
+fixed, and the numbers above are the ones after.
 
 ## §4.1 translated for RFC, and where the translation changes the work
 
@@ -51,11 +59,15 @@ than a licence to skip it.
    whitespace-and-punctuation splitting destroys all of them. **BM25 must not
    reuse `corpus/overlap.py`'s tokenizer**, which shatters them deliberately:
    crude set overlap is right for a stratification key and wrong for retrieval.
-4. **Tables are currently outside the corpus entirely.** 12 tables in RFC 9110
-   and 3 in RFC 9112, 168 rows and 647 words, none titled, none stating a
+4. **Tables were outside the corpus entirely.** 12 tables in RFC 9110 and 3 in
+   RFC 9112, 153 body rows and 796 words, none titled, none stating a
    requirement. W1 excluded `<td>`/`<th>` from clauses, which was right — a cell
    is not a clause — but §4.1's QA gate samples 10 tables, and a question about
-   a reference table currently has nothing to cite. Task 1 gives them a unit.
+   a reference table had nothing to cite. Task 1 gave them a unit.
+5. **The QA sample becomes the whole corpus.** §4.1 asks for 20 clauses and 10
+   cross-references because a DOCX has to be checked by hand. RFC v3 publishes
+   its own section numbering in every `pn` and its own reference targets as
+   anchors, so both lines are checked exhaustively instead.
 
 ## Global Constraints
 
