@@ -75,6 +75,52 @@ UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+DERIVED_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>References</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t>Semantics are defined in <xref target="two" derivedContent="Section 2"/>
+        and syntax in <xref target="three" derivedContent="Section 3"/>.</t>
+      <t>An inline reference reads <xref target="two">the second section</xref>.</t>
+    </section>
+    <section anchor="two" numbered="true"><name>Two</name></section>
+    <section anchor="three" numbered="true"><name>Three</name></section>
+  </middle>
+</rfc>
+"""
+
+TABLE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Tables</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t>A paragraph before the tables.</t>
+      <table pn="table-1">
+        <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>200</td><td>OK</td></tr>
+          <tr><td>404</td><td>Not Found</td></tr>
+        </tbody>
+      </table>
+      <table pn="table-2">
+        <tbody>
+          <tr><td>alpha</td><td>beta</td><td>gamma</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section anchor="two" numbered="true">
+      <name>Two</name>
+      <table pn="table-3">
+        <tbody><tr><td>solo</td></tr></tbody>
+      </table>
+    </section>
+  </middle>
+</rfc>
+"""
+
 DANGLING_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Dangling</title></front>
