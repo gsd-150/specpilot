@@ -13,6 +13,11 @@ dependencies = [
     "fastapi>=0.115",
     "psycopg[binary]>=3.2",
     "pydantic>=2.0",
+    # Held to the same minor as the server image compose.yaml pins. The client
+    # warns beyond one minor apart, and a skewed pair can serialize a request
+    # the server mishandles; moving one without the other is a corpus decision,
+    # not a dependency bump.
+    "qdrant-client>=1.12,<1.13",
 ]
 
 [project.optional-dependencies]

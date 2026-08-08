@@ -1,0 +1,32 @@
+# Host access to Qdrant, for building and testing the index. Must be passed
+# explicitly:
+#
+#   docker compose -f compose.yaml -f compose.index.yaml --profile real \
+#     up --wait qdrant
+#
+# Same shape and same reasoning as compose.demo.yaml, for the same two reasons:
+#
+#   1. A published port, bound to loopback only.
+#   2. A routable network. In compose.yaml Qdrant sits on `internal: true`,
+#      which has no route off the bridge -- a published port there produces a
+#      binding that silently never carries traffic.
+#
+# Kept separate from compose.demo.yaml because these expose different things to
+# different audiences. The demo overlay opens the API for someone watching the
+# product; this one opens the vector store for the machine that builds the
+# index, and the corpus never needs to be reachable for the demo to run.
+#
+# Only 6333 (REST) is published. Qdrant's gRPC port stays closed because
+# nothing here speaks it.
+
+networks:
+  index:
+    driver: bridge
+
+services:
+  qdrant:
+    networks:
+      - internal
+      - index
+    ports:
+      - "127.0.0.1:6333:6333"

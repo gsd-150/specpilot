@@ -224,22 +224,44 @@ agnostic about what it is given.
 - Produces: `DenseIndex.build(...)`, `.search(...)`, and a collection name
   carrying the corpus and pipeline versions.
 
-- [ ] **Step 1: Write failing tests, unit and integration**
+- [x] **Step 1: Write failing tests, unit and integration**
 
 Unit tests cover the collection schema, the point payload, and the refusal to
 write into a frozen collection. The Qdrant integration test skips without a
 running instance and says so loudly, matching the ledger tests' discipline — a
 skipped run proves nothing.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, reusing W1's cache key**
+- [x] **Step 3: Implement, reusing W1's cache key**
 
 Vectors are cached under `embedding_cache_key(weights, pipeline, text)`, which
 already exists and already invalidates on a re-chunk. Encoding uses the
 length-grouped batching W1 measured.
 
-- [ ] **Step 4: Build both documents and record the wall clock**
+- [x] **Step 4: Build both documents and record the wall clock**
+
+1924 points (1909 clauses + 15 tables), 1024 dimensions, cosine. Encoding and
+upserting both documents took 46.4 s end to end on MPS.
+
+**The indexable-text decision deferred from Task 3 is settled and measured.**
+The section heading joins the indexed text, and it is what makes a section
+findable by its own number:
+
+| BM25 query `5.6.2` | top three |
+|---|---|
+| heading excluded | §5.6.1.2, §1.2, §A — misses it |
+| heading included | **§5.6.2, §5.6.2**, §5.6.1.2 |
+
+The cost is small and now measured rather than assumed: vocabulary 4599 → 4692
+(+2%), and `tokens` rises from 8 documents to 10, which is exactly the IDF
+dilution predicted.
+
+Dense misses the same query either way — §13.2.2 and §18.2, at low scores. An
+identifier carries almost no semantic signal, so the question embeds as "what
+does section require". That is not a defect to fix in the dense route; it is
+why §5.1 has `get_clause` as a separate tool and why the two routes are fused
+rather than chosen between.
 
 ---
 

@@ -1,4 +1,4 @@
-.PHONY: setup check unit integration integration-db lint typecheck fixture-smoke require-dsn
+.PHONY: setup check unit integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant
 
 setup:
 	python -m venv .venv
@@ -29,6 +29,17 @@ typecheck:
 # when nothing carries the marker, so this target cannot report success on an
 # empty selection. The DSN is required for the same reason as integration-db:
 # the demo route exercises the real ledger, and a skip proves nothing.
+# Same reasoning as integration-db: these are the only evidence that the
+# collection schema, point count, and read-only-after-freeze posture hold
+# against a real server, and a skipped run produces none of it.
+integration-qdrant: require-qdrant
+	.venv/bin/python -m pytest tests/integration/qdrant -q
+
+require-qdrant:
+	@test -n "$$SPECPILOT_TEST_QDRANT_URL" || { \
+		echo "set SPECPILOT_TEST_QDRANT_URL; see compose.index.yaml"; \
+		exit 1; }
+
 fixture-smoke: require-dsn
 	.venv/bin/python -m pytest tests/smoke -q -m fixture_smoke
 

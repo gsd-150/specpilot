@@ -44,6 +44,25 @@ def ledger_dsn() -> str:
 
 
 @pytest.fixture(scope="session")
+def qdrant_url() -> str:
+    """URL of a throwaway Qdrant for the collection tests.
+
+    Loud for the same reason as the ledger DSN. These tests are the only
+    evidence that the collection schema, the point count, and the read-only
+    posture after freezing behave against a real server, and §6.4 makes all
+    three load-time refusal conditions. A silent skip would let the corpus
+    manifest look verified when nothing was exercised.
+    """
+    url = os.environ.get("SPECPILOT_TEST_QDRANT_URL")
+    if not url:
+        pytest.skip(
+            "SPECPILOT_TEST_QDRANT_URL is unset: collection schema, point "
+            "count, and frozen-collection evidence was NOT produced by this run"
+        )
+    return url
+
+
+@pytest.fixture(scope="session")
 def migrated_dsn(ledger_dsn: str) -> Iterator[str]:
     psycopg = pytest.importorskip("psycopg")
     with psycopg.connect(ledger_dsn, autocommit=True) as connection:
