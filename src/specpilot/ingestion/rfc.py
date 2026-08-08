@@ -42,6 +42,7 @@ _EXPECTED_ROOT = "rfc"
 _DOCTYPE = re.compile(r"<!DOCTYPE", re.IGNORECASE)
 _ENTITY_DECLARATION = re.compile(r"<!ENTITY", re.IGNORECASE)
 _EXTERNAL_ID = re.compile(r"\b(?:SYSTEM|PUBLIC)\b")
+_XML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _PROCESSING_INSTRUCTION = re.compile(r"<\?(?!xml\s)[^>]*\?>")
 
 
@@ -67,7 +68,10 @@ type RfcInput = Path | VerifiedRfc
 
 def read_rfc_snapshot(path: Path, limits: RfcLimits) -> RfcByteSnapshot:
     """Open without following symlinks and snapshot one bounded file."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise UnsafeRfcError(RfcRejectionCode.NOT_A_REGULAR_FILE)
+    flags = os.O_RDONLY | no_follow
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
@@ -101,6 +105,7 @@ def _refuse_hostile_prologue(text: str) -> None:
     """Reject dangerous constructs before a parser ever sees the document."""
     root_start = text.find(f"<{_EXPECTED_ROOT}")
     prologue = text if root_start < 0 else text[:root_start]
+    text_without_comments = _XML_COMMENT.sub("", text)
 
     if _ENTITY_DECLARATION.search(prologue):
         # An external identifier inside an entity declaration is the more
@@ -110,7 +115,7 @@ def _refuse_hostile_prologue(text: str) -> None:
         raise UnsafeRfcError(RfcRejectionCode.ENTITY_DECLARATION)
     if _DOCTYPE.search(prologue):
         raise UnsafeRfcError(RfcRejectionCode.DOCTYPE)
-    if _PROCESSING_INSTRUCTION.search(prologue):
+    if _PROCESSING_INSTRUCTION.search(text_without_comments):
         raise UnsafeRfcError(RfcRejectionCode.PROCESSING_INSTRUCTION)
 
 

@@ -32,6 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from specpilot.annotation.store import Annotation, AnnotationStore
 from specpilot.contracts.annotation import (
@@ -228,14 +229,15 @@ def _set_progress(
         label_origins[head.label_origin.value] += 1
         for event in head.gold_origins:
             gold_origins[event.origin.value] += 1
-        gold_origin_chains[
-            " > ".join(
-                f"{event.origin.value}@{event.producer}"
-                if event.producer is not None
-                else event.origin.value
-                for event in head.gold_origins
-            )
-        ] += 1
+        if head.gold_origins:
+            gold_origin_chains[
+                " > ".join(
+                    f"{event.origin.value}@{quote(event.producer, safe='-._~')}"
+                    if event.producer is not None
+                    else event.origin.value
+                    for event in head.gold_origins
+                )
+            ] += 1
         if any(event.origin in retrieval_origins for event in head.gold_origins):
             retrieval_originated_gold_items += 1
         if isinstance(head, L2Annotation):

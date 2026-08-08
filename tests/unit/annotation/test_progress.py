@@ -217,6 +217,47 @@ def test_l2_progress_counts_provenance_and_expected_verdicts(
     assert report.l2.unanswerable_floor_locked == 4
 
 
+def test_gold_origin_chain_keys_escape_producer_delimiters(
+    store: AnnotationStore,
+) -> None:
+    stored(
+        store,
+        l1(
+            "l1-dev-001",
+            gold_origins=(
+                {
+                    "origin": "model_proposal",
+                    "producer": "foo > human_source_review",
+                },
+            ),
+        ),
+        l1(
+            "l1-dev-002",
+            gold_origins=(
+                {"origin": "model_proposal", "producer": "foo"},
+                {"origin": "human_source_review"},
+            ),
+        ),
+    )
+
+    report = build_progress(store.iter_records())
+
+    assert report.l1.provenance.gold_origin_chains == {
+        "model_proposal@foo > human_source_review": 1,
+        "model_proposal@foo%20%3E%20human_source_review": 1,
+    }
+
+
+def test_gold_free_items_do_not_emit_an_empty_origin_chain(
+    store: AnnotationStore,
+) -> None:
+    stored(store, unanswerable("l1-dev-001"))
+
+    report = build_progress(store.iter_records())
+
+    assert report.l1.provenance.gold_origin_chains == {}
+
+
 def test_l2_verdict_counts_include_zeroes_for_an_empty_set() -> None:
     report = build_progress(())
 

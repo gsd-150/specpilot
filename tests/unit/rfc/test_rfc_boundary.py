@@ -114,6 +114,37 @@ def test_invalid_utf8_is_refused_before_parsing(workspace: Path) -> None:
     assert raised.value.code is RfcRejectionCode.INVALID_ENCODING
 
 
+def test_a_comment_decoy_cannot_hide_a_later_processing_instruction(
+    workspace: Path,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML.replace(
+        "\n<rfc",
+        "\n<!-- <rfc -->\n<?evil?>\n<rfc",
+        1,
+    )
+    path = rfc_factory.write(workspace, "comment-decoy.xml", xml)
+
+    with pytest.raises(UnsafeRfcError) as raised:
+        inspect_rfc_xml(path, RfcLimits())
+
+    assert raised.value.code is RfcRejectionCode.PROCESSING_INSTRUCTION
+
+
+def test_processing_instruction_shaped_text_inside_a_comment_is_allowed(
+    workspace: Path,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML.replace(
+        "\n<rfc",
+        "\n<!-- <?evil?> -->\n<rfc",
+        1,
+    )
+    path = rfc_factory.write(workspace, "comment-text.xml", xml)
+
+    inspection = inspect_rfc_xml(path, RfcLimits())
+
+    assert inspection.root_tag == "rfc"
+
+
 def test_an_oversized_document_is_refused_before_parsing(workspace: Path) -> None:
     limits = RfcLimits(max_bytes=4096)
     path = rfc_factory.write_oversized(workspace, limits.max_bytes)
@@ -145,6 +176,29 @@ def test_a_symlink_is_refused_rather_than_followed(workspace: Path) -> None:
         inspect_rfc_xml(link, RfcLimits())
 
     assert raised.value.code is RfcRejectionCode.NOT_A_REGULAR_FILE
+
+
+def test_missing_o_nofollow_is_refused_before_open(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = rfc_factory.write_safe(workspace)
+    opened = False
+
+    def record_open(path: Path, flags: int) -> int:
+        del path, flags
+        nonlocal opened
+        opened = True
+        raise OSError
+
+    monkeypatch.setattr(rfc_module.os, "O_NOFOLLOW", 0)
+    monkeypatch.setattr(rfc_module.os, "open", record_open)
+
+    with pytest.raises(UnsafeRfcError) as raised:
+        read_rfc_snapshot(path, RfcLimits())
+
+    assert raised.value.code is RfcRejectionCode.NOT_A_REGULAR_FILE
+    assert opened is False
 
 
 @pytest.mark.parametrize(

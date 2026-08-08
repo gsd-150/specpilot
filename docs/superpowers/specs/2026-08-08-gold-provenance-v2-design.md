@@ -89,6 +89,10 @@ Remove `independent_paths`. Each L1/L2 progress payload adds:
 
 The three origin maps count item-level content/label summaries and Gold events.
 Gold chains preserve event order and include `@producer` when present.
+For an unambiguous report key, the producer component uses canonical UTF-8
+percent encoding with ASCII alphanumerics and `-._~` left unescaped; origin
+labels remain literal and events are joined with ` > `. A head with no
+Gold-origin events contributes no chain key, rather than an empty-string key.
 `retrieval_originated_gold_items` counts items whose Gold chain contains
 `search_clauses`, dense, BM25, or hybrid retrieval. `verdict_counts` is empty
 for L1 and reports all three expected verdicts for L2.
@@ -133,4 +137,3 @@ counts, and preservation of source-aware failures. Verification runs focused
 tests, Ruff, mypy, the full suite, real overlap measurement, and temporary
 source-aware candidate entry. No official annotation or persistent index is
 created before the final approval gate.
-

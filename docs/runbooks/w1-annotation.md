@@ -45,6 +45,12 @@ Retrieval-originated Recall is a diagnostic: report it with the provenance
 distribution and do not present it as independent evidence of retrieval
 quality. The record still must be checked against the frozen source.
 
+In progress output, an event's producer is canonical UTF-8 percent-encoded
+with ASCII alphanumerics and `-._~` left unescaped before events are joined
+with ` > `. Safe producer names such as `openai-codex` therefore remain
+readable, delimiter-like producer text cannot collide with another chain, and
+a Gold-free item emits no empty chain key.
+
 ## Source checks retained at entry
 
 When a record has gold, `annotation add` requires `--manifest`,
@@ -63,6 +69,20 @@ When a record has gold, `annotation add` requires `--manifest`,
 | `invalid_document_identity` | The hash-matched RFC has no unique valid RFC number/publication month. |
 | `document_id_mismatch` | The manifest or annotation names a different RFC. |
 | `document_version_mismatch` | The manifest or annotation names a different publication month. |
+
+The live source gate runs in this order:
+
+1. establish a regular file and bounded size (`not_a_regular_file`,
+   `document_too_large`);
+2. compare the bounded snapshot with the manifest hash
+   (`document_hash_mismatch`);
+3. validate XML encoding and safety, the root element, and RFCXML grammar
+   (`invalid_encoding`, `doctype`, `entity_declaration`, `external_entity`,
+   `processing_instruction`, `invalid_xml`, `unexpected_root`,
+   `unsupported_rfcxml_version`);
+4. extract the publication identity (`invalid_document_identity`);
+5. check manifest and annotation identity agreement (`document_id_mismatch`,
+   `document_version_mismatch`).
 
 The manifest hash, XML safety, grammar, and identity checks, plus all corpus
 and Gold work, consume one bounded `O_NOFOLLOW` in-memory snapshot. No later
