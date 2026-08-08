@@ -13,6 +13,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from specpilot.annotation.progress import read_progress
+from specpilot.annotation.store import AnnotationStore
+from specpilot.contracts.annotation import L1Annotation, L2Annotation
 from specpilot.contracts.archive import ArchivePolicy, UnsafeArchiveError
 from specpilot.contracts.egress import (
     EgressRequest,
@@ -43,6 +45,7 @@ from specpilot.corpus.clauses import (
     build_clauses,
     iter_clause_texts,
 )
+from specpilot.corpus.overlap import question_gold_jaccard
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
 from specpilot.embedding.local_encoder import EmbeddingRuntimeUnavailable, load_encoder
@@ -266,6 +269,188 @@ def _corpus_parse(arguments: argparse.Namespace) -> int:
             "clause_count": len(clauses),
             "cross_reference_count": len(structure.cross_references),
             "dangling_cross_references": structure.dangling_count,
+        }
+    )
+
+
+def _section_matches(number: str | None, prefix: str) -> bool:
+    """True when `number` is `prefix` or sits beneath it.
+
+    Compared component by component so `--section 1` selects 1.2 but not 10,
+    which a string prefix would wrongly include.
+    """
+    if number is None:
+        return False
+    parts, wanted = number.split("."), prefix.split(".")
+    return parts[: len(wanted)] == wanted
+
+
+def _corpus_clauses(arguments: argparse.Namespace) -> int:
+    """List clause identities so a gold field has something to reference.
+
+    Section 8.2.1 has the author navigate the frozen renditions themselves; this
+    only translates "the third paragraph of §5.6.2", which they found there, into
+    the identifier a record stores. It emits locators and counts — never the
+    paragraph.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        clauses = build_clauses(arguments.xml, RfcLimits(), ClauseLimits())
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    for clause in clauses:
+        if arguments.section and not _section_matches(
+            clause.section_number, arguments.section
+        ):
+            continue
+        json.dump(
+            {
+                "clause_id": clause.clause_id,
+                "section_number": clause.section_number,
+                "section_path": clause.section_path,
+                "ordinal": clause.ordinal,
+                "anchor": clause.anchor,
+                "word_count": clause.word_count,
+                "byte_count": clause.byte_count,
+            },
+            sys.stdout,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        sys.stdout.write("\n")
+    return 0
+
+
+def _corpus_overlap(arguments: argparse.Namespace) -> int:
+    """Compute the literal overlap the annotation contract requires.
+
+    The clause text is read here and never leaves: what comes back is one float.
+    This is arithmetic over the author's own question and their own chosen gold,
+    not a judgement about either.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        texts = {
+            clause.clause_id: text
+            for clause, text in iter_clause_texts(
+                arguments.xml, RfcLimits(), ClauseLimits()
+            )
+        }
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    wanted = tuple(dict.fromkeys(arguments.clause_id))
+    if any(clause_id not in texts for clause_id in wanted):
+        # An overlap figure against a clause this document does not contain
+        # would be a number about nothing.
+        return _refuse("unknown_clause_id")
+
+    return _emit(
+        {
+            "status": "measured",
+            "document_id": manifest.document_id,
+            "gold_clause_count": len(wanted),
+            "question_gold_jaccard": round(
+                question_gold_jaccard(
+                    arguments.question, [texts[clause_id] for clause_id in wanted]
+                ),
+                4,
+            ),
+        }
+    )
+
+
+_L1_TEMPLATE: dict[str, Any] = {
+    "schema_version": "annotation-l1/v1",
+    "item_id": "l1-dev-001",
+    "split": "dev",
+    "question": "",
+    "direction": "clause_first",
+    "independent_path": "literal_search",
+    "document_id": "ietf-rfc-9110",
+    "document_version": "2022-06",
+    "gold_clause_ids": [],
+    "gold_section_paths": [],
+    "key_points": [{"point_id": "kp-1", "criterion": "", "factual_values": []}],
+    "expected_refusal": False,
+    "question_gold_jaccard": None,
+}
+_L2_TEMPLATE: dict[str, Any] = {
+    **_L1_TEMPLATE,
+    "schema_version": "annotation-l2/v1",
+    "item_id": "l2-dev-001",
+    "claim_id": "l2-dev-001-c1",
+    "expected_verdict": "compliant",
+    "proposed_verdict": "compliant",
+    "supports_verdict": True,
+}
+
+
+def _annotation_template(arguments: argparse.Namespace) -> int:
+    """Print a skeleton record.
+
+    Left deliberately invalid: `question` is empty and there is no gold, so the
+    contract refuses it until the author has actually done the work. A template
+    that validated as written would invite twenty-three copies of itself.
+    """
+    template = _L2_TEMPLATE if arguments.level == "l2" else _L1_TEMPLATE
+    json.dump(template, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _annotation_add(arguments: argparse.Namespace) -> int:
+    """Validate one authored record and store it.
+
+    Every rule the contract encodes bites here: a record whose gold came from
+    the retriever names a path `IndependentPath` has no value for, an answerable
+    item without gold has no overlap figure to stratify by, and an unanswerable
+    one may not carry gold. A refusal writes nothing.
+    """
+    try:
+        data = json.loads(arguments.record.read_text(encoding="utf-8"))
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    except ValueError:
+        return _refuse("invalid_annotation_record")
+
+    declared = data.get("schema_version") if isinstance(data, dict) else None
+    model: type[L1Annotation] | type[L2Annotation] = (
+        L2Annotation if declared == "annotation-l2/v1" else L1Annotation
+    )
+    try:
+        record = model.model_validate(data)
+    except ValidationError:
+        return _refuse("invalid_annotation_record")
+
+    try:
+        stored = AnnotationStore(arguments.annotation_dir).create(record)
+    except ValueError:
+        return _refuse("item_id_already_annotated")
+    except (OSError, RuntimeError):
+        return _refuse("annotation_not_written", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "stored",
+            "annotation_id": stored.annotation_id,
+            "item_id": stored.item_id,
+            "split": stored.split.value,
         }
     )
 
@@ -799,12 +984,36 @@ def _parser() -> argparse.ArgumentParser:
     parse.add_argument("--xml", type=Path, required=True)
     parse.set_defaults(handler=_corpus_parse)
 
+    clauses = corpus.add_parser("clauses")
+    clauses.add_argument("--manifest", required=True)
+    clauses.add_argument("--manifest-dir", type=Path, required=True)
+    clauses.add_argument("--xml", type=Path, required=True)
+    clauses.add_argument("--section", default=None)
+    clauses.set_defaults(handler=_corpus_clauses)
+
+    overlap = corpus.add_parser("overlap")
+    overlap.add_argument("--manifest", required=True)
+    overlap.add_argument("--manifest-dir", type=Path, required=True)
+    overlap.add_argument("--xml", type=Path, required=True)
+    overlap.add_argument("--clause-id", action="append", required=True)
+    overlap.add_argument("--question", required=True)
+    overlap.set_defaults(handler=_corpus_overlap)
+
     annotation = commands.add_parser("annotation").add_subparsers(
         dest="command", required=True
     )
     progress = annotation.add_parser("progress")
     progress.add_argument("--annotation-dir", type=Path, required=True)
     progress.set_defaults(handler=_annotation_progress)
+
+    template = annotation.add_parser("template")
+    template.add_argument("--level", choices=["l1", "l2"], required=True)
+    template.set_defaults(handler=_annotation_template)
+
+    add = annotation.add_parser("add")
+    add.add_argument("--record", type=Path, required=True)
+    add.add_argument("--annotation-dir", type=Path, required=True)
+    add.set_defaults(handler=_annotation_add)
 
     embedding = commands.add_parser("embedding").add_subparsers(
         dest="command", required=True

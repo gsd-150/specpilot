@@ -254,6 +254,43 @@ MPS throughput from 20.3 to 39.2 clauses per second.
 
 ---
 
+### Task 5a: The entry path Task 6 needs — ADDED 2026-08-08
+
+**Files:**
+- Create: `src/specpilot/corpus/overlap.py`
+- Modify: `src/specpilot/cli.py`
+- Test: `tests/unit/corpus/test_overlap.py`, `tests/cli/test_annotation_entry.py`
+
+**Why this was missing.** Tasks 1–5 built everything that reads or checks
+annotations and nothing that writes one. Standing at the start of Task 6, the
+author has no command that returns a `clause_id`, so `gold_clause_ids` cannot be
+filled in at all; no command that stores a record, so each of the 23 would be
+hand-written Python; and no way to obtain `question_gold_jaccard`, which the
+contract requires on every answerable item. All three are mechanical — counting,
+shape validation, and one arithmetic measure — and none of them originates a
+question, chooses a gold clause, or decides a verdict, so all three belong to
+tooling under Task 6's own rule.
+
+- [x] **Step 1: Write failing tests for the index, the entry, and the overlap**
+
+Assert `corpus clauses` lists clause IDs with their section numbers and paths and
+no clause text; that `annotation add` refuses a record the contract rejects and
+stores one it accepts; and that the overlap measure is stable, order-independent,
+and takes the maximum over gold clauses rather than the union.
+
+- [x] **Step 2: Run and verify RED**
+
+- [x] **Step 3: Implement and verify GREEN on the frozen corpus**
+
+**The decision this task exists to make.** For a multi-gold item, overlap over
+the *union* of gold clauses falls as gold is added, so an item would look less
+literal purely for being better annotated. Section 8.2.2 wants to separate
+"semantic retrieval worked" from "literal matching got lucky", and luck needs
+only one clause to match. The measure is therefore the maximum over gold
+clauses, and it is frozen here because W6 reports Macro-Recall stratified by it.
+
+---
+
 ### Task 6: The author's gold annotation — OWNER: the author
 
 **Deliberately left unchecked, like W0 Task 8 Step 4.** This is the largest
@@ -264,6 +301,7 @@ verdict.
 
 - [ ] **Step 1: Annotate to the W1 targets using only §8.2.1 paths** — the
   author's own work, with each record naming the path its gold came from.
+  Operating procedure: `../../runbooks/w1-annotation.md`.
 
 Mixed question directions per §8.2.2: about 60% clause-first with the clause
 title's full wording deliberately not reused, about 40% scenario-first.
