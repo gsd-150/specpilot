@@ -27,6 +27,7 @@ what a tighter counter would have to be built on.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -176,11 +177,18 @@ class HttpChatAdapter:
         if self._probe_tools:
             body["tools"] = [PROBE_TOOL]
 
+        # Serialized here rather than left to httpx, so the byte count recorded
+        # is the byte count sent.
+        encoded = json.dumps(body).encode("utf-8")
+
         try:
             response = await self._client.post(
                 "/chat/completions",
-                json=body,
-                headers={"authorization": f"Bearer {self._key}"},
+                content=encoded,
+                headers={
+                    "authorization": f"Bearer {self._key}",
+                    "content-type": "application/json",
+                },
             )
         except httpx.TimeoutException as error:
             raise ProviderError("provider_timeout") from error
@@ -189,9 +197,11 @@ class HttpChatAdapter:
 
         if response.status_code >= 400:
             raise ProviderError(_failure_code(response.status_code))
-        return self._read(response)
+        return self._read(response, request_bytes=len(encoded))
 
-    def _read(self, response: httpx.Response) -> ProviderResponse:
+    def _read(
+        self, response: httpx.Response, *, request_bytes: int
+    ) -> ProviderResponse:
         try:
             body = response.json()
         except ValueError as error:
@@ -241,6 +251,7 @@ class HttpChatAdapter:
                 finish_reason=finish_reason,
                 duration_ms=0,
                 tool_call_count=tool_call_count,
+                request_bytes=request_bytes,
             ),
         )
 

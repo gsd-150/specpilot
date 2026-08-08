@@ -289,13 +289,32 @@ BGE-M3 的 8192 序列长度比常见的 512-token embedding 模型更适合长�
 
 #### 4.6.1 W0 必须确认的三件事
 
-> **[已变更]** 三路线 go/no-go 已选择 **C（IETF RFC）**，因此 3GPP 云端授权与 OOXML 摄取不再是进入 W1 的前置条件。**[已完成]** `EgressPolicyEnforcer`、PostgreSQL 原子账本和 fixture transport 已通过多轮、重试、越权、并发与恢复测试。**[延期]** 真实 provider route 与真实 excerpt 出站接入仍是后续硬门禁；在它通过前，不得把 RFC 可公开获取等同于允许向任意 provider 发送内容。
+> **[已变更]** 三路线 go/no-go 已选择 **C（IETF RFC）**，因此 3GPP 云端授权与 OOXML 摄取不再是进入 W1 的前置条件。**[已完成]** `EgressPolicyEnforcer`、PostgreSQL 原子账本和 fixture transport 已通过多轮、重试、越权、并发与恢复测试。**[已实测 2026-08-09]** 两条真实 provider route 已用合成 payload 实测可用，详见下方第 1 项的附注。**[延期]** 真实 **excerpt 出站**接入仍是后续硬门禁 —— 它与路由可用性是两件事：路由通了只说明能连上，出站授权要的是一份真实文档的授权 successor manifest，而两份 RFC manifest 现均为 `cloud_egress_authorized=false`。在它通过前，不得把 RFC 可公开获取、或路由已实测可用，等同于允许向 provider 发送语料内容。
 >
 > **[表述修正｜下方第 1 项按字面不可执行]** 第 1 项写“在 W0 **用 fixture** 分别验证 `deepseek-v4-flash` 与 `glm-5.2` 的**真实调用**”——这句自相矛盾：fixture route smoke 按定义不触达任何 provider，无法验证真实调用。W0 据此把该项报告为已完成，而同期的 `docs/reports/w0-foundation-report.md` 又写明该 smoke “proves nothing about any real provider”。两份记录都对，问题在要求本身。
 >
 > 第 1 项应读作：**用合成 payload 对真实 provider 端点发起真实调用**，验证 model slug 可达、tool calling 与结构化输出可用、响应 metadata 与账户级数据政策；**fixture adapter smoke 不满足本项**。
 >
-> 当前实际状态：`deepseek-v4-flash` 与 `glm-5.2` 都没有经过任何真实调用，两个 model slug 在选定 provider 上是否存在、是否支持 tool calling，均无证据。W3 及以后全部押在这两条 route 上，因此这是目前最大的未退役风险，同时也是最便宜的一个 —— 一次合成 payload 的真实调用即可退役。**应排在标注之前执行**：若不可用，路线 B 的本地 smoke 清单要整套重走，越晚发现越贵。
+> **[已实测 2026-08-09]** 两条路由各跑了一次 `provider route-smoke --live`，合成 payload，语料未出站（manifest 绑定 `synthetic-fixture-spec`）。
+>
+> | | main | judge |
+> |---|---|---|
+> | provider / slug | `deepseek` / `deepseek-v4-flash` | `chatanywhere` / `glm-5.2` |
+> | slug 被认下 | 是 | 是 |
+> | usage metadata | 有 | 有 |
+> | `finish_reason` | `tool_calls` | `stop` |
+> | tool call | **1** | **0** |
+> | 请求字节 / provider `prompt_tokens` | 495 / 414 | 353 / 228 |
+>
+> **退役的部分：** 两个 model slug 在各自 provider 上确实存在并应答，响应 metadata 可获得。§4.6.1 第 1 项就此部分退役，路线 A 的“provider 路由可用”前提成立。
+>
+> **没有退役的部分，必须分开说：**
+>
+> 1. **judge 路由的 tool calling 仍未证实。** `glm-5.2` 收到了同一个 tool 定义但选择不调用，返回 `stop`。这既不是“不支持”也不是“支持”——模型可以对被提供的工具选择不用。按 §8.3.1，judge 的职责是逐采分点判定，需要的是**结构化输出**而不是 tool calling，所以这不构成阻塞；但报告里不得写成“两条路由都验证了 tool calling”。
+> 2. **主链的 tool calling 只证明了“能发出一次调用”**，没有证明工具选择质量、参数正确性或多轮 tool loop —— 那些要等 W3 有真实工具 schema 之后才测得到。
+> 3. **真实 excerpt 出站仍是后续硬门禁**，与本项无关：它需要一份真实文档的授权 successor manifest，而两份 RFC manifest 现均为 `cloud_egress_authorized=false`。
+>
+> **附带得到的一个测量：字节上界在两条真实路由上都成立**（414 ≤ 495，228 ≤ 353）。n=2、短英文、含 tool schema，证据很弱，但方向与 `ByteUpperBoundCounter` 的构造性论证一致。收紧该计数需要更多样本，尤其是中文与长条款。
 
 三项都是方案的硬依赖，必须在 **W0** 内、任何真实条款出站前落地：
 

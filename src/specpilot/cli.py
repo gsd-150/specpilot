@@ -1112,6 +1112,27 @@ def _fixture_manifest(
     return store, manifest
 
 
+def _live_findings(response: Any) -> str:
+    """What this run showed, assembled from this run.
+
+    The earlier version was one fixed sentence claiming a tool call, which was
+    false the moment a route answered without emitting one -- and one did. A
+    smoke reporting the same finding whatever happened is not evidence.
+    """
+    findings = [
+        "the named model slug answered on this route",
+        "usage metadata was returned",
+    ]
+    if response.metadata.tool_call_count:
+        findings.append("a tool call was emitted")
+    else:
+        findings.append(
+            "NO tool call was emitted; tool calling on this route is unproven "
+            "rather than refuted, since a model may decline a tool it is offered"
+        )
+    return "; ".join(findings)
+
+
 def _route_smoke(arguments: argparse.Namespace) -> int:
     """Send synthetic fixture text through the real transport and ledger.
 
@@ -1240,15 +1261,22 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
             "model_id": response.model_id,
             "finish_reason": response.metadata.finish_reason,
             "tool_call_count": response.metadata.tool_call_count,
-            # The calibration datum. The reservation was priced with a byte
-            # upper bound; this is what the model actually charged. The gap is
-            # the margin a tighter counter would have to earn.
+            # Priced by the caps: source text only. Deliberately NOT placed
+            # beside prompt_tokens, which covers the whole prompt including the
+            # system message and the tool schema. Comparing those two reads as
+            # a calibration and is not one.
             "projected_excerpt_tokens": projected_tokens,
+            # These three are like for like. A byte-level BPE cannot emit more
+            # tokens than the request has bytes, so the bound is checked here
+            # against a live route rather than asserted from construction.
+            "request_bytes": response.metadata.request_bytes,
             "provider_prompt_tokens": response.metadata.prompt_tokens,
+            "token_upper_bound_held": (
+                response.metadata.prompt_tokens <= response.metadata.request_bytes
+            ),
             "discloses": "synthetic-fixture-spec only",
             "proves": (
-                "the named model slug answered on this route, returned usage "
-                "metadata, and emitted a tool call"
+                _live_findings(response)
                 if live
                 else "transport, enforcer and ledger are wired and policy-bound"
             ),

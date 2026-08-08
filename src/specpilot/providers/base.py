@@ -42,6 +42,13 @@ class ResponseMetadata(_FrozenModel):
     # asks; the arguments are model output and stay off this list along with
     # everything else the provider says.
     tool_call_count: Annotated[int, Field(ge=0)] = 0
+    # The serialized request size, which is the only figure `prompt_tokens` can
+    # be compared with like for like. The excerpt projection prices what the
+    # caps govern -- source text -- while `prompt_tokens` covers the whole
+    # prompt including the system message and any tool schema. Recording the
+    # request size is what makes "tokens never exceed bytes" checkable against
+    # a live route instead of asserted from the tokenizer's construction.
+    request_bytes: Annotated[int, Field(ge=0)] = 0
 
 
 class ProviderResponse(_FrozenModel):

@@ -253,3 +253,30 @@ def test_a_present_credential_is_returned_stripped(
     monkeypatch.setenv("SPECPILOT_TEST_KEY", "  sk-value\n")
 
     assert resolve_credential(ENDPOINT) == "sk-value"
+
+
+async def test_the_response_records_how_many_bytes_the_request_was() -> None:
+    """The only figure that can be compared with `prompt_tokens` like for like.
+
+    The excerpt projection prices what the cap governs -- source text -- while
+    `prompt_tokens` covers the whole prompt including the system message and any
+    tool schema. Putting those two beside each other reads as a calibration and
+    is not one. The request byte count is the number the upper bound is actually
+    a bound on.
+    """
+    adapter = adapter_returning(ok_body())
+
+    response = await adapter.send(l1_payload())
+
+    assert response.metadata.request_bytes > 0
+    assert response.metadata.request_bytes >= response.metadata.prompt_tokens, (
+        "a byte-level BPE cannot emit more tokens than the request has bytes"
+    )
+
+
+async def test_probing_adds_its_tool_schema_to_the_counted_bytes() -> None:
+    """The bound has to cover everything sent, not just the rendered payload."""
+    plain = await adapter_returning(ok_body()).send(l1_payload())
+    probing = await adapter_returning(ok_body(), probe_tools=True).send(l1_payload())
+
+    assert probing.metadata.request_bytes > plain.metadata.request_bytes
