@@ -16,6 +16,7 @@ class RfcRejectionCode(StrEnum):
     PROCESSING_INSTRUCTION = "processing_instruction"
     INVALID_XML = "invalid_xml"
     UNEXPECTED_ROOT = "unexpected_root"
+    UNSUPPORTED_RFCXML_VERSION = "unsupported_rfcxml_version"
 
 
 @dataclass(frozen=True, slots=True)

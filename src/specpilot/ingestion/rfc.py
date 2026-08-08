@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import stat
+from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsed via defusedxml
 
@@ -44,8 +45,28 @@ _EXTERNAL_ID = re.compile(r"\b(?:SYSTEM|PUBLIC)\b")
 _PROCESSING_INSTRUCTION = re.compile(r"<\?(?!xml\s)[^>]*\?>")
 
 
-def _read_regular_file(path: Path, limits: RfcLimits) -> bytes:
-    """Open without following a symlink and read within the byte cap."""
+@dataclass(frozen=True, slots=True)
+class RfcByteSnapshot:
+    """The exact bytes accepted from a regular RFC XML file."""
+
+    document_sha256: str
+    document_bytes: int
+    data: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRfc:
+    """An RFC XML document accepted by the verification boundary."""
+
+    inspection: RfcInspection
+    root: Element = field(repr=False)
+
+
+type RfcInput = Path | VerifiedRfc
+
+
+def read_rfc_snapshot(path: Path, limits: RfcLimits) -> RfcByteSnapshot:
+    """Open without following symlinks and snapshot one bounded file."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -67,7 +88,11 @@ def _read_regular_file(path: Path, limits: RfcLimits) -> bytes:
             data += chunk
         if len(data) > limits.max_bytes:
             raise UnsafeRfcError(RfcRejectionCode.DOCUMENT_TOO_LARGE)
-        return data
+        return RfcByteSnapshot(
+            document_sha256=hashlib.sha256(data).hexdigest(),
+            document_bytes=len(data),
+            data=data,
+        )
     finally:
         os.close(descriptor)
 
@@ -89,14 +114,9 @@ def _refuse_hostile_prologue(text: str) -> None:
         raise UnsafeRfcError(RfcRejectionCode.PROCESSING_INSTRUCTION)
 
 
-def inspect_rfc_xml(path: Path, limits: RfcLimits) -> RfcInspection:
-    """Verify one already-fetched RFC XML document and report metadata only.
-
-    Fetching is deliberately not part of this boundary. It verifies bytes that
-    are already on disk, which keeps the network out of the code path that
-    decides whether a document is safe.
-    """
-    data = _read_regular_file(path, limits)
+def verify_rfc_snapshot(snapshot: RfcByteSnapshot) -> VerifiedRfc:
+    """Parse and verify the bytes previously captured in one RFC snapshot."""
+    data = snapshot.data
 
     try:
         text = data.decode("utf-8", errors="strict")
@@ -130,9 +150,31 @@ def inspect_rfc_xml(path: Path, limits: RfcLimits) -> RfcInspection:
 
     if root.tag != _EXPECTED_ROOT:
         raise UnsafeRfcError(RfcRejectionCode.UNEXPECTED_ROOT)
+    if root.get("version") != "3":
+        raise UnsafeRfcError(RfcRejectionCode.UNSUPPORTED_RFCXML_VERSION)
 
-    return RfcInspection(
-        document_sha256=hashlib.sha256(data).hexdigest(),
-        document_bytes=len(data),
-        root_tag=root.tag,
+    return VerifiedRfc(
+        inspection=RfcInspection(
+            document_sha256=snapshot.document_sha256,
+            document_bytes=snapshot.document_bytes,
+            root_tag=root.tag,
+        ),
+        root=root,
     )
+
+
+def load_verified_rfc(path: Path, limits: RfcLimits) -> VerifiedRfc:
+    """Read and verify one RFC XML document without reopening it."""
+    return verify_rfc_snapshot(read_rfc_snapshot(path, limits))
+
+
+def ensure_verified_rfc(source: RfcInput, limits: RfcLimits) -> VerifiedRfc:
+    """Accept a verified snapshot or create one from a path."""
+    if isinstance(source, VerifiedRfc):
+        return source
+    return load_verified_rfc(source, limits)
+
+
+def inspect_rfc_xml(path: Path, limits: RfcLimits) -> RfcInspection:
+    """Verify one already-fetched RFC XML document and report metadata only."""
+    return load_verified_rfc(path, limits).inspection

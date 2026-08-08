@@ -6,7 +6,11 @@ import pytest
 
 import specpilot.ingestion.rfc as rfc_module
 from specpilot.contracts.rfc import RfcLimits, RfcRejectionCode, UnsafeRfcError
-from specpilot.ingestion.rfc import inspect_rfc_xml
+from specpilot.ingestion.rfc import (
+    inspect_rfc_xml,
+    load_verified_rfc,
+    read_rfc_snapshot,
+)
 from tests.helpers import rfc_factory
 
 
@@ -21,12 +25,45 @@ def test_a_safe_rfc_is_accepted_and_reports_only_metadata(workspace: Path) -> No
     path = rfc_factory.write_safe(workspace)
 
     inspection = inspect_rfc_xml(path, RfcLimits())
+    verified = load_verified_rfc(path, RfcLimits())
 
     assert inspection.root_tag == "rfc"
     assert inspection.document_bytes == path.stat().st_size
     assert len(inspection.document_sha256) == 64
     # The inspection is metadata. Document text must never ride along in it.
     assert "Synthetic" not in repr(inspection)
+    assert inspection == verified.inspection
+    assert "Synthetic" not in repr(verified)
+    assert "Element" not in repr(verified)
+
+
+def test_a_byte_snapshot_holds_content_out_of_its_repr(workspace: Path) -> None:
+    path = rfc_factory.write_safe(workspace)
+
+    snapshot = read_rfc_snapshot(path, RfcLimits())
+
+    assert snapshot.document_bytes == path.stat().st_size
+    assert len(snapshot.document_sha256) == 64
+    assert "Synthetic" not in repr(snapshot)
+
+
+@pytest.mark.parametrize("version", [None, "4"], ids=("missing", "unsupported"))
+def test_only_rfcxml_v3_is_supported(
+    workspace: Path,
+    version: str | None,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML
+    xml = (
+        xml.replace(' version="3"', "")
+        if version is None
+        else xml.replace('version="3"', f'version="{version}"')
+    )
+    path = rfc_factory.write(workspace, "version.xml", xml)
+
+    with pytest.raises(UnsafeRfcError) as raised:
+        load_verified_rfc(path, RfcLimits())
+
+    assert raised.value.code is RfcRejectionCode.UNSUPPORTED_RFCXML_VERSION
 
 
 @pytest.mark.parametrize(
