@@ -95,6 +95,9 @@ than a licence to skip it.
 - `src/specpilot/retrieval/bm25.py` — independent sparse route and tokenizer.
 - `src/specpilot/retrieval/dense.py` — Qdrant collection and dense route.
 - `src/specpilot/retrieval/hybrid.py` — RRF over the two routes.
+- `src/specpilot/retrieval/local.py` — §5.1's local `get_clause` / `get_toc`,
+  split out so hybrid.py stays about fusion.
+- `src/specpilot/corpus/indexable.py` — the text both routes index.
 - `src/specpilot/retrieval/pooling.py` — candidate pooling and its sealed log.
 - `src/specpilot/contracts/corpus_manifest.py` — the frozen corpus identity.
 - `src/specpilot/cli.py` — `corpus qa`, `corpus index`, `corpus freeze`,
@@ -276,7 +279,7 @@ rather than chosen between.
 - Produces: `reciprocal_rank_fusion(...)`, `specpilot retrieval search`, and the
   local `get_clause` / `get_toc` primitives §5.1 defines.
 
-- [ ] **Step 1: Write failing fusion and boundary tests**
+- [x] **Step 1: Write failing fusion and boundary tests**
 
 Assert RRF is order-independent between the two input rankings, that a document
 ranked by only one route still places, and that the fused ranking is never used
@@ -284,9 +287,23 @@ as a pooling input. Assert the candidate pool does not leave the machine and
 that `get_clause` returns full text locally while the excerpt cap still governs
 anything outbound.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [x] **Step 3: Implement and verify GREEN**
+
+**"Never pool the fused ranking" is a type, not a comment.** Pooling takes
+`RouteRanking`; fusion returns `FusedRanking`, which has no `unit_ids` and no
+way back. The route names that would most plausibly smuggle it in — `hybrid`,
+`rrf`, `fused`, `fusion` — are refused at construction, because that is how the
+mistake would actually be spelled.
+
+RRF rather than score normalisation: BM25 returns an unbounded weighted sum and
+dense returns a cosine, and deciding what a BM25 21 is worth against a cosine
+0.77 is a question nothing in this project can answer. Ranks are comparable by
+construction.
+
+`specpilot retrieval search` prints locators and scores, never text — verified
+against the real corpus, zero prose in the output.
 
 ---
 

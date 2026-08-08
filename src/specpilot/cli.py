@@ -66,6 +66,8 @@ from specpilot.embedding.throughput import (
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
+from specpilot.retrieval.bm25 import Bm25Index
+from specpilot.retrieval.local import LocalCorpus
 from specpilot.rfc.structure import extract_structure
 
 # Exit codes, matching the ingestion worker: 2 is a refused input or policy
@@ -579,6 +581,55 @@ class _FixtureCounter:
 
     def count_tokens(self, text: str) -> int:
         return max(len(text.split()), 1)
+
+
+def _retrieval_search(arguments: argparse.Namespace) -> int:
+    """Search the local corpus and print locators, never text.
+
+    Sparse only. The dense route needs the encoder and a running collection,
+    which belong to the indexing path rather than to a command meant to be
+    cheap; `--route` exists so adding dense later cannot silently change what
+    this already prints.
+
+    The candidate pool does not leave the machine — this writes locators and
+    scores to stdout, and nothing here reaches the enforcer or a provider.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        corpus = LocalCorpus.load(
+            [(arguments.xml, _clause_limits(manifest))], RfcLimits()
+        )
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    index = Bm25Index.build(corpus.indexable())
+    hits = index.search(arguments.query, k=arguments.k)
+    return _emit(
+        {
+            "status": "searched",
+            "route": arguments.route,
+            "document_id": manifest.document_id,
+            "index_fingerprint": index.fingerprint,
+            "hit_count": len(hits),
+            "hits": [
+                {
+                    "unit_id": hit.unit_id,
+                    "score": round(hit.score, 4),
+                    "kind": corpus.get_clause(hit.unit_id).kind,
+                    "section_number": corpus.get_clause(hit.unit_id).section_number,
+                    "section_path": corpus.get_clause(hit.unit_id).section_path,
+                }
+                for hit in hits
+            ],
+        }
+    )
 
 
 def _annotation_progress(arguments: argparse.Namespace) -> int:
@@ -1133,6 +1184,18 @@ def _parser() -> argparse.ArgumentParser:
     overlap.add_argument("--clause-id", action="append", required=True)
     overlap.add_argument("--question", required=True)
     overlap.set_defaults(handler=_corpus_overlap)
+
+    retrieval = commands.add_parser("retrieval").add_subparsers(
+        dest="command", required=True
+    )
+    search = retrieval.add_parser("search")
+    search.add_argument("--manifest", required=True)
+    search.add_argument("--manifest-dir", type=Path, required=True)
+    search.add_argument("--xml", type=Path, required=True)
+    search.add_argument("--query", required=True)
+    search.add_argument("--route", choices=["bm25"], default="bm25")
+    search.add_argument("--k", type=int, default=5)
+    search.set_defaults(handler=_retrieval_search)
 
     annotation = commands.add_parser("annotation").add_subparsers(
         dest="command", required=True
