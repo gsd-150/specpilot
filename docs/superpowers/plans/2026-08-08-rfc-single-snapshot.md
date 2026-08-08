@@ -14,9 +14,21 @@
 - A readable bounded snapshot with the wrong hash must return `document_hash_mismatch` without interpreting XML.
 - RFC publication version remains `YYYY-MM` from the unique direct `<front><date>`; RFCXML grammar version is a separate required root attribute with exact value `3`.
 - No source bytes, XML roots, clause prose, or exception details may enter `repr`, CLI output, annotation records, or logs.
-- Preserve the current ignored tmp drafts and the user's untracked `SpecPilot_项目方案.md`.
-- Do not create an official annotation or persistent BM25/Qdrant index during verification.
-- Existing document-version fixes in the dirty worktree are in scope and must not be reverted.
+- Preserve the current ignored v2 candidates, the historical model draft, the three private formal annotations, and the user's untracked `SpecPilot_项目方案.md` byte-for-byte.
+- Do not replay, amend, delete, or add a formal annotation during this remaining security work; source-aware candidate validation uses only a fresh temporary directory.
+- Do not create a persistent BM25/Qdrant index during verification.
+- Preserve the completed document-version, snapshot-boundary, snapshot-consumer, and provenance-v2 commits; do not revert or weaken their contracts.
+
+## Execution-state amendment
+
+Tasks 1 and 2 are complete at commits `5a7762c` and `6fed0c6`. Resume from the
+current feature branch after design-reconciliation commit `97433ab`; do not
+repeat or rewrite those tasks. Gold provenance v2 subsequently made the three
+`tmp/l2-dev-00{1,2,3}.json` candidates valid and, after explicit user approval,
+stored their three content-addressed records under
+`artifacts/restricted/annotations/`. Task 3 must preserve that newer state.
+Task 4 validates the candidates in temporary storage and reads the formal
+store; it no longer expects empty skeletons or an empty formal directory.
 
 ---
 
@@ -247,6 +259,7 @@ git commit -m "refactor: reuse verified RFC snapshots"
 - Consumes: `RfcByteSnapshot`, `VerifiedRfc`, `read_rfc_snapshot`, and `verify_rfc_snapshot` from Task 1.
 - Produces: private `_FrozenRfcSource(manifest, document)` from `_frozen_source`.
 - Preserves: all CLI payloads and existing refusal codes, adding only `unsupported_rfcxml_version` for hash-matched unsupported grammar.
+- Preserves: annotation v2 schema dispatch, provenance reporting, and the three existing private formal records; all new tests use pytest temporary directories.
 
 - [ ] **Step 1: Write a failing corpus path-swap regression**
 
@@ -369,23 +382,39 @@ git commit -m "fix: bind RFC commands to one snapshot"
 
 ---
 
-### Task 4: Document, migrate, and verify the complete fix
+### Task 4: Document and verify the complete fix against the current v2 state
 
 **Files:**
 - Modify: `docs/runbooks/w1-annotation.md`
 - Verify only: `tmp/l2-dev-001.json`
 - Verify only: `tmp/l2-dev-002.json`
 - Verify only: `tmp/l2-dev-003.json`
-- Verify only: `tmp/model-drafted-not-gold.rfc9112-6.3.json`
+- Preserve byte-for-byte: `tmp/model-drafted-not-gold.rfc9112-6.3.json`
+- Read only: `artifacts/restricted/annotations/*.json`
 
 **Interfaces:**
-- Consumes: completed snapshot boundary and CLI binding.
-- Produces: user-facing refusal-code documentation and final evidence.
+- Consumes: completed snapshot boundary, verified-snapshot consumers, CLI binding, and annotation provenance v2.
+- Produces: user-facing refusal-code documentation and final security evidence over both frozen RFCs and the current private annotation state.
+- Preserves: candidate SHA-256 values, three formal annotation IDs, `0700`/`0600` private modes, and Git-ignore boundaries.
 
 - [ ] **Step 1: Update the runbook refusal table**
 
-Add `unsupported_rfcxml_version` with the cause “the hash-matched XML is not
-RFCXML v3.” Retain the already-added publication identity/version rows.
+Add a compact source-refusal table under “Source checks retained at entry”:
+
+```markdown
+| Refusal | Cause |
+|---|---|
+| `document_hash_mismatch` | The readable bounded snapshot does not match the manifest; XML is not interpreted. |
+| `unsupported_rfcxml_version` | The hash-matched XML is missing RFCXML `version="3"` or names another grammar version. |
+| `invalid_document_identity` | The hash-matched RFC has no unique valid RFC number/publication month. |
+| `document_id_mismatch` | The manifest or annotation names a different RFC. |
+| `document_version_mismatch` | The manifest or annotation names a different publication month. |
+```
+
+State that manifest hash, XML safety/grammar/identity, and all corpus/Gold work
+consume one bounded `O_NOFOLLOW` in-memory snapshot. Keep every invocation in
+the existing `.venv/bin/python -m specpilot.cli` form and do not alter the v2
+provenance rules.
 
 - [ ] **Step 2: Run all automated verification**
 
@@ -399,38 +428,88 @@ git diff --check
 ```
 
 Expected: no diff errors, no Ruff or mypy findings, and the complete pytest
-suite passes with only the repository's declared skips.
+suite passes with only the repository's declared skips. Record the exact test
+and skip counts; do not reuse an earlier run.
 
 - [ ] **Step 3: Run both frozen RFC parse smokes**
 
-Invoke `specpilot.cli.main` for RFC 9110 and RFC 9112 with their stored R0
-manifest IDs and frozen XML paths. Assert exit zero, `document_version` exactly
-`2022-06`, zero dangling cross-references, and no source prose in stdout.
+Run:
 
-- [ ] **Step 4: Revalidate the model-assisted non-Gold draft without persistence**
+```bash
+.venv/bin/python -m specpilot.cli corpus parse \
+  --manifest af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691 \
+  --manifest-dir manifests/local/r0/source \
+  --xml artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml
 
-Validate `L2Annotation`, rerun `corpus overlap`, and run `annotation add` only
-against a `TemporaryDirectory`. Expected: schema valid, Jaccard `0.2239`, Gold
-ID `817e50534fc9d2e00b485d0d445b95992b1fdc25ef354febcd87bfc1be60e7bb`,
-and temporary source-aware add exit zero.
+.venv/bin/python -m specpilot.cli corpus parse \
+  --manifest 3a752dd99f78398815252baa322e1ad0e9963ade5eb66dfe66e2861d8c2bede2 \
+  --manifest-dir manifests/local/r0/source \
+  --xml artifacts/restricted/sources/ietf/rfc9112/rfc9112.xml
+```
 
-Confirm the three `l2-dev-00*.json` files still fail for their empty question
-and missing human Verifier-pair fields; do not fill them.
+Expected for each JSON payload: exit zero, `status="parsed"`,
+`document_version="2022-06"`, `dangling_cross_references=0`, and no RFC clause
+or section prose in stdout.
 
-- [ ] **Step 5: Request a final read-only code review**
+- [ ] **Step 4: Revalidate the three approved candidates only in temporary storage**
 
-Give the reviewer the approved design, this plan, the base SHA, and the final
-working-tree diff. Resolve every Critical/Important issue, then rerun Steps 2–4.
+First require these exact hashes and preserve the historical draft hash:
 
-- [ ] **Step 6: Commit Task 4 documentation**
+```text
+a723fba406bb0880b5085d5eb92d34a09fc4ad9dbcdfd629e5e867b0c2693a44  tmp/l2-dev-001.json
+09defec7868859f6f564fc0946051b4b6fa6f0358984a0ba5fefccfbdb6909f1  tmp/l2-dev-002.json
+4ae1cf404fc9fed9d97e719b6320bee114dd0c81ed5bbd53796248866ab904e1  tmp/l2-dev-003.json
+78e5140b2d2d4596ed152ba2faf77bee5014096f79f33eb52d09dfb47b5de46a  tmp/model-drafted-not-gold.rfc9112-6.3.json
+```
+
+For each candidate, rerun `corpus overlap` against RFC 9112 §6.3 clause
+`817e50534fc9d2e00b485d0d445b95992b1fdc25ef354febcd87bfc1be60e7bb`.
+Expected Jaccards, in item order, are `0.1928`, `0.1707`, and `0.1477`.
+
+Create one fresh temporary annotation directory and source-aware add all three
+candidates to it. Expected deterministic IDs are:
+
+```text
+fe7b9f88885164f4a6f7d00f7ee6c479c1c00ed0e134b1df469c55678fa9c0d6  l2-dev-001
+1eb2d0f4972ab0fbab22473dd438847bfde7aab9fad8419edee34f1034501206  l2-dev-002
+3531556fe4eadd23c01704f434ddad2011ace4e47a0acaa0f150a00808c815ec  l2-dev-003
+```
+
+Run temporary progress. Expected: three L2 dev records; mixed content and
+label origins of three; Gold chain
+`model_proposal@openai-codex > human_source_review` counted three times; zero
+retrieval-originated Gold; and one of each L2 verdict. Do not point an add
+command at `artifacts/restricted/annotations/`.
+
+- [ ] **Step 5: Audit the existing formal store without writing**
+
+Run `annotation progress` against `artifacts/restricted/annotations/` and
+require the same aggregate as Step 4. Require exactly the three deterministic
+IDs above, directory mode `0700`, record modes `0600`, and each record's raw
+SHA-256 equal to its filename. Confirm `git status --short` does not list the
+ignored candidates or formal records and nothing is staged. Do not replay,
+amend, delete, or replace any formal record.
+
+- [ ] **Step 6: Request a final read-only code review**
+
+Give the reviewer the approved design, this amended plan, the Task 3 base SHA,
+the Task 3 head SHA, all Task reports, and the current read-only candidate/formal
+evidence. Resolve every Critical/Important issue, then rerun Steps 2–5.
+
+- [ ] **Step 7: Commit Task 4 documentation**
 
 ```bash
 git add docs/runbooks/w1-annotation.md
 git commit -m "docs: record RFC snapshot refusals"
 ```
 
-- [ ] **Step 7: Report completion**
+The commit contains only the runbook. The candidates, historical draft,
+private annotations, frozen sources, and user-owned project plan remain outside
+Git.
 
-Report exact test counts, static-check results, real-corpus smoke results, the
-new Gold ID and Jaccard, ignored-template status, index rebuild requirement,
-commits created, and untouched user-owned files.
+- [ ] **Step 8: Report completion**
+
+Report exact test counts, static-check results, both real-corpus smoke results,
+candidate Jaccards and deterministic IDs, formal-store count/modes/progress,
+index rebuild requirement, commits created, and every preserved user/private
+file boundary.
