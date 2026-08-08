@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import specpilot.cli as cli_module
 from specpilot.annotation.store import AnnotationStore
 from specpilot.cli import main
 from specpilot.contracts.manifests import RfcSourceManifestDraft
+from specpilot.contracts.rfc import RfcLimits
+from specpilot.corpus.clauses import ClauseLimits, build_clauses
+from specpilot.ingestion.rfc import RfcByteSnapshot
 from specpilot.manifests.store import ManifestStore
 from tests.helpers import rfc_factory
 
@@ -251,6 +255,58 @@ def test_a_gold_clause_the_document_does_not_contain_is_refused(
 
     assert code == 2
     assert capsys.readouterr().err == "unknown_gold_clause\n"
+
+
+def test_a_path_swap_cannot_authorize_replacement_only_gold(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement_xml = rfc_factory.SAFE_RFC_XML.replace(
+        '      <section anchor="scope"',
+        '      <t>A replacement-only paragraph.</t>\n'
+        '      <section anchor="scope"',
+    )
+    replacement_path = rfc_factory.write(corpus, "replacement.xml", replacement_xml)
+    replacement_only = build_clauses(
+        replacement_path,
+        RfcLimits(),
+        ClauseLimits(),
+    )[1]
+    record, arguments = gold_record(
+        tmp_path,
+        corpus,
+        gold_clause_ids=[replacement_only.clause_id],
+        gold_section_paths=[replacement_only.section_path],
+    )
+    original_read = cli_module.read_rfc_snapshot
+
+    def read_then_replace(path: Path, limits: RfcLimits) -> RfcByteSnapshot:
+        snapshot = original_read(path, limits)
+        path.write_text(replacement_xml, encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(cli_module, "read_rfc_snapshot", read_then_replace)
+    annotation_dir = tmp_path / "annotations"
+
+    code = main(
+        [
+            "annotation",
+            "add",
+            "--record",
+            str(record),
+            "--annotation-dir",
+            str(annotation_dir),
+            *arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "unknown_gold_clause\n"
+    assert not annotation_dir.exists()
 
 
 def test_a_record_pointed_at_the_wrong_document_is_refused(

@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+import specpilot.cli as cli_module
 from specpilot.cli import main
 from specpilot.contracts.manifests import RfcSourceManifestDraft
+from specpilot.contracts.rfc import RfcLimits
+from specpilot.ingestion.rfc import RfcByteSnapshot
 from specpilot.manifests.store import ManifestStore
 from tests.helpers import rfc_factory
 
@@ -124,6 +127,47 @@ def test_a_document_that_is_not_the_frozen_one_is_refused(
     assert captured.err == "document_hash_mismatch\n"
 
 
+def test_corpus_parse_keeps_using_the_verified_snapshot_after_a_path_swap(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing the pathname after verification cannot change the corpus."""
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+    replacement_xml = rfc_factory.SAFE_RFC_XML.replace(
+        '      <section anchor="scope"',
+        '      <t>A replacement-only paragraph.</t>\n'
+        '      <section anchor="scope"',
+    )
+    original_read = cli_module.read_rfc_snapshot
+
+    def read_then_replace(path: Path, limits: RfcLimits) -> RfcByteSnapshot:
+        snapshot = original_read(path, limits)
+        path.write_text(replacement_xml, encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(cli_module, "read_rfc_snapshot", read_then_replace)
+
+    code = main(
+        [
+            "corpus",
+            "parse",
+            "--manifest",
+            manifest_id,
+            "--manifest-dir",
+            str(directory),
+            "--xml",
+            str(xml),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["clause_count"] == 2
+
+
 def test_hash_mismatch_precedes_an_invalid_document_identity(
     corpus: Path,
     tmp_path: Path,
@@ -152,6 +196,75 @@ def test_hash_mismatch_precedes_an_invalid_document_identity(
     assert code == 2
     assert captured.out == ""
     assert captured.err == "document_hash_mismatch\n"
+
+
+def test_hash_mismatch_precedes_an_unsupported_rfcxml_version(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    xml = rfc_factory.write_safe(corpus)
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+    xml.write_text(
+        rfc_factory.SAFE_RFC_XML.replace('version="3"', 'version="4"'),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "corpus",
+            "parse",
+            "--manifest",
+            manifest_id,
+            "--manifest-dir",
+            str(directory),
+            "--xml",
+            str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "document_hash_mismatch\n"
+
+
+@pytest.mark.parametrize(
+    "grammar_version",
+    [None, "4"],
+)
+def test_matching_unsupported_rfcxml_grammar_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    grammar_version: str | None,
+) -> None:
+    attribute = ' version="3"'
+    replacement = "" if grammar_version is None else f' version="{grammar_version}"'
+    xml = rfc_factory.write(
+        corpus,
+        "unsupported-grammar.xml",
+        rfc_factory.SAFE_RFC_XML.replace(attribute, replacement),
+    )
+    directory, manifest_id = stored_manifest(tmp_path, xml)
+
+    code = main(
+        [
+            "corpus",
+            "parse",
+            "--manifest",
+            manifest_id,
+            "--manifest-dir",
+            str(directory),
+            "--xml",
+            str(xml),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "unsupported_rfcxml_version\n"
 
 
 def test_manifest_version_must_name_the_xml_publication_version(

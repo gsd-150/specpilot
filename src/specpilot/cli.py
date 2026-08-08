@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,7 +57,6 @@ from specpilot.corpus.qa import QaThresholds, run_parse_qa
 from specpilot.corpus.walk import (
     InvalidDocumentIdentityError,
     document_identity,
-    parse_verified,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
@@ -75,6 +74,7 @@ from specpilot.embedding.throughput import (
 )
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
+from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.local import LocalCorpus
@@ -228,8 +228,14 @@ def _manifest_authorize(arguments: argparse.Namespace) -> int:
     )
 
 
-def _frozen_source(arguments: argparse.Namespace) -> RfcSourceManifest | str:
-    """Resolve the manifest that froze this document, or return a refusal code.
+@dataclass(frozen=True, slots=True)
+class _FrozenRfcSource:
+    manifest: RfcSourceManifest
+    document: VerifiedRfc
+
+
+def _frozen_source(arguments: argparse.Namespace) -> _FrozenRfcSource | str:
+    """Resolve and verify the single snapshot frozen by one manifest.
 
     The manifest is the authority on which bytes are the corpus. A file that
     hashes differently is a different document, whatever its filename says, so
@@ -249,15 +255,17 @@ def _frozen_source(arguments: argparse.Namespace) -> RfcSourceManifest | str:
         return "unsupported_manifest_version"
 
     try:
-        actual = hashlib.sha256(arguments.xml.read_bytes()).hexdigest()
+        snapshot = read_rfc_snapshot(arguments.xml, RfcLimits())
+    except UnsafeRfcError as error:
+        return error.code.value
     except OSError:
         return "io_error"
-    if actual != manifest.xml_sha256:
+    if snapshot.document_sha256 != manifest.xml_sha256:
         return "document_hash_mismatch"
 
     try:
-        root = parse_verified(arguments.xml, RfcLimits())
-        document_id, document_version = document_identity(root)
+        document = verify_rfc_snapshot(snapshot)
+        document_id, document_version = document_identity(document.root)
     except UnsafeRfcError as error:
         return error.code.value
     except InvalidDocumentIdentityError:
@@ -268,7 +276,7 @@ def _frozen_source(arguments: argparse.Namespace) -> RfcSourceManifest | str:
         return "document_id_mismatch"
     if manifest.document_version != document_version:
         return "document_version_mismatch"
-    return manifest
+    return _FrozenRfcSource(manifest=manifest, document=document)
 
 
 def _refuse_source(code: str) -> int:
@@ -292,13 +300,14 @@ def _clause_limits(manifest: RfcSourceManifest) -> ClauseLimits:
 
 def _corpus_parse(arguments: argparse.Namespace) -> int:
     """Parse one frozen specification, reporting counts and never its text."""
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
-        structure = extract_structure(arguments.xml, RfcLimits())
-        clauses = build_clauses(arguments.xml, RfcLimits(), _clause_limits(manifest))
+        structure = extract_structure(source.document, RfcLimits())
+        clauses = build_clauses(source.document, RfcLimits(), _clause_limits(manifest))
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
     except OversizedClauseError:
@@ -341,12 +350,13 @@ def _corpus_clauses(arguments: argparse.Namespace) -> int:
     the identifier a record stores. It emits locators and counts — never the
     paragraph.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
-        clauses = build_clauses(arguments.xml, RfcLimits(), _clause_limits(manifest))
+        clauses = build_clauses(source.document, RfcLimits(), _clause_limits(manifest))
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
     except OversizedClauseError:
@@ -384,13 +394,14 @@ def _corpus_qa(arguments: argparse.Namespace) -> int:
     rather than on someone remembering. Every value is printed whether it passed
     or not: a gate that only says "pass" cannot show a regression coming.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
         report = run_parse_qa(
-            arguments.xml,
+            source.document,
             RfcLimits(),
             _clause_limits(manifest),
             QaThresholds(),
@@ -433,13 +444,14 @@ def _corpus_normative(arguments: argparse.Namespace) -> int:
     excludes them, because a candidate list that silently drops what it did not
     like cannot be checked against the document.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
         index = build_normative_index(
-            arguments.xml, RfcLimits(), _clause_limits(manifest)
+            source.document, RfcLimits(), _clause_limits(manifest)
         )
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
@@ -480,15 +492,16 @@ def _corpus_overlap(arguments: argparse.Namespace) -> int:
     This is arithmetic over the author's own question and their own chosen gold,
     not a judgement about either.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
         texts = {
             clause.clause_id: text
             for clause, text in iter_clause_texts(
-                arguments.xml, RfcLimits(), _clause_limits(manifest)
+                source.document, RfcLimits(), _clause_limits(manifest)
             )
         }
     except UnsafeRfcError as error:
@@ -574,9 +587,10 @@ def _check_gold_against_source(
     if arguments.xml is None or arguments.manifest is None:
         return "source_required_for_gold"
 
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return manifest
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return source
+    manifest = source.manifest
     if manifest.document_id != record.document_id:
         # A record pointed at the wrong document would resolve its gold against
         # clauses from a specification it does not cite.
@@ -588,7 +602,7 @@ def _check_gold_against_source(
         texts = {
             clause.clause_id: text
             for clause, text in iter_clause_texts(
-                arguments.xml, RfcLimits(), _clause_limits(manifest)
+                source.document, RfcLimits(), _clause_limits(manifest)
             )
         }
     except UnsafeRfcError as error:
@@ -681,13 +695,14 @@ def _retrieval_search(arguments: argparse.Namespace) -> int:
     The candidate pool does not leave the machine — this writes locators and
     scores to stdout, and nothing here reaches the enforcer or a provider.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
         corpus = LocalCorpus.load(
-            [(arguments.xml, _clause_limits(manifest))], RfcLimits()
+            [(source.document, _clause_limits(manifest))], RfcLimits()
         )
     except UnsafeRfcError as error:
         return _refuse(error.code.value)
@@ -753,15 +768,16 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
     cost but a one-off, and folding it into the rate would misstate every
     subsequent batch.
     """
-    manifest = _frozen_source(arguments)
-    if isinstance(manifest, str):
-        return _refuse_source(manifest)
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
 
     try:
         texts = tuple(
             text
             for _, text in iter_clause_texts(
-                arguments.xml, RfcLimits(), _clause_limits(manifest)
+                source.document, RfcLimits(), _clause_limits(manifest)
             )
         )
     except UnsafeRfcError as error:
