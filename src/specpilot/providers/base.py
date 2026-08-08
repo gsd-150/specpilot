@@ -37,6 +37,11 @@ class ResponseMetadata(_FrozenModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
     ]
     duration_ms: Annotated[int, Field(ge=0)]
+    # How many tool calls came back, not what they were. The count answers
+    # "can this route emit a structured call at all", which is what §4.6.1
+    # asks; the arguments are model output and stay off this list along with
+    # everything else the provider says.
+    tool_call_count: Annotated[int, Field(ge=0)] = 0
 
 
 class ProviderResponse(_FrozenModel):

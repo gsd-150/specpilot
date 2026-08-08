@@ -1028,8 +1028,17 @@ def _fixture_manifest(
     *,
     use: ProviderUse = ProviderUse.ONLINE_MAIN,
     endpoint_purpose: str = "fixture-smoke",
+    provider_id: str = "fixture-provider",
 ) -> tuple[ManifestStore, Any]:
-    """An authorized manifest bound to one synthetic route, for smoke runs."""
+    """An authorized manifest bound to one synthetic route, for smoke runs.
+
+    `provider_id` may name a real provider, and for `--live` it does. What it
+    can never name is a real document: this manifest is bound to
+    `synthetic-fixture-spec`, so the authorization it carries covers the
+    generated fixture corpus and nothing else. Reaching real source text needs
+    a manifest for `ietf-rfc-9110` or `ietf-rfc-9112`, which no command here
+    creates and which only a completed assessment produces.
+    """
     import hashlib
     import tempfile
 
@@ -1050,7 +1059,7 @@ def _fixture_manifest(
         )
     )
     binding = ProviderRouteBinding(
-        provider_id="fixture-provider",
+        provider_id=provider_id,
         endpoint_purpose=endpoint_purpose,
         use=use,
     )
@@ -1125,14 +1134,39 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     # --route must actually change the route. A judge smoke that quietly
     # exercises the online chain is false evidence for the go/no-go checklist.
     judging = arguments.route == "judge"
-    store, manifest = _fixture_manifest(
-        use=ProviderUse.OFFLINE_JUDGE if judging else ProviderUse.ONLINE_MAIN,
-        endpoint_purpose="fixture-judge" if judging else "fixture-smoke",
-    )
-    provider = FakeProvider(
-        provider_id="fixture-provider",
-        model_id="fixture-model-v1",
-    )
+    live = bool(getattr(arguments, "live", False))
+
+    provider: Any
+    if live:
+        from specpilot.providers.http import (
+            LIVE_ROUTES,
+            HttpChatAdapter,
+            ProviderCredentialMissing,
+            resolve_credential,
+        )
+
+        endpoint = LIVE_ROUTES[arguments.route].endpoint
+        try:
+            api_key = resolve_credential(endpoint)
+        except ProviderCredentialMissing:
+            return _refuse(f"credential_missing:{endpoint.api_key_env}")
+        store, manifest = _fixture_manifest(
+            use=ProviderUse.OFFLINE_JUDGE if judging else ProviderUse.ONLINE_MAIN,
+            endpoint_purpose="live-judge" if judging else "live-main",
+            provider_id=endpoint.provider_id,
+        )
+        provider = HttpChatAdapter(endpoint, api_key=api_key, probe_tools=True)
+        model_id = endpoint.model_id
+    else:
+        store, manifest = _fixture_manifest(
+            use=ProviderUse.OFFLINE_JUDGE if judging else ProviderUse.ONLINE_MAIN,
+            endpoint_purpose="fixture-judge" if judging else "fixture-smoke",
+        )
+        provider = FakeProvider(
+            provider_id="fixture-provider",
+            model_id="fixture-model-v1",
+        )
+        model_id = "fixture-model-v1"
     transport = PolicyBoundTransport(
         enforcer=EgressPolicyEnforcer(
             EgressPolicy.load(),
@@ -1173,9 +1207,15 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
         version=version,
         stage=EgressStage.JUDGE if judging else EgressStage.EVIDENCE,
         route=manifest.provider_route_binding,
-        model_id="fixture-model-v1",
+        model_id=model_id,
         source_manifest=manifest,
         payload=payload,
+    )
+    projected_tokens = sum(
+        provider.token_counter.count_tokens(item.quote)
+        for item in (
+            payload.gold_excerpts if judging else payload.evidence_excerpts
+        )
     )
     try:
         response = await transport.send(request, idempotency_key="route-smoke-1")
@@ -1185,18 +1225,39 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
         return _refuse(f"blocked:{error.code}")
     except ProviderError as error:
         return _refuse(f"blocked:{error.public_error_code}")
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     return _emit(
         {
             "status": "passed",
             "route": arguments.route,
             "provider_use": manifest.provider_route_binding.use.value,
-            "adapter": "fixture",
+            "adapter": "live" if live else "fixture",
             "provider_id": response.provider_id,
             "model_id": response.model_id,
             "finish_reason": response.metadata.finish_reason,
-            "proves": "transport, enforcer and ledger are wired and policy-bound",
-            "does_not_prove": "any real provider route, credential, or model",
+            "tool_call_count": response.metadata.tool_call_count,
+            # The calibration datum. The reservation was priced with a byte
+            # upper bound; this is what the model actually charged. The gap is
+            # the margin a tighter counter would have to earn.
+            "projected_excerpt_tokens": projected_tokens,
+            "provider_prompt_tokens": response.metadata.prompt_tokens,
+            "discloses": "synthetic-fixture-spec only",
+            "proves": (
+                "the named model slug answered on this route, returned usage "
+                "metadata, and emitted a tool call"
+                if live
+                else "transport, enforcer and ledger are wired and policy-bound"
+            ),
+            "does_not_prove": (
+                "anything about real corpus egress, which needs a source "
+                "manifest this command cannot create"
+                if live
+                else "any real provider route, credential, or model"
+            ),
         }
     )
 
@@ -1259,7 +1320,12 @@ def _parser() -> argparse.ArgumentParser:
         dest="command", required=True
     )
     route = provider.add_parser("route-smoke")
-    route.add_argument("--fixture-only", action="store_true", required=True)
+    # Exactly one, and neither has a default. A fixture smoke proves nothing
+    # about a real route and a live smoke costs money and reaches a third
+    # party, so which one ran must be a deliberate word on the command line.
+    mode = route.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--fixture-only", action="store_true")
+    mode.add_argument("--live", action="store_true")
     route.add_argument("--route", choices=["main", "judge"], required=True)
     route.add_argument("--ledger-dsn", default=None)
     route.set_defaults(handler=_route_smoke)
