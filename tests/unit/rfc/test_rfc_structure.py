@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from specpilot.contracts.rfc import RfcLimits, RfcRejectionCode, UnsafeRfcError
+from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.rfc.structure import (
     CrossReferenceKind,
     DuplicateAnchorError,
@@ -29,6 +30,23 @@ def test_nested_sections_are_ordered_and_numbered(workspace: Path) -> None:
         ("intro", "1", "Introduction", 1),
         ("scope", "1.1", "Scope", 2),
     ]
+
+
+def test_structure_can_be_extracted_after_the_snapshot_path_disappears(
+    workspace: Path,
+) -> None:
+    """Structure walks the verified tree without reopening its source path."""
+    path = rfc_factory.write_safe(workspace)
+    verified = load_verified_rfc(path, RfcLimits())
+    path.unlink()
+
+    structure = extract_structure(verified, RfcLimits())
+
+    assert [(section.anchor, section.number) for section in structure.sections] == [
+        ("intro", "1"),
+        ("scope", "1.1"),
+    ]
+    assert structure.document_sha256 == verified.inspection.document_sha256
 
 
 def test_unnumbered_sections_do_not_consume_a_number(workspace: Path) -> None:

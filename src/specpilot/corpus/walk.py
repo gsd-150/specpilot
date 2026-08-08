@@ -14,15 +14,10 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsed via defusedxml
 
-from defusedxml.ElementTree import (  # type: ignore[import-untyped]
-    fromstring as defused_fromstring,
-)
-
 from specpilot.contracts.rfc import RfcLimits
-from specpilot.ingestion.rfc import inspect_rfc_xml
+from specpilot.ingestion.rfc import RfcInput, ensure_verified_rfc
 
 # List items and definition bodies whose prose the source did not wrap in <t>.
 # Measured on RFC 9110: 182 <li> holding 3689 words and 37 <dd> holding 454,
@@ -109,16 +104,9 @@ def unit_identity(
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def parse_verified(path: Path, rfc_limits: RfcLimits) -> Element:
+def parse_verified(source: RfcInput, rfc_limits: RfcLimits) -> Element:
     """Verify before parsing. The tree is never read from an unchecked file."""
-    inspect_rfc_xml(path, rfc_limits)
-    root: Element = defused_fromstring(
-        path.read_text(encoding="utf-8"),
-        forbid_dtd=True,
-        forbid_entities=True,
-        forbid_external=True,
-    )
-    return root
+    return ensure_verified_rfc(source, rfc_limits).root
 
 
 def document_identity(root: Element) -> tuple[str, str]:

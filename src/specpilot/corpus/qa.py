@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, build_clauses, iter_clause_texts
@@ -34,6 +33,7 @@ from specpilot.corpus.walk import (
     parse_verified,
     sections,
 )
+from specpilot.ingestion.rfc import RfcInput
 
 # `pn` reads "section-<number>-<ordinal>", with the ordinal sometimes carrying
 # sub-positions for list items: section-5.6.2-3.1.
@@ -97,13 +97,13 @@ def _at_most(name: str, hit: int, total: int, threshold: float) -> QaLine:
 
 
 def run_parse_qa(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
     thresholds: QaThresholds,
 ) -> QaReport:
     """Measure every blocking line and report all of them."""
-    root = parse_verified(path, rfc_limits)
+    root = parse_verified(source, rfc_limits)
     document_id = f"ietf-rfc-{root.get('number') or 'unknown'}"
     corpus_sections = [
         section
@@ -111,7 +111,7 @@ def run_parse_qa(
         if section.anchor not in clause_limits.excluded_sections
     ]
 
-    clauses = build_clauses(path, rfc_limits, clause_limits)
+    clauses = build_clauses(source, rfc_limits, clause_limits)
     matching = sum(
         1
         for clause in clauses
@@ -129,10 +129,10 @@ def run_parse_qa(
 
     captured = sum(
         len(text.split())
-        for _, text in iter_clause_texts(path, rfc_limits, clause_limits)
+        for _, text in iter_clause_texts(source, rfc_limits, clause_limits)
     )
     table_words = 0
-    for _, rows in iter_table_rows(path, rfc_limits, clause_limits):
+    for _, rows in iter_table_rows(source, rfc_limits, clause_limits):
         table_words += len(" ".join(cell for row in rows for cell in row).split())
     captured += table_words
 

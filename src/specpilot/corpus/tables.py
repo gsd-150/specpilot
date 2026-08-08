@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsed via defusedxml
 
 from specpilot.contracts.rfc import RfcLimits
@@ -32,6 +31,7 @@ from specpilot.corpus.walk import (
     sections,
     unit_identity,
 )
+from specpilot.ingestion.rfc import RfcInput
 
 TABLE_KIND = "table"
 
@@ -96,11 +96,11 @@ def _table_rows(table: Element) -> tuple[tuple[tuple[str, ...], ...], bool]:
 
 
 def _tables_with_rows(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> Iterator[tuple[Table, tuple[tuple[str, ...], ...]]]:
-    root = parse_verified(path, rfc_limits)
+    root = parse_verified(source, rfc_limits)
     document_id, document_version = document_identity(root)
 
     for section in sections(root):
@@ -150,20 +150,20 @@ def _tables_with_rows(
 
 
 def build_tables(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> tuple[Table, ...]:
     """Return every table in document order, without their cells."""
     return tuple(
-        table for table, _ in _tables_with_rows(path, rfc_limits, clause_limits)
+        table for table, _ in _tables_with_rows(source, rfc_limits, clause_limits)
     )
 
 
 def iter_table_rows(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> Iterator[tuple[Table, tuple[tuple[str, ...], ...]]]:
     """Yield each table with its rows, for callers that genuinely need them."""
-    yield from _tables_with_rows(path, rfc_limits, clause_limits)
+    yield from _tables_with_rows(source, rfc_limits, clause_limits)

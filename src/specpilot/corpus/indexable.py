@@ -23,7 +23,6 @@ they cannot drift apart about what a unit is.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import (
@@ -32,6 +31,7 @@ from specpilot.corpus.clauses import (
     iter_clause_texts,
 )
 from specpilot.corpus.tables import TABLE_KIND, iter_table_rows
+from specpilot.ingestion.rfc import RfcInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +74,7 @@ def _assemble(
 
 
 def build_index_units(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
     policy: IndexTextPolicy | None = None,
@@ -83,7 +83,7 @@ def build_index_units(
     settings = policy or IndexTextPolicy()
     units: list[IndexUnit] = []
 
-    for clause, text in iter_clause_texts(path, rfc_limits, clause_limits):
+    for clause, text in iter_clause_texts(source, rfc_limits, clause_limits):
         units.append(
             IndexUnit(
                 unit_id=clause.clause_id,
@@ -99,7 +99,7 @@ def build_index_units(
             )
         )
 
-    for table, rows in iter_table_rows(path, rfc_limits, clause_limits):
+    for table, rows in iter_table_rows(source, rfc_limits, clause_limits):
         # Rows are joined with the header first, so a cell reading "200" is
         # indexed near the word that says it is a status code.
         text = " ".join(cell for row in rows for cell in row if cell)

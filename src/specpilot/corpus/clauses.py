@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.walk import (
@@ -33,6 +32,7 @@ from specpilot.corpus.walk import (
     sections,
     unit_identity,
 )
+from specpilot.ingestion.rfc import RfcInput
 
 CLAUSE_KIND = "clause"
 
@@ -106,7 +106,7 @@ class SectionNormatives:
 
 
 def build_normative_index(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> tuple[SectionNormatives, ...]:
@@ -122,7 +122,7 @@ def build_normative_index(
     over the frozen bytes — the same path as grep, not the system's retriever.
     It narrows where to read. It does not choose a clause or write a question.
     """
-    root = parse_verified(path, rfc_limits)
+    root = parse_verified(source, rfc_limits)
     index: list[SectionNormatives] = []
     for section in sections(root):
         counts: dict[str, int] = {}
@@ -155,11 +155,11 @@ def build_normative_index(
 
 
 def _clauses_with_text(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> Iterator[tuple[Clause, str]]:
-    root = parse_verified(path, rfc_limits)
+    root = parse_verified(source, rfc_limits)
     document_id, document_version = document_identity(root)
 
     for section in sections(root):
@@ -205,20 +205,20 @@ def _clauses_with_text(
 
 
 def build_clauses(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> tuple[Clause, ...]:
     """Return every clause in document order, without their text."""
     return tuple(
-        clause for clause, _ in _clauses_with_text(path, rfc_limits, clause_limits)
+        clause for clause, _ in _clauses_with_text(source, rfc_limits, clause_limits)
     )
 
 
 def iter_clause_texts(
-    path: Path,
+    source: RfcInput,
     rfc_limits: RfcLimits,
     clause_limits: ClauseLimits,
 ) -> Iterator[tuple[Clause, str]]:
     """Yield each clause with its text, for callers that genuinely need it."""
-    yield from _clauses_with_text(path, rfc_limits, clause_limits)
+    yield from _clauses_with_text(source, rfc_limits, clause_limits)

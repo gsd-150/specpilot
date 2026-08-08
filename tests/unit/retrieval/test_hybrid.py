@@ -6,6 +6,7 @@ import pytest
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
+from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.retrieval.hybrid import (
     FusedRanking,
     RouteRanking,
@@ -134,6 +135,20 @@ def test_get_clause_returns_the_whole_clause_locally(corpus: LocalCorpus) -> Non
     assert unit.text
     assert unit.document_version == "2026-08"
     assert unit.text == corpus.get_clause(unit_id).text
+
+
+def test_local_corpus_can_be_loaded_after_the_snapshot_path_disappears(
+    tmp_path: Path,
+) -> None:
+    """A local corpus reuses one verified tree for units and its table of contents."""
+    path = rfc_factory.write(tmp_path, "snapshot.xml", rfc_factory.QA_RFC_XML)
+    verified = load_verified_rfc(path, RfcLimits())
+    path.unlink()
+
+    corpus = LocalCorpus.load([(verified, ClauseLimits())], RfcLimits())
+
+    assert corpus.unit_count() == 5
+    assert [node.title for node in corpus.get_toc()] == ["One", "Two"]
 
 
 def test_get_clause_refuses_an_identifier_the_corpus_does_not_hold(

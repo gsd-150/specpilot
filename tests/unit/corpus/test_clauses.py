@@ -12,6 +12,7 @@ from specpilot.corpus.clauses import (
     iter_clause_texts,
 )
 from specpilot.corpus.walk import document_identity, parse_verified
+from specpilot.ingestion.rfc import load_verified_rfc
 from tests.helpers import rfc_factory
 
 
@@ -54,6 +55,20 @@ def test_a_clause_is_a_paragraph_carrying_its_section_identity(
         ("1.1", 1, "section-1.1-1"),
     ]
     assert all(c.document_id for c in clauses)
+
+
+def test_clauses_can_be_built_after_the_snapshot_path_disappears(
+    workspace: Path,
+) -> None:
+    """A verified snapshot owns the parsed tree, not its former path."""
+    path = rfc_factory.write(workspace, "snapshot.xml", MULTI_PARAGRAPH_XML)
+    verified = load_verified_rfc(path, RfcLimits())
+    path.unlink()
+
+    clauses = build_clauses(verified, RfcLimits(), ClauseLimits())
+
+    assert len(clauses) == 3
+    assert {clause.document_version for clause in clauses} == {"2026-08"}
 
 
 def test_clause_identity_uses_the_publication_version_not_the_xml_format(

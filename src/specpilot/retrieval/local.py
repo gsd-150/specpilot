@@ -21,13 +21,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 from specpilot.contracts.egress import TocNode
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
 from specpilot.corpus.indexable import IndexTextPolicy, IndexUnit, build_index_units
 from specpilot.corpus.walk import parse_verified, sections
+from specpilot.ingestion.rfc import RfcInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,17 +40,17 @@ class LocalCorpus:
     @classmethod
     def load(
         cls,
-        documents: Sequence[tuple[Path, ClauseLimits]],
+        documents: Sequence[tuple[RfcInput, ClauseLimits]],
         rfc_limits: RfcLimits,
         policy: IndexTextPolicy | None = None,
     ) -> LocalCorpus:
         """Load one or more frozen documents, each with its own exclusions."""
         units: dict[str, IndexUnit] = {}
         toc: list[tuple[str | None, str]] = []
-        for path, clause_limits in documents:
-            for unit in build_index_units(path, rfc_limits, clause_limits, policy):
+        for source, clause_limits in documents:
+            for unit in build_index_units(source, rfc_limits, clause_limits, policy):
                 units[unit.unit_id] = unit
-            root = parse_verified(path, rfc_limits)
+            root = parse_verified(source, rfc_limits)
             for section in sections(root):
                 if section.anchor in clause_limits.excluded_sections:
                     continue

@@ -14,15 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsed via defusedxml
 
-from defusedxml.ElementTree import (  # type: ignore[import-untyped]
-    fromstring as defused_fromstring,
-)
-
 from specpilot.contracts.rfc import RfcLimits
-from specpilot.ingestion.rfc import inspect_rfc_xml
+from specpilot.ingestion.rfc import RfcInput, ensure_verified_rfc
 
 
 class CrossReferenceKind(StrEnum):
@@ -177,20 +172,15 @@ def _collect_cross_references(
         )
 
 
-def extract_structure(path: Path, limits: RfcLimits) -> RfcStructure:
+def extract_structure(source: RfcInput, limits: RfcLimits) -> RfcStructure:
     """Verify a document, then read its sections and cross-references.
 
-    Takes a path rather than an inspection on purpose: the inspection carries
-    metadata only, and routing extraction through the boundary makes it
-    impossible to read structure out of a document that was never verified.
+    Accepts a path or a verified snapshot. Routing extraction through the
+    boundary makes it impossible to read structure out of a document that was
+    never verified.
     """
-    inspection = inspect_rfc_xml(path, limits)
-    root: Element = defused_fromstring(
-        path.read_text(encoding="utf-8"),
-        forbid_dtd=True,
-        forbid_entities=True,
-        forbid_external=True,
-    )
+    verified = ensure_verified_rfc(source, limits)
+    root = verified.root
 
     anchors = _collect_identifiers(root)
 
@@ -205,7 +195,7 @@ def extract_structure(path: Path, limits: RfcLimits) -> RfcStructure:
     )
 
     return RfcStructure(
-        document_sha256=inspection.document_sha256,
+        document_sha256=verified.inspection.document_sha256,
         sections=tuple(sections),
         cross_references=tuple(cross_references),
     )
