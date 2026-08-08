@@ -1,5 +1,11 @@
 # W1: Annotation Workflow and Embedding Throughput Implementation Plan
 
+> **Supersession note — 2026-08-08:** Gold provenance v2 supersedes this
+> plan's `IndependentPath` admission gate. The current contract records ordered
+> human, model, and retrieval origins for audit while preserving source checks,
+> add-only pooling, and time locking. This historical plan is otherwise
+> unchanged.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` (recommended) or
 > `superpowers:executing-plans` to implement this plan task by task. Steps use

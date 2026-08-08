@@ -14,7 +14,12 @@ from pydantic import ValidationError
 
 from specpilot.annotation.progress import read_progress
 from specpilot.annotation.store import AnnotationStore
-from specpilot.contracts.annotation import L1Annotation, L2Annotation
+from specpilot.contracts.annotation import (
+    L1Annotation,
+    L2Annotation,
+    UnsupportedAnnotationSchemaError,
+    annotation_model_for_schema,
+)
 from specpilot.contracts.archive import ArchivePolicy, UnsafeArchiveError
 from specpilot.contracts.egress import (
     EgressRequest,
@@ -515,12 +520,13 @@ def _corpus_overlap(arguments: argparse.Namespace) -> int:
 
 
 _L1_TEMPLATE: dict[str, Any] = {
-    "schema_version": "annotation-l1/v1",
+    "schema_version": "annotation-l1/v2",
     "item_id": "l1-dev-001",
     "split": "dev",
     "question": "",
     "direction": "clause_first",
-    "independent_path": "literal_search",
+    "content_origin": "human",
+    "label_origin": "human",
     "document_id": "ietf-rfc-9110",
     "document_version": "2022-06",
     "gold_clause_ids": [],
@@ -528,10 +534,11 @@ _L1_TEMPLATE: dict[str, Any] = {
     "key_points": [{"point_id": "kp-1", "criterion": "", "factual_values": []}],
     "expected_refusal": False,
     "question_gold_jaccard": None,
+    "gold_origins": [],
 }
 _L2_TEMPLATE: dict[str, Any] = {
     **_L1_TEMPLATE,
-    "schema_version": "annotation-l2/v1",
+    "schema_version": "annotation-l2/v2",
     "item_id": "l2-dev-001",
     "claim_id": "l2-dev-001-c1",
     "expected_verdict": "compliant",
@@ -609,10 +616,9 @@ def _check_gold_against_source(
 def _annotation_add(arguments: argparse.Namespace) -> int:
     """Validate one authored record and store it.
 
-    Every rule the contract encodes bites here: a record whose gold came from
-    the retriever names a path `IndependentPath` has no value for, an answerable
-    item without gold has no overlap figure to stratify by, and an unanswerable
-    one may not carry gold. A refusal writes nothing.
+    Every rule the contract encodes bites here: an answerable item needs gold,
+    its source provenance, and an overlap figure, while an unanswerable one may
+    not carry gold. A refusal writes nothing.
     """
     try:
         data = json.loads(arguments.record.read_text(encoding="utf-8"))
@@ -621,10 +627,12 @@ def _annotation_add(arguments: argparse.Namespace) -> int:
     except ValueError:
         return _refuse("invalid_annotation_record")
 
-    declared = data.get("schema_version") if isinstance(data, dict) else None
-    model: type[L1Annotation] | type[L2Annotation] = (
-        L2Annotation if declared == "annotation-l2/v1" else L1Annotation
-    )
+    if not isinstance(data, dict):
+        return _refuse("invalid_annotation_record")
+    try:
+        model = annotation_model_for_schema(data.get("schema_version"))
+    except UnsupportedAnnotationSchemaError:
+        return _refuse("unsupported_annotation_schema")
     try:
         record = model.model_validate(data)
     except ValidationError:
@@ -637,6 +645,8 @@ def _annotation_add(arguments: argparse.Namespace) -> int:
 
     try:
         stored = AnnotationStore(arguments.annotation_dir).create(record)
+    except UnsupportedAnnotationSchemaError:
+        return _refuse("unsupported_annotation_schema")
     except ValueError:
         return _refuse("item_id_already_annotated")
     except (OSError, RuntimeError):
@@ -722,6 +732,8 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
         return _refuse("annotation_dir_not_found")
     try:
         report = read_progress(directory)
+    except UnsupportedAnnotationSchemaError:
+        return _refuse("unsupported_annotation_schema")
     except ValueError:
         return _refuse("invalid_annotation_record")
     except OSError:

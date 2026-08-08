@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,12 +8,16 @@ from pydantic import ValidationError
 
 from specpilot.annotation.store import AnnotationStore, GoldRemovalError
 from specpilot.contracts.annotation import (
-    IndependentPath,
+    AnnotationOrigin,
+    GoldOrigin,
+    GoldOriginEvent,
     KeyPoint,
     L1Annotation,
     L2Annotation,
     QuestionDirection,
+    UnsupportedAnnotationSchemaError,
     Verdict,
+    annotation_model_for_schema,
 )
 
 L1_FIELDS: dict[str, object] = {
@@ -20,7 +25,8 @@ L1_FIELDS: dict[str, object] = {
     "split": "dev",
     "question": "Which condition makes a stored response stale?",
     "direction": "clause_first",
-    "independent_path": "literal_search",
+    "content_origin": "mixed",
+    "label_origin": "mixed",
     "document_id": "ietf-rfc-9111",
     "document_version": "2022-06",
     "gold_clause_ids": ("a" * 64,),
@@ -30,6 +36,10 @@ L1_FIELDS: dict[str, object] = {
     ),
     "expected_refusal": False,
     "question_gold_jaccard": 0.12,
+    "gold_origins": (
+        {"origin": "model_proposal", "producer": "openai-codex"},
+        {"origin": "human_source_review"},
+    ),
 }
 L2_EXTRA: dict[str, object] = {
     "claim_id": "l2-dev-001-c1",
@@ -56,7 +66,8 @@ def test_an_l1_annotation_records_only_committable_fields() -> None:
         "split",
         "question",
         "direction",
-        "independent_path",
+        "content_origin",
+        "label_origin",
         "document_id",
         "document_version",
         "gold_clause_ids",
@@ -64,6 +75,7 @@ def test_an_l1_annotation_records_only_committable_fields() -> None:
         "key_points",
         "expected_refusal",
         "question_gold_jaccard",
+        "gold_origins",
         "predecessor_annotation_id",
         "adjudications",
         "annotation_id",
@@ -80,20 +92,66 @@ def test_no_field_can_hold_clause_prose(forbidden: str) -> None:
         l1(**{forbidden: "Any stored response with a Cache-Control..."})
 
 
-def test_the_independent_path_enum_cannot_name_retrieval() -> None:
-    """Section 8.2.1's rule, expressed so the forbidden state is unrepresentable."""
-    values = {member.value for member in IndependentPath}
+@pytest.mark.parametrize("value", [origin.value for origin in AnnotationOrigin])
+def test_all_annotation_origins_validate(value: str) -> None:
+    record = l1(content_origin=value, label_origin=value)
 
-    assert values == {
-        "source_text_navigation",
-        "literal_search",
-        "cross_reference_trace",
-        "terminology_index",
-    }
-    for banned in ("retrieval", "search_clauses", "dense", "bm25", "hybrid", "pooling"):
-        assert banned not in values
+    assert record.content_origin.value == value
+    assert record.label_origin.value == value
+
+
+@pytest.mark.parametrize(
+    ("origin", "producer"),
+    [
+        ("source_text_navigation", None),
+        ("literal_search", None),
+        ("cross_reference_trace", None),
+        ("terminology_index", None),
+        ("human_source_review", None),
+        ("model_proposal", "openai-codex"),
+        ("search_clauses", "search-pool-r0"),
+        ("dense_retrieval", "dense-pool-r0"),
+        ("bm25_retrieval", "bm25-pool-r0"),
+        ("hybrid_retrieval", "hybrid-pool-r0"),
+    ],
+)
+def test_all_gold_origins_validate(origin: str, producer: str | None) -> None:
+    event = GoldOriginEvent(origin=origin, producer=producer)
+
+    assert event.origin.value == origin
+    assert event.producer == producer
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        GoldOrigin.MODEL_PROPOSAL,
+        GoldOrigin.SEARCH_CLAUSES,
+        GoldOrigin.DENSE_RETRIEVAL,
+        GoldOrigin.BM25_RETRIEVAL,
+        GoldOrigin.HYBRID_RETRIEVAL,
+    ],
+)
+def test_model_and_retrieval_gold_origins_require_a_producer(
+    origin: GoldOrigin,
+) -> None:
     with pytest.raises(ValidationError):
-        l1(independent_path="retrieval")
+        GoldOriginEvent(origin=origin)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        GoldOrigin.SOURCE_TEXT_NAVIGATION,
+        GoldOrigin.LITERAL_SEARCH,
+        GoldOrigin.CROSS_REFERENCE_TRACE,
+        GoldOrigin.TERMINOLOGY_INDEX,
+        GoldOrigin.HUMAN_SOURCE_REVIEW,
+    ],
+)
+def test_human_and_source_gold_origins_reject_a_producer(origin: GoldOrigin) -> None:
+    with pytest.raises(ValidationError):
+        GoldOriginEvent(origin=origin, producer="openai-codex")
 
 
 def test_a_key_point_is_a_criterion_not_a_sentence_of_clause_prose() -> None:
@@ -116,6 +174,7 @@ def test_an_unanswerable_item_carries_no_gold_and_no_overlap() -> None:
         gold_clause_ids=(),
         gold_section_paths=(),
         question_gold_jaccard=None,
+        gold_origins=(),
     )
 
     assert record.expected_refusal is True
@@ -127,11 +186,23 @@ def test_an_answerable_item_must_have_gold_and_an_overlap_figure() -> None:
         l1(gold_clause_ids=(), gold_section_paths=())
     with pytest.raises(ValidationError):
         l1(question_gold_jaccard=None)
+    with pytest.raises(ValidationError):
+        l1(gold_origins=())
 
 
 def test_an_unanswerable_item_may_not_carry_gold() -> None:
     with pytest.raises(ValidationError):
         l1(expected_refusal=True, question_gold_jaccard=None)
+
+
+def test_an_unanswerable_item_may_not_carry_gold_origins() -> None:
+    with pytest.raises(ValidationError):
+        l1(
+            expected_refusal=True,
+            gold_clause_ids=(),
+            gold_section_paths=(),
+            question_gold_jaccard=None,
+        )
 
 
 def test_l2_keeps_task_gold_and_verifier_gold_in_separate_fields() -> None:
@@ -148,6 +219,15 @@ def test_l2_keeps_task_gold_and_verifier_gold_in_separate_fields() -> None:
 def test_l2_rejects_a_non_strict_supports_verdict() -> None:
     with pytest.raises(ValidationError):
         l2(supports_verdict=1)
+
+
+def test_l2_insufficient_evidence_retains_gold_origins() -> None:
+    record = l2(expected_verdict="insufficient_evidence")
+
+    assert record.gold_origins == (
+        GoldOriginEvent(origin="model_proposal", producer="openai-codex"),
+        GoldOriginEvent(origin="human_source_review"),
+    )
 
 
 def test_direction_is_one_of_the_two_mixed_question_paths() -> None:
@@ -175,21 +255,67 @@ def test_an_amendment_may_add_gold_but_never_remove_it(tmp_path: Path) -> None:
         original.annotation_id,
         added_gold_clause_ids=("b" * 64,),
         added_gold_section_paths=("Freshness > Heuristic Freshness",),
+        added_gold_origins=(
+            GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+            GoldOriginEvent(origin="human_source_review"),
+        ),
         adjudication="pooling candidate confirmed against the frozen text",
     )
 
     assert set(amended.gold_clause_ids) == {"a" * 64, "b" * 64}
     assert amended.predecessor_annotation_id == original.annotation_id
     assert amended.adjudications
+    assert amended.gold_origins == (
+        *original.gold_origins,
+        GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+        GoldOriginEvent(origin="human_source_review"),
+    )
 
     with pytest.raises(GoldRemovalError):
         store.amend(
             amended.annotation_id,
             added_gold_clause_ids=(),
             added_gold_section_paths=(),
+            added_gold_origins=(),
             adjudication="removing gold",
             removed_gold_clause_ids=("a" * 64,),
         )
+
+
+def test_an_amendment_adding_gold_requires_an_appended_origin(tmp_path: Path) -> None:
+    store = AnnotationStore(tmp_path)
+    original = store.create(l1())
+    before = tuple(tmp_path.iterdir())
+
+    with pytest.raises(ValueError, match="gold origin"):
+        store.amend(
+            original.annotation_id,
+            added_gold_clause_ids=("b" * 64,),
+            added_gold_section_paths=("Freshness > Heuristic Freshness",),
+            added_gold_origins=(),
+            adjudication="pooling candidate confirmed against the frozen text",
+        )
+
+    assert tuple(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("schema", ["annotation-l1/v1", "annotation-l2/v1", "unknown"])
+def test_stored_v1_and_unknown_schemas_are_rejected(
+    tmp_path: Path, schema: str
+) -> None:
+    annotation_id = "a" * 64
+    (tmp_path / f"{annotation_id}.json").write_text(
+        json.dumps({"schema_version": schema}), encoding="utf-8"
+    )
+
+    with pytest.raises(UnsupportedAnnotationSchemaError):
+        AnnotationStore(tmp_path).read(annotation_id)
+
+
+@pytest.mark.parametrize("schema", ["annotation-l1/v1", "annotation-l2/v1", "unknown"])
+def test_the_schema_dispatcher_rejects_v1_and_unknown_schemas(schema: str) -> None:
+    with pytest.raises(UnsupportedAnnotationSchemaError):
+        annotation_model_for_schema(schema)
 
 
 def test_one_item_id_owns_one_lineage(tmp_path: Path) -> None:

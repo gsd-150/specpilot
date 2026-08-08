@@ -15,7 +15,13 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from specpilot.contracts.annotation import Adjudication, L1Annotation, L2Annotation
+from specpilot.contracts.annotation import (
+    Adjudication,
+    GoldOriginEvent,
+    L1Annotation,
+    L2Annotation,
+    annotation_model_for_schema,
+)
 from specpilot.manifests.canonical import canonical_json, canonical_sha256
 
 type Annotation = L1Annotation | L2Annotation
@@ -52,12 +58,17 @@ class AnnotationStore:
         *,
         added_gold_clause_ids: tuple[str, ...],
         added_gold_section_paths: tuple[str, ...],
+        added_gold_origins: tuple[GoldOriginEvent, ...],
         adjudication: str,
         removed_gold_clause_ids: tuple[str, ...] = (),
     ) -> Annotation:
         previous = self.read(annotation_id)
         if removed_gold_clause_ids:
             raise GoldRemovalError("an amendment may not remove established gold")
+        if (
+            added_gold_clause_ids or added_gold_section_paths
+        ) and not added_gold_origins:
+            raise ValueError("adding gold requires at least one gold origin")
 
         merged_ids = tuple(
             dict.fromkeys((*previous.gold_clause_ids, *added_gold_clause_ids))
@@ -68,10 +79,13 @@ class AnnotationStore:
         if set(previous.gold_clause_ids) - set(merged_ids):
             raise GoldRemovalError("an amendment may not remove established gold")
 
-        successor = previous.model_copy(
-            update={
+        model = annotation_model_for_schema(previous.schema_version)
+        successor = model.model_validate(
+            {
+                **previous.model_dump(exclude={"annotation_id"}),
                 "gold_clause_ids": merged_ids,
                 "gold_section_paths": merged_paths,
+                "gold_origins": (*previous.gold_origins, *added_gold_origins),
                 "predecessor_annotation_id": annotation_id,
                 "adjudications": (
                     *previous.adjudications,
@@ -88,10 +102,10 @@ class AnnotationStore:
         data = path.read_bytes()
         if len(data) > _MAX_RECORD_BYTES:
             raise ValueError("stored annotation exceeds the maximum record size")
-        declared = json.loads(data).get("schema_version")
-        model: type[L1Annotation] | type[L2Annotation] = (
-            L2Annotation if declared == "annotation-l2/v1" else L1Annotation
-        )
+        parsed = json.loads(data)
+        if not isinstance(parsed, dict):
+            raise ValueError("stored annotation is invalid")
+        model = annotation_model_for_schema(parsed.get("schema_version"))
         try:
             record = model.model_validate_json(data)
         except ValidationError as error:

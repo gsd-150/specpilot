@@ -12,13 +12,14 @@ from specpilot.annotation.progress import (
     read_progress,
 )
 from specpilot.annotation.store import Annotation, AnnotationStore
-from specpilot.contracts.annotation import L1Annotation, L2Annotation
+from specpilot.contracts.annotation import GoldOriginEvent, L1Annotation, L2Annotation
 
 L1_BASE: dict[str, object] = {
     "split": "dev",
     "question": "Which condition makes a stored response stale?",
     "direction": "clause_first",
-    "independent_path": "literal_search",
+    "content_origin": "mixed",
+    "label_origin": "mixed",
     "document_id": "ietf-rfc-9111",
     "document_version": "2022-06",
     "gold_clause_ids": ("a" * 64,),
@@ -28,6 +29,10 @@ L1_BASE: dict[str, object] = {
     ),
     "expected_refusal": False,
     "question_gold_jaccard": 0.12,
+    "gold_origins": (
+        {"origin": "model_proposal", "producer": "openai-codex"},
+        {"origin": "human_source_review"},
+    ),
 }
 L2_EXTRA: dict[str, object] = {
     "claim_id": "l2-dev-001-c1",
@@ -52,6 +57,7 @@ def unanswerable(item_id: str, **overrides: object) -> L1Annotation:
         gold_clause_ids=(),
         gold_section_paths=(),
         question_gold_jaccard=None,
+        gold_origins=(),
         **overrides,
     )
 
@@ -107,6 +113,9 @@ def test_an_amended_item_is_counted_once_not_once_per_file(
         record.annotation_id,
         added_gold_clause_ids=("b" * 64,),
         added_gold_section_paths=("Freshness > Expiration",),
+        added_gold_origins=(
+            GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+        ),
         adjudication="checked the candidate against the frozen text; it is gold",
     )
 
@@ -114,26 +123,6 @@ def test_an_amended_item_is_counted_once_not_once_per_file(
 
     assert report.l1.completed_total == 1
     assert report.superseded_count == 1
-
-
-def test_the_report_gives_the_distribution_of_independent_paths(
-    store: AnnotationStore,
-) -> None:
-    stored(
-        store,
-        l1("l1-dev-001", independent_path="literal_search"),
-        l1("l1-dev-002", independent_path="literal_search"),
-        l1("l1-dev-003", independent_path="cross_reference_trace"),
-        l1("l1-dev-004", independent_path="source_text_navigation"),
-    )
-
-    report = build_progress(store.iter_records())
-
-    assert report.l1.independent_paths == {
-        "literal_search": 2,
-        "cross_reference_trace": 1,
-        "source_text_navigation": 1,
-    }
 
 
 def test_the_clause_first_split_is_measured_against_the_60_40_target(
@@ -195,28 +184,62 @@ def test_the_unanswerable_floors_hold_per_split_not_only_in_total(
     assert report.l1.unanswerable_locked_met is False
 
 
-def test_l2_counts_insufficient_evidence_rather_than_the_refusal_flag(
+def test_l2_progress_counts_provenance_and_expected_verdicts(
     store: AnnotationStore,
 ) -> None:
-    """L2's dev 2 / test 4 floor is stated as a verdict distribution.
-
-    An L2 item whose gold verdict is `insufficient_evidence` is answerable in
-    L1's sense — the system should return that verdict, not refuse — so
-    counting refusals would report the floor as unmet forever.
-    """
     stored(
         store,
-        l2("l2-dev-001", expected_verdict="insufficient_evidence"),
+        l2("l2-dev-001", expected_verdict="compliant"),
         l2("l2-dev-002", expected_verdict="insufficient_evidence"),
-        l2("l2-dev-003", expected_verdict="compliant"),
+        l2("l2-dev-003", expected_verdict="violating"),
     )
 
     report = build_progress(store.iter_records())
 
-    assert report.l2.unanswerable_dev == 2
+    assert report.l2.provenance.content_origins == {"mixed": 3}
+    assert report.l2.provenance.label_origins == {"mixed": 3}
+    assert report.l2.provenance.gold_origins == {
+        "human_source_review": 3,
+        "model_proposal": 3,
+    }
+    assert report.l2.provenance.gold_origin_chains == {
+        "model_proposal@openai-codex > human_source_review": 3,
+    }
+    assert report.l2.provenance.retrieval_originated_gold_items == 0
+    assert report.l2.verdict_counts == {
+        "compliant": 1,
+        "insufficient_evidence": 1,
+        "violating": 1,
+    }
+    assert report.l2.unanswerable_dev == 1
     assert report.l2.unanswerable_floor_dev == 2
-    assert report.l2.unanswerable_dev_met is True
+    assert report.l2.unanswerable_dev_met is False
     assert report.l2.unanswerable_floor_locked == 4
+
+
+def test_l2_verdict_counts_include_zeroes_for_an_empty_set() -> None:
+    report = build_progress(())
+
+    assert report.l1.verdict_counts == {}
+    assert report.l2.verdict_counts == {
+        "compliant": 0,
+        "insufficient_evidence": 0,
+        "violating": 0,
+    }
+
+
+def test_l2_verdict_counts_include_zeroes_for_missing_verdicts(
+    store: AnnotationStore,
+) -> None:
+    stored(store, l2("l2-dev-001", expected_verdict="compliant"))
+
+    report = build_progress(store.iter_records())
+
+    assert report.l2.verdict_counts == {
+        "compliant": 1,
+        "insufficient_evidence": 0,
+        "violating": 0,
+    }
 
 
 def test_items_without_an_adjudication_record_are_counted(
@@ -229,6 +252,9 @@ def test_items_without_an_adjudication_record_are_counted(
         first.annotation_id,
         added_gold_clause_ids=("b" * 64,),
         added_gold_section_paths=("Freshness > Expiration",),
+        added_gold_origins=(
+            GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+        ),
         adjudication="checked the candidate against the frozen text; it is gold",
     )
 
@@ -248,6 +274,9 @@ def test_gold_added_by_pooling_is_reported_apart_from_gold_found_independently(
         record.annotation_id,
         added_gold_clause_ids=("b" * 64, "c" * 64),
         added_gold_section_paths=("Freshness > Expiration",),
+        added_gold_origins=(
+            GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+        ),
         adjudication="both candidates check out against the frozen text",
     )
 
@@ -301,12 +330,44 @@ def test_a_chain_whose_root_is_gone_is_refused_rather_than_read_as_a_root(
         record.annotation_id,
         added_gold_clause_ids=("b" * 64,),
         added_gold_section_paths=("Freshness > Expiration",),
+        added_gold_origins=(
+            GoldOriginEvent(origin="bm25_retrieval", producer="bm25-pool-r0"),
+        ),
         adjudication="checked the candidate against the frozen text; it is gold",
     )
     (tmp_path / "annotations" / f"{record.annotation_id}.json").unlink()
 
     with pytest.raises(ValueError, match="missing predecessor"):
         read_progress(tmp_path / "annotations")
+
+
+def test_hybrid_and_pooling_origins_are_counted_from_the_final_head(
+    store: AnnotationStore,
+) -> None:
+    (record,) = stored(
+        store,
+        l1(
+            "l1-dev-001",
+            gold_origins=(
+                {"origin": "hybrid_retrieval", "producer": "hybrid-pool-r0"},
+            ),
+        ),
+    )
+    assert record.annotation_id is not None
+    store.amend(
+        record.annotation_id,
+        added_gold_clause_ids=("b" * 64,),
+        added_gold_section_paths=("Freshness > Expiration",),
+        added_gold_origins=(GoldOriginEvent(origin="human_source_review"),),
+        adjudication="checked the candidate against the frozen text; it is gold",
+    )
+
+    report = build_progress(store.iter_records())
+
+    assert report.l1.provenance.retrieval_originated_gold_items == 1
+    assert report.l1.provenance.gold_origin_chains == {
+        "hybrid_retrieval@hybrid-pool-r0 > human_source_review": 1,
+    }
 
 
 def test_two_chains_claiming_one_item_are_refused_rather_than_counted_twice() -> None:

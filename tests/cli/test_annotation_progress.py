@@ -14,13 +14,18 @@ RECORD: dict[str, object] = {
     "split": "dev",
     "question": "Which condition makes a stored response stale?",
     "direction": "clause_first",
-    "independent_path": "literal_search",
+    "content_origin": "mixed",
+    "label_origin": "mixed",
     "document_id": "ietf-rfc-9111",
     "document_version": "2022-06",
     "gold_clause_ids": ("a" * 64,),
     "gold_section_paths": ("Freshness > Calculating Freshness Lifetime",),
     "expected_refusal": False,
     "question_gold_jaccard": 0.12,
+    "gold_origins": (
+        {"origin": "model_proposal", "producer": "openai-codex"},
+        {"origin": "human_source_review"},
+    ),
 }
 
 
@@ -43,7 +48,17 @@ def test_progress_is_checkable_with_one_command(
     assert payload["status"] == "reported"
     assert payload["l1"]["completed_total"] == 1
     assert payload["l1"]["target_total"] == 40
-    assert payload["l1"]["independent_paths"] == {"literal_search": 1}
+    assert "independent_paths" not in payload["l1"]
+    assert payload["l1"]["provenance"] == {
+        "content_origins": {"mixed": 1},
+        "label_origins": {"mixed": 1},
+        "gold_origins": {"human_source_review": 1, "model_proposal": 1},
+        "gold_origin_chains": {
+            "model_proposal@openai-codex > human_source_review": 1,
+        },
+        "retrieval_originated_gold_items": 0,
+    }
+    assert payload["l1"]["verdict_counts"] == {}
     assert payload["l2"]["completed_total"] == 0
 
 
@@ -88,3 +103,21 @@ def test_a_tampered_record_refuses_instead_of_reporting_a_count(
     assert code == 2
     assert captured.out == ""
     assert captured.err == "invalid_annotation_record\n"
+
+
+def test_v1_annotation_records_are_refused_as_unsupported_schema(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    directory = tmp_path / "annotations"
+    directory.mkdir()
+    (directory / f"{'a' * 64}.json").write_text(
+        json.dumps({"schema_version": "annotation-l1/v1"}), encoding="utf-8"
+    )
+
+    code = main(["annotation", "progress", "--annotation-dir", str(directory)])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "unsupported_annotation_schema\n"

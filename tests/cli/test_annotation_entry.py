@@ -165,9 +165,13 @@ def test_the_template_is_a_record_the_contract_would_reject_until_filled_in(
 
     assert code == 0
     template = json.loads(capsys.readouterr().out)
-    assert template["schema_version"] == "annotation-l1/v1"
+    assert template["schema_version"] == "annotation-l1/v2"
     assert "question" in template
     assert "gold_clause_ids" in template
+    assert "content_origin" in template
+    assert "label_origin" in template
+    assert "gold_origins" in template
+    assert "independent_path" not in template
 
 
 def gold_record(
@@ -184,18 +188,23 @@ def gold_record(
     path.write_text(
         json.dumps(
             {
-                "schema_version": "annotation-l1/v1",
+                "schema_version": "annotation-l1/v2",
                 "item_id": "l1-dev-001",
                 "split": "dev",
                 "question": "Which condition makes a stored response stale?",
                 "direction": "clause_first",
-                "independent_path": "literal_search",
+                "content_origin": "mixed",
+                "label_origin": "mixed",
                 "document_id": "ietf-rfc-9999",
                 "document_version": "2026-08",
                 "gold_clause_ids": [clause.clause_id],
                 "gold_section_paths": [clause.section_path],
                 "expected_refusal": False,
                 "question_gold_jaccard": 0.12,
+                "gold_origins": [
+                    {"origin": "model_proposal", "producer": "openai-codex"},
+                    {"origin": "human_source_review"},
+                ],
                 **overrides,
             }
         ),
@@ -351,15 +360,17 @@ def test_an_unanswerable_record_needs_no_source_because_it_has_no_gold(
     record.write_text(
         json.dumps(
             {
-                "schema_version": "annotation-l1/v1",
+                "schema_version": "annotation-l1/v2",
                 "item_id": "l1-dev-001",
                 "split": "dev",
                 "question": "Which condition makes a stored response stale?",
                 "direction": "clause_first",
-                "independent_path": "literal_search",
+                "content_origin": "human",
+                "label_origin": "human",
                 "document_id": "ietf-rfc-9111",
                 "document_version": "2022-06",
                 "expected_refusal": True,
+                "gold_origins": [],
             }
         ),
         encoding="utf-8",
@@ -392,12 +403,13 @@ def test_adding_a_record_the_contract_rejects_stores_nothing(
     record.write_text(
         json.dumps(
             {
-                "schema_version": "annotation-l1/v1",
+                "schema_version": "annotation-l1/v2",
                 "item_id": "l1-dev-001",
                 "split": "dev",
                 "question": "Which condition makes a stored response stale?",
                 "direction": "clause_first",
-                "independent_path": "literal_search",
+                "content_origin": "human",
+                "label_origin": "human",
                 "document_id": "ietf-rfc-9111",
                 "document_version": "2022-06",
                 "expected_refusal": False,
@@ -422,29 +434,24 @@ def test_adding_a_record_the_contract_rejects_stores_nothing(
     assert not directory.exists()
 
 
-def test_a_record_naming_the_retriever_as_its_source_cannot_be_added(
+@pytest.mark.parametrize(
+    ("origin", "producer"),
+    [
+        ("model_proposal", "openai-codex"),
+        ("hybrid_retrieval", "hybrid-pool-r0"),
+    ],
+)
+def test_model_and_hybrid_retrieval_gold_origins_can_be_added_with_source(
+    corpus: Path,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    origin: str,
+    producer: str,
 ) -> None:
-    """Section 8.2.1's rule holds at the entry point, not only in the type."""
-    record = tmp_path / "pooled.json"
-    record.write_text(
-        json.dumps(
-            {
-                "schema_version": "annotation-l1/v1",
-                "item_id": "l1-dev-001",
-                "split": "dev",
-                "question": "Which condition makes a stored response stale?",
-                "direction": "clause_first",
-                "independent_path": "search_clauses",
-                "document_id": "ietf-rfc-9111",
-                "document_version": "2022-06",
-                "gold_clause_ids": ["a" * 64],
-                "expected_refusal": False,
-                "question_gold_jaccard": 0.12,
-            }
-        ),
-        encoding="utf-8",
+    record, arguments = gold_record(
+        tmp_path,
+        corpus,
+        gold_origins=[{"origin": origin, "producer": producer}],
     )
 
     code = main(
@@ -452,9 +459,66 @@ def test_a_record_naming_the_retriever_as_its_source_cannot_be_added(
             "annotation", "add",
             "--record", str(record),
             "--annotation-dir", str(tmp_path / "annotations"),
+            *arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["status"] == "stored"
+
+
+@pytest.mark.parametrize("schema", ["annotation-l1/v1", "annotation-l2/v1", "unknown"])
+def test_v1_and_unknown_annotation_schemas_are_refused_without_writing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    schema: str,
+) -> None:
+    record = tmp_path / "unsupported.json"
+    record.write_text(json.dumps({"schema_version": schema}), encoding="utf-8")
+    directory = tmp_path / "annotations"
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(directory),
         ]
     )
 
     captured = capsys.readouterr()
     assert code == 2
-    assert captured.err == "invalid_annotation_record\n"
+    assert captured.out == ""
+    assert captured.err == "unsupported_annotation_schema\n"
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("schema", ["annotation-l1/v1", "unknown"])
+def test_adding_a_valid_v2_record_refuses_an_unsupported_stored_schema(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    schema: str,
+) -> None:
+    record, arguments = gold_record(tmp_path, corpus)
+    directory = tmp_path / "annotations"
+    directory.mkdir()
+    (directory / f"{'a' * 64}.json").write_text(
+        json.dumps({"schema_version": schema}), encoding="utf-8"
+    )
+    before = set(directory.iterdir())
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(directory),
+            *arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "unsupported_annotation_schema\n"
+    assert set(directory.iterdir()) == before

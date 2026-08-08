@@ -35,6 +35,7 @@ from typing import Any
 
 from specpilot.annotation.store import Annotation, AnnotationStore
 from specpilot.contracts.annotation import (
+    GoldOrigin,
     L2Annotation,
     QuestionDirection,
     Split,
@@ -52,6 +53,15 @@ class SetTarget:
     unanswerable_dev: int
     unanswerable_locked: int
     clause_first_share: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceProgress:
+    content_origins: dict[str, int]
+    label_origins: dict[str, int]
+    gold_origins: dict[str, int]
+    gold_origin_chains: dict[str, int]
+    retrieval_originated_gold_items: int
 
 
 L1_TARGET = SetTarget(
@@ -88,7 +98,8 @@ class SetProgress:
     clause_first: int
     scenario_first: int
     clause_first_target: float | None
-    independent_paths: dict[str, int]
+    provenance: ProvenanceProgress
+    verdict_counts: dict[str, int]
     awaiting_adjudication: int
     gold_clauses: int
     pooled_gold_clauses: int
@@ -129,7 +140,16 @@ class SetProgress:
             "scenario_first": self.scenario_first,
             "clause_first_share": self.clause_first_share,
             "clause_first_target": self.clause_first_target,
-            "independent_paths": self.independent_paths,
+            "provenance": {
+                "content_origins": self.provenance.content_origins,
+                "label_origins": self.provenance.label_origins,
+                "gold_origins": self.provenance.gold_origins,
+                "gold_origin_chains": self.provenance.gold_origin_chains,
+                "retrieval_originated_gold_items": (
+                    self.provenance.retrieval_originated_gold_items
+                ),
+            },
+            "verdict_counts": self.verdict_counts,
             "awaiting_adjudication": self.awaiting_adjudication,
             "gold_clauses": self.gold_clauses,
             "pooled_gold_clauses": self.pooled_gold_clauses,
@@ -183,17 +203,43 @@ def _set_progress(
     target: SetTarget,
     heads: list[tuple[Annotation, Annotation]],
 ) -> SetProgress:
-    paths: Counter[str] = Counter()
+    content_origins: Counter[str] = Counter()
+    label_origins: Counter[str] = Counter()
+    gold_origins: Counter[str] = Counter()
+    gold_origin_chains: Counter[str] = Counter()
+    verdict_counts: Counter[str] = Counter()
     directions: Counter[QuestionDirection] = Counter()
     unanswerable = Counter[Split]()
     completed = Counter[Split]()
     gold = 0
     pooled = 0
     awaiting = 0
+    retrieval_originated_gold_items = 0
+    retrieval_origins = {
+        GoldOrigin.SEARCH_CLAUSES,
+        GoldOrigin.DENSE_RETRIEVAL,
+        GoldOrigin.BM25_RETRIEVAL,
+        GoldOrigin.HYBRID_RETRIEVAL,
+    }
 
     for head, root in heads:
         completed[head.split] += 1
-        paths[head.independent_path.value] += 1
+        content_origins[head.content_origin.value] += 1
+        label_origins[head.label_origin.value] += 1
+        for event in head.gold_origins:
+            gold_origins[event.origin.value] += 1
+        gold_origin_chains[
+            " > ".join(
+                f"{event.origin.value}@{event.producer}"
+                if event.producer is not None
+                else event.origin.value
+                for event in head.gold_origins
+            )
+        ] += 1
+        if any(event.origin in retrieval_origins for event in head.gold_origins):
+            retrieval_originated_gold_items += 1
+        if isinstance(head, L2Annotation):
+            verdict_counts[head.expected_verdict.value] += 1
         directions[head.direction] += 1
         if _unanswerable(head):
             unanswerable[head.split] += 1
@@ -202,6 +248,10 @@ def _set_progress(
         head_gold = set(head.gold_clause_ids)
         gold += len(head_gold)
         pooled += len(head_gold - set(root.gold_clause_ids))
+
+    if set_name == "l2":
+        for verdict in Verdict:
+            verdict_counts.setdefault(verdict.value, 0)
 
     return SetProgress(
         set_name=set_name,
@@ -218,7 +268,14 @@ def _set_progress(
         clause_first=directions[QuestionDirection.CLAUSE_FIRST],
         scenario_first=directions[QuestionDirection.SCENARIO_FIRST],
         clause_first_target=target.clause_first_share,
-        independent_paths=dict(sorted(paths.items())),
+        provenance=ProvenanceProgress(
+            content_origins=dict(sorted(content_origins.items())),
+            label_origins=dict(sorted(label_origins.items())),
+            gold_origins=dict(sorted(gold_origins.items())),
+            gold_origin_chains=dict(sorted(gold_origin_chains.items())),
+            retrieval_originated_gold_items=retrieval_originated_gold_items,
+        ),
+        verdict_counts=dict(sorted(verdict_counts.items())),
         awaiting_adjudication=awaiting,
         gold_clauses=gold,
         pooled_gold_clauses=pooled,

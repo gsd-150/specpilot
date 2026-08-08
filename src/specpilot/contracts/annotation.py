@@ -3,10 +3,9 @@
 Two rules from the product plan govern gold annotation, and both are the kind
 that a tired annotator at 1 a.m. will not remember from a document.
 
-Section 8.2.1 forbids gold discovered through the system's own retriever, since
-measuring whether a retriever can re-find what it found is measuring nothing.
-`IndependentPath` therefore has no value for retrieval: a record whose gold came
-from the retriever has no representation.
+Gold origins are recorded as auditable events. They describe how a candidate
+entered the annotation process; they do not gate whether source-checked gold
+may be stored.
 
 Section 8.1 forbids clause prose and quotations from entering anything
 committable. No field here can hold them. `KeyPoint` is a criterion with room
@@ -56,17 +55,43 @@ class _FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-class IndependentPath(StrEnum):
-    """The paths section 8.2.1 permits for discovering initial gold.
+class AnnotationOrigin(StrEnum):
+    HUMAN = "human"
+    MODEL = "model"
+    MIXED = "mixed"
 
-    There is deliberately no member for retrieval, dense, sparse, hybrid, or
-    pooling. Gold that came from the system cannot be recorded as gold.
-    """
 
+class GoldOrigin(StrEnum):
     SOURCE_TEXT_NAVIGATION = "source_text_navigation"
     LITERAL_SEARCH = "literal_search"
     CROSS_REFERENCE_TRACE = "cross_reference_trace"
     TERMINOLOGY_INDEX = "terminology_index"
+    HUMAN_SOURCE_REVIEW = "human_source_review"
+    MODEL_PROPOSAL = "model_proposal"
+    SEARCH_CLAUSES = "search_clauses"
+    DENSE_RETRIEVAL = "dense_retrieval"
+    BM25_RETRIEVAL = "bm25_retrieval"
+    HYBRID_RETRIEVAL = "hybrid_retrieval"
+
+
+class GoldOriginEvent(_FrozenModel):
+    origin: GoldOrigin
+    producer: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _require_the_right_producer(self) -> Self:
+        automated_origins = {
+            GoldOrigin.MODEL_PROPOSAL,
+            GoldOrigin.SEARCH_CLAUSES,
+            GoldOrigin.DENSE_RETRIEVAL,
+            GoldOrigin.BM25_RETRIEVAL,
+            GoldOrigin.HYBRID_RETRIEVAL,
+        }
+        if self.origin in automated_origins and self.producer is None:
+            raise ValueError("model and retrieval gold origins require a producer")
+        if self.origin not in automated_origins and self.producer is not None:
+            raise ValueError("human and source gold origins may not name a producer")
+        return self
 
 
 class QuestionDirection(StrEnum):
@@ -127,12 +152,13 @@ class Adjudication(_FrozenModel):
 
 
 class L1Annotation(_FrozenModel):
-    schema_version: Literal["annotation-l1/v1"] = "annotation-l1/v1"
+    schema_version: Literal["annotation-l1/v2"] = "annotation-l1/v2"
     item_id: Identifier
     split: Split
     question: QuestionText
     direction: QuestionDirection
-    independent_path: IndependentPath
+    content_origin: AnnotationOrigin
+    label_origin: AnnotationOrigin
     document_id: Identifier
     document_version: Identifier
     gold_clause_ids: tuple[Sha256, ...] = ()
@@ -140,6 +166,7 @@ class L1Annotation(_FrozenModel):
     key_points: tuple[KeyPoint, ...] = ()
     expected_refusal: StrictBool = False
     question_gold_jaccard: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+    gold_origins: tuple[GoldOriginEvent, ...] = ()
     predecessor_annotation_id: Sha256 | None = None
     adjudications: tuple[Adjudication, ...] = ()
     annotation_id: Sha256 | None = None
@@ -156,13 +183,15 @@ class L1Annotation(_FrozenModel):
     @model_validator(mode="after")
     def _enforce_answerability(self) -> Self:
         if self.expected_refusal:
-            if self.gold_clause_ids or self.gold_section_paths:
+            if self.gold_clause_ids or self.gold_section_paths or self.gold_origins:
                 raise ValueError("an unanswerable item may not carry gold")
             if self.question_gold_jaccard is not None:
                 raise ValueError("an unanswerable item has no overlap figure")
             return self
         if not self.gold_clause_ids:
             raise ValueError("an answerable item requires at least one gold clause")
+        if not self.gold_origins:
+            raise ValueError("an answerable item requires at least one gold origin")
         if self.question_gold_jaccard is None:
             # Section 8.2.2 reports Macro-Recall stratified by literal overlap,
             # so an answerable item without the figure cannot be stratified.
@@ -178,8 +207,22 @@ class L2Annotation(L1Annotation):
     they are separate fields here rather than one reused verdict.
     """
 
-    schema_version: Literal["annotation-l2/v1"] = "annotation-l2/v1"  # type: ignore[assignment]
+    schema_version: Literal["annotation-l2/v2"] = "annotation-l2/v2"  # type: ignore[assignment]
     claim_id: Identifier
     expected_verdict: Verdict
     proposed_verdict: Verdict
     supports_verdict: StrictBool
+
+
+class UnsupportedAnnotationSchemaError(ValueError):
+    pass
+
+
+def annotation_model_for_schema(
+    schema_version: object,
+) -> type[L1Annotation] | type[L2Annotation]:
+    if schema_version == "annotation-l1/v2":
+        return L1Annotation
+    if schema_version == "annotation-l2/v2":
+        return L2Annotation
+    raise UnsupportedAnnotationSchemaError("unsupported annotation schema")
