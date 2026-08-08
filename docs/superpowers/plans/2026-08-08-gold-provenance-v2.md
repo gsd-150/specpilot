@@ -28,19 +28,28 @@
 
 ---
 
-### Task 1: Implement lean annotation v2 across contracts, store, and entry CLI
+### Task 1: Implement lean annotation v2 atomically across all consumers
 
 **Files:**
 - Modify: `src/specpilot/contracts/annotation.py`
 - Modify: `src/specpilot/annotation/store.py`
 - Modify: `src/specpilot/cli.py`
+- Modify: `src/specpilot/annotation/progress.py`
 - Modify: `tests/unit/annotation/test_annotation_contracts.py`
 - Modify: `tests/cli/test_annotation_entry.py`
+- Modify: `tests/unit/annotation/test_progress.py`
+- Modify: `tests/cli/test_annotation_progress.py`
+- Modify: `docs/runbooks/w1-annotation.md`
+- Modify: `docs/roadmaps/2026-08-06-specpilot-master-roadmap.md`
+- Modify: `docs/superpowers/plans/2026-08-07-w1-annotation-and-embedding.md`
+- Modify without staging: `SpecPilot_项目方案.md`
 
 **Interfaces:**
 - Produces: `AnnotationOrigin`, `GoldOrigin`, `GoldOriginEvent`, `UnsupportedAnnotationSchemaError`, and `annotation_model_for_schema(...)`.
 - Produces: `content_origin`, `label_origin`, and `gold_origins` on L1/L2 v2.
 - Changes: `AnnotationStore.amend(..., added_gold_origins: tuple[GoldOriginEvent, ...], ...)`.
+- Produces: `ProvenanceProgress`, `SetProgress.provenance`, and `SetProgress.verdict_counts`.
+- Documents: v2 origins, diagnostic retrieval metrics, model/mixed label disclosure, stable schema refusal, and current CLI invocation.
 - Preserves: all source-aware entry checks and storage invariants.
 
 - [ ] **Step 1: Write failing v2 contract and store tests**
@@ -153,34 +162,7 @@ exception to `unsupported_annotation_schema`, maps malformed/invalid records to
 `invalid_annotation_record`, and does not branch on origin. Keep
 `_check_gold_against_source()` intact.
 
-- [ ] **Step 6: Verify and commit Task 1**
-
-```bash
-.venv/bin/python -m pytest -q tests/unit/annotation/test_annotation_contracts.py tests/cli/test_annotation_entry.py
-.venv/bin/ruff check src/specpilot/contracts/annotation.py src/specpilot/annotation/store.py src/specpilot/cli.py tests/unit/annotation/test_annotation_contracts.py tests/cli/test_annotation_entry.py
-.venv/bin/mypy src
-git add src/specpilot/contracts/annotation.py src/specpilot/annotation/store.py src/specpilot/cli.py tests/unit/annotation/test_annotation_contracts.py tests/cli/test_annotation_entry.py
-git commit -m "feat: add lean Gold provenance schema v2"
-```
-
----
-
-### Task 2: Report provenance and update the live policy
-
-**Files:**
-- Modify: `src/specpilot/annotation/progress.py`
-- Modify: `tests/unit/annotation/test_progress.py`
-- Modify: `tests/cli/test_annotation_progress.py`
-- Modify: `docs/runbooks/w1-annotation.md`
-- Modify: `docs/roadmaps/2026-08-06-specpilot-master-roadmap.md`
-- Modify: `docs/superpowers/plans/2026-08-07-w1-annotation-and-embedding.md`
-- Modify without staging: `SpecPilot_项目方案.md`
-
-**Interfaces:**
-- Produces: `ProvenanceProgress`, `SetProgress.provenance`, and `SetProgress.verdict_counts`.
-- Documents: v2 origins, diagnostic retrieval metrics, model/mixed label disclosure, stable schema refusal, and current CLI invocation.
-
-- [ ] **Step 1: Write failing progress tests**
+- [ ] **Step 6: Write failing progress tests before removing the last v1 consumer**
 
 Convert fixtures to v2. Build the final three-candidate summary and assert:
 
@@ -210,7 +192,7 @@ omit `independent_paths`, emit the new objects,
 carry no annotation prose, and map stored v1 to
 `unsupported_annotation_schema`.
 
-- [ ] **Step 2: Run progress tests and verify RED**
+- [ ] **Step 7: Run progress tests and verify RED**
 
 ```bash
 .venv/bin/python -m pytest -q tests/unit/annotation/test_progress.py tests/cli/test_annotation_progress.py
@@ -218,7 +200,7 @@ carry no annotation prose, and map stored v1 to
 
 Expected: failures because progress still reads `head.independent_path`.
 
-- [ ] **Step 3: Implement the five audit outputs**
+- [ ] **Step 8: Implement the five audit outputs**
 
 Add:
 
@@ -238,7 +220,7 @@ contains search, dense, BM25, or hybrid retrieval. Count L2 expected verdicts;
 use an empty verdict mapping for L1. Preserve every other progress field. Catch
 `UnsupportedAnnotationSchemaError` before generic `ValueError` in CLI progress.
 
-- [ ] **Step 4: Update live documentation**
+- [ ] **Step 9: Update live documentation**
 
 Rewrite the W1 runbook from admission gating to ordered-origin auditing. Show
 the lean v2 fields, accepted origins, producer rule, progress fields, retained
@@ -251,23 +233,25 @@ note to the historical W1 plan. In `SpecPilot_项目方案.md`, change §8.2 to 
 all origins while requiring disclosure, keeping Jaccard, source verification,
 one-time add-only pooling, and time locking. Do not stage that untracked file.
 
-- [ ] **Step 5: Verify and commit Task 2**
+- [ ] **Step 10: Verify the atomic v2 migration and commit Task 1**
 
 ```bash
-.venv/bin/python -m pytest -q tests/unit/annotation/test_progress.py tests/cli/test_annotation_progress.py
-.venv/bin/ruff check src/specpilot/annotation/progress.py tests/unit/annotation/test_progress.py tests/cli/test_annotation_progress.py
+.venv/bin/python -m pytest -q tests/unit/annotation tests/cli/test_annotation_entry.py tests/cli/test_annotation_progress.py
+.venv/bin/ruff check src/specpilot/contracts/annotation.py src/specpilot/annotation/store.py src/specpilot/annotation/progress.py src/specpilot/cli.py tests/unit/annotation tests/cli/test_annotation_entry.py tests/cli/test_annotation_progress.py
 .venv/bin/mypy src
+.venv/bin/python -m pytest -q
 git diff --check
-git add src/specpilot/annotation/progress.py tests/unit/annotation/test_progress.py tests/cli/test_annotation_progress.py docs/runbooks/w1-annotation.md docs/roadmaps/2026-08-06-specpilot-master-roadmap.md docs/superpowers/plans/2026-08-07-w1-annotation-and-embedding.md docs/superpowers/specs/2026-08-08-gold-provenance-v2-design.md
-git commit -m "feat: report Gold provenance bias"
+git add src/specpilot/contracts/annotation.py src/specpilot/annotation/store.py src/specpilot/annotation/progress.py src/specpilot/cli.py tests/unit/annotation/test_annotation_contracts.py tests/unit/annotation/test_progress.py tests/cli/test_annotation_entry.py tests/cli/test_annotation_progress.py docs/runbooks/w1-annotation.md docs/roadmaps/2026-08-06-specpilot-master-roadmap.md docs/superpowers/plans/2026-08-07-w1-annotation-and-embedding.md docs/superpowers/specs/2026-08-08-gold-provenance-v2-design.md
+git commit -m "feat: replace independent Gold with provenance v2"
 ```
 
-Expected: tracked code/docs are committed; `SpecPilot_项目方案.md` remains
+Expected: every source consumer is v2, the full suite is green, tracked
+code/docs are committed, and `SpecPilot_项目方案.md` remains
 untracked and unstaged.
 
 ---
 
-### Task 3: Complete and temporarily validate the three RFC 9112 candidates
+### Task 2: Complete and temporarily validate the three RFC 9112 candidates
 
 **Files:**
 - Modify but never stage: `tmp/l2-dev-001.json`
@@ -371,13 +355,13 @@ This task intentionally has no commit.
 
 ---
 
-### Task 4: Add the three reviewed candidates after explicit approval
+### Task 3: Add the three reviewed candidates after explicit approval
 
 **Files:**
 - Create only after approval: three private records under `artifacts/restricted/annotations/`
 
 **Interfaces:**
-- Consumes: explicit user acceptance of the complete Task 3 records.
+- Consumes: explicit user acceptance of the complete Task 2 records.
 - Produces: three content-addressed L2 dev annotations and verified progress.
 
 - [ ] **Step 1: Stop unless the user explicitly approves all three records**
@@ -386,7 +370,7 @@ No formal-write command is authorized before that response.
 
 - [ ] **Step 2: Re-run temporary validation, then add to the formal directory**
 
-Use the same three source-aware commands from Task 3, changing only
+Use the same three source-aware commands from Task 2, changing only
 `--annotation-dir` to `artifacts/restricted/annotations`. Capture all returned
 annotation IDs.
 
