@@ -1,5 +1,10 @@
 # Independent L2 Annotation Design
 
+> Superseded by
+> `docs/superpowers/specs/2026-08-08-gold-provenance-v2-design.md`. The approved
+> v2 design replaces the independent-Gold admission gate with ordered
+> provenance auditing.
+
 ## Goal
 
 Create three formal L2 development annotations without promoting scenarios,
