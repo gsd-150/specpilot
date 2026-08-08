@@ -81,6 +81,19 @@ def _paragraph_text(element: Element) -> str:
     return " ".join("".join(element.itertext()).split())
 
 
+# List items and definition bodies whose prose the source did not wrap in <t>.
+# Measured on RFC 9110: 182 <li> holding 3689 words and 37 <dd> holding 454,
+# among them 17 BCP 14 keywords — requirements that would otherwise sit in no
+# clause at all, citable by nothing and reachable by no retriever.
+_UNWRAPPED_PROSE_TAGS = frozenset({"li", "dd"})
+
+# Deliberately not included. <dt> is a definition's term, 482 of them in RFC
+# 9110 averaging under two words and stating no requirement; <td> and <th> are
+# reference-table cells, meaningless as a citation on their own. Admitting them
+# would add 800-odd near-empty targets to the index for no requirement gained.
+_LABEL_TAGS = frozenset({"dt", "td", "th"})
+
+
 def _owned_paragraphs(section: Element) -> Iterator[Element]:
     """Yield the paragraphs this section owns, in document order.
 
@@ -93,6 +106,13 @@ def _owned_paragraphs(section: Element) -> Iterator[Element]:
         if child.tag == "section":
             continue
         if child.tag == "t":
+            yield child
+        elif child.tag in _LABEL_TAGS:
+            continue
+        elif child.tag in _UNWRAPPED_PROSE_TAGS and child.find("t") is None:
+            # Prose the source chose not to wrap. It is still the unit a
+            # citation would name, and neither RFC nests a list inside such an
+            # item, so yielding it here cannot double-count a child.
             yield child
         else:
             yield from _owned_paragraphs(child)
@@ -209,6 +229,87 @@ def _clauses_with_text(
                 ),
                 text,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class SectionNormatives:
+    """One section's size and how many requirements it states.
+
+    A locator with counts, like `Clause`. It names where the requirements are;
+    it does not say what they require, and it does not choose anything.
+    """
+
+    section_number: str | None
+    section_path: str
+    section_anchor: str
+    clause_count: int
+    word_count: int
+    keyword_counts: dict[str, int]
+    normative_total: int
+
+
+def build_normative_index(
+    path: Path,
+    rfc_limits: RfcLimits,
+    clause_limits: ClauseLimits,
+) -> tuple[SectionNormatives, ...]:
+    """Count each section's BCP 14 keywords, from the document's own markup.
+
+    RFC v3 tags every normative keyword as `<bcp14>`, so this reads the
+    author's own marking rather than guessing. Scanning for uppercase words
+    instead would count ABNF rules, field names, and quoted examples as
+    requirements, and the sections that looked most normative would be the ones
+    with the most syntax in them.
+
+    Section 8.2.1 permits this as an annotation aid because it is literal search
+    over the frozen bytes — the same path as grep, not the system's retriever.
+    It narrows where to read. It does not choose a clause or write a question.
+    """
+    root = _parse(path, rfc_limits)
+    sections: list[tuple[Element, str | None, str, str]] = []
+    middle = root.find("middle")
+    if middle is not None:
+        _walk(middle, prefix="", titles=(), found=sections)
+    back = root.find("back")
+    if back is not None:
+        _walk(
+            back,
+            prefix="",
+            titles=(),
+            found=sections,
+            lettered=True,
+            skip_unnumbered=True,
+        )
+
+    index: list[SectionNormatives] = []
+    for section, number, path_text, anchor in sections:
+        counts: dict[str, int] = {}
+        clause_count = 0
+        word_count = 0
+        for paragraph in _owned_paragraphs(section):
+            text = _paragraph_text(paragraph)
+            if not text:
+                continue
+            clause_count += 1
+            word_count += len(text.split())
+            for keyword in paragraph.iter("bcp14"):
+                # "MUST NOT" is one keyword. Splitting on whitespace would
+                # score it as a MUST, inverting the requirement it states.
+                label = " ".join("".join(keyword.itertext()).split())
+                if label:
+                    counts[label] = counts.get(label, 0) + 1
+        index.append(
+            SectionNormatives(
+                section_number=number,
+                section_path=path_text,
+                section_anchor=anchor,
+                clause_count=clause_count,
+                word_count=word_count,
+                keyword_counts=dict(sorted(counts.items())),
+                normative_total=sum(counts.values()),
+            )
+        )
+    return tuple(index)
 
 
 def build_clauses(

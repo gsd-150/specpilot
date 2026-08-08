@@ -33,6 +33,48 @@ SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+NORMATIVE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Normative</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t>A sender <bcp14>MUST</bcp14> do this and <bcp14>SHOULD NOT</bcp14> do that.</t>
+      <t>The word MUST here is prose, not a marked keyword.</t>
+      <section anchor="one-one" numbered="true">
+        <name>One One</name>
+        <t>A recipient <bcp14>MAY</bcp14> ignore it.</t>
+      </section>
+    </section>
+    <section anchor="two" numbered="true">
+      <name>Two</name>
+      <t>Nothing normative lives here.</t>
+    </section>
+  </middle>
+</rfc>
+"""
+
+UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Unwrapped</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t>A wrapped paragraph.</t>
+      <ul>
+        <li>An item the source did not wrap, stating <bcp14>MUST</bcp14>.</li>
+        <li><t>An item the source did wrap.</t></li>
+      </ul>
+      <dl>
+        <dt>term</dt>
+        <dd>A definition body the source did not wrap.</dd>
+      </dl>
+      <table><tbody><tr><td>cell</td><td>other</td></tr></tbody></table>
+    </section>
+  </middle>
+</rfc>
+"""
+
 DANGLING_XREF_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Dangling</title></front>

@@ -43,6 +43,7 @@ from specpilot.corpus.clauses import (
     ClauseLimits,
     OversizedClauseError,
     build_clauses,
+    build_normative_index,
     iter_clause_texts,
 )
 from specpilot.corpus.overlap import question_gold_jaccard
@@ -320,6 +321,56 @@ def _corpus_clauses(arguments: argparse.Namespace) -> int:
                 "anchor": clause.anchor,
                 "word_count": clause.word_count,
                 "byte_count": clause.byte_count,
+            },
+            sys.stdout,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        sys.stdout.write("\n")
+    return 0
+
+
+def _corpus_normative(arguments: argparse.Namespace) -> int:
+    """List each section with how many requirements it states.
+
+    A shortlist of where to read, built by literal search over the frozen bytes
+    — §8.2.1's own second path, not the system's retriever. It narrows the
+    reading; the author still reads the section, writes the question, and picks
+    the gold clause, none of which this can do.
+
+    Sections with no requirements are printed too unless `--min-keywords`
+    excludes them, because a candidate list that silently drops what it did not
+    like cannot be checked against the document.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        index = build_normative_index(arguments.xml, RfcLimits(), ClauseLimits())
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    for entry in index:
+        if entry.normative_total < arguments.min_keywords:
+            continue
+        if arguments.section and not _section_matches(
+            entry.section_number, arguments.section
+        ):
+            continue
+        json.dump(
+            {
+                "section_number": entry.section_number,
+                "section_path": entry.section_path,
+                "section_anchor": entry.section_anchor,
+                "clause_count": entry.clause_count,
+                "word_count": entry.word_count,
+                "normative_total": entry.normative_total,
+                "keyword_counts": entry.keyword_counts,
             },
             sys.stdout,
             sort_keys=True,
@@ -990,6 +1041,14 @@ def _parser() -> argparse.ArgumentParser:
     clauses.add_argument("--xml", type=Path, required=True)
     clauses.add_argument("--section", default=None)
     clauses.set_defaults(handler=_corpus_clauses)
+
+    normative = corpus.add_parser("normative")
+    normative.add_argument("--manifest", required=True)
+    normative.add_argument("--manifest-dir", type=Path, required=True)
+    normative.add_argument("--xml", type=Path, required=True)
+    normative.add_argument("--section", default=None)
+    normative.add_argument("--min-keywords", type=int, default=0)
+    normative.set_defaults(handler=_corpus_normative)
 
     overlap = corpus.add_parser("overlap")
     overlap.add_argument("--manifest", required=True)
