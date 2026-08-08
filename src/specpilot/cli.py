@@ -48,6 +48,7 @@ from specpilot.corpus.clauses import (
     iter_clause_texts,
 )
 from specpilot.corpus.overlap import question_gold_jaccard
+from specpilot.corpus.qa import QaThresholds, run_parse_qa
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
 from specpilot.embedding.local_encoder import (
@@ -348,6 +349,50 @@ def _corpus_clauses(arguments: argparse.Namespace) -> int:
         )
         sys.stdout.write("\n")
     return 0
+
+
+def _corpus_qa(arguments: argparse.Namespace) -> int:
+    """Run §4.1's blocking parse QA and report every line's measured value.
+
+    Exits non-zero when any line fails, so `corpus freeze` can depend on it
+    rather than on someone remembering. Every value is printed whether it passed
+    or not: a gate that only says "pass" cannot show a regression coming.
+    """
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return _refuse_source(manifest)
+
+    try:
+        report = run_parse_qa(
+            arguments.xml,
+            RfcLimits(),
+            _clause_limits(manifest),
+            QaThresholds(),
+        )
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    _emit(
+        {
+            "status": "passed" if report.passed else "failed",
+            "document_id": report.document_id,
+            "lines": {
+                line.name: {
+                    "measured": round(line.measured, 6),
+                    "threshold": line.threshold,
+                    "passed": line.passed,
+                    "numerator": line.numerator,
+                    "denominator": line.denominator,
+                }
+                for line in report.lines
+            },
+        }
+    )
+    return 0 if report.passed else EXIT_REFUSED
 
 
 def _corpus_normative(arguments: argparse.Namespace) -> int:
@@ -1066,6 +1111,12 @@ def _parser() -> argparse.ArgumentParser:
     clauses.add_argument("--xml", type=Path, required=True)
     clauses.add_argument("--section", default=None)
     clauses.set_defaults(handler=_corpus_clauses)
+
+    qa = corpus.add_parser("qa")
+    qa.add_argument("--manifest", required=True)
+    qa.add_argument("--manifest-dir", type=Path, required=True)
+    qa.add_argument("--xml", type=Path, required=True)
+    qa.set_defaults(handler=_corpus_qa)
 
     normative = corpus.add_parser("normative")
     normative.add_argument("--manifest", required=True)

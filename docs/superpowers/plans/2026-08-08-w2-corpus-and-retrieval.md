@@ -105,15 +105,15 @@ than a licence to skip it.
 A table is cited whole — "the table in §7.3" — so the table is the unit, and
 rows are its content. Cells are neither: a cell in isolation names nothing.
 
-- [ ] **Step 1: Write failing tests for table identity and shape**
+- [x] **Step 1: Write failing tests for table identity and shape**
 
 Assert the table ID is stable across builds and distinct per section ordinal;
 that row and column counts match the source; that a header row is marked rather
 than dropped; and that `Table` has no field that can hold cell text.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify GREEN on the frozen corpus**
+- [x] **Step 3: Implement and verify GREEN on the frozen corpus**
 
 Record the counts for both documents in the task report, not in Git.
 
@@ -140,18 +140,21 @@ cross-reference target correctness each at least 90%; orphan normative
 paragraphs at most 1% of candidate paragraphs; quarantined content at most 2% of
 parsed blocks.
 
-- [ ] **Step 1: Write failing tests for each blocking line**
+- [x] **Step 1: Write failing tests for each blocking line**
 
 Each line gets a case that passes at the threshold and one that fails just
 below it. A gate whose failure path is untested is a gate nobody has seen refuse.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and run against both frozen sources**
+- [x] **Step 3: Implement and run against both frozen sources**
 
-Report every line's measured value, not just pass/fail. Orphan normative
-paragraphs should already read 0% — every BCP 14 keyword is attributed — and a
-figure that good needs to be visible so a later regression is obvious.
+Report every line's measured value, not just pass/fail.
+
+**Both documents pass all five lines.** Section numbering 1559/1559 and 350/350
+against the source's own `pn`; cross-reference targets 2519/2519 and 458/458;
+table fidelity 714/714 and 82/82 words; uncaptured text 0.09% and 0.76% against
+the 2% ceiling; orphan normative keywords 0 of 445 and 0 of 149.
 
 ---
 

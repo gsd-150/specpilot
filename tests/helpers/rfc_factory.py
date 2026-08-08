@@ -75,6 +75,29 @@ UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+QA_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front><title>Quality</title></front>
+  <middle>
+    <section anchor="one" numbered="true">
+      <name>One</name>
+      <t pn="section-1-1">Prose that <bcp14>MUST</bcp14> cite
+        <xref target="two" derivedContent="Section 2"/>.</t>
+      <sourcecode pn="section-1-2">token = 1*tchar</sourcecode>
+      <dl><dt>term</dt><dd pn="section-1-3">A definition body.</dd></dl>
+      <table pn="table-1">
+        <thead><tr><th>Code</th></tr></thead>
+        <tbody><tr><td>200</td></tr></tbody>
+      </table>
+    </section>
+    <section anchor="two" numbered="true">
+      <name>Two</name>
+      <t pn="section-2-1">More prose here.</t>
+    </section>
+  </middle>
+</rfc>
+"""
+
 CODE_BLOCK_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Grammar</title></front>
