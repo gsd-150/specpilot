@@ -9,6 +9,7 @@ import pytest
 
 from specpilot.embedding.throughput import (
     BatchOrder,
+    LengthMetric,
     NoMeasurementError,
     ThroughputMeasurement,
     embedding_cache_key,
@@ -30,6 +31,7 @@ def measurement(**overrides: object) -> ThroughputMeasurement:
         "pipeline_version": PIPELINE,
         "device": "mps",
         "batch_order": BatchOrder.DOCUMENT,
+        "length_metric": LengthMetric.WORDS,
         "batch_size": 16,
         "sample_size": 200,
         "sample_words": 12_000,
@@ -185,6 +187,50 @@ def test_document_order_is_the_default_and_leaves_the_batches_alone() -> None:
 
     assert batches == [("aa bb cc", "dd"), ("ee ff",)]
     assert result.batch_order is BatchOrder.DOCUMENT
+
+
+def test_ordering_by_length_uses_the_measure_it_is_given() -> None:
+    """Words stopped being a proxy for tokens when grammar joined the corpus.
+
+    Prose runs 1.50 tokens per word and ABNF runs 2.90, so a 50-word grammar
+    block is 145 tokens where a 50-word paragraph is 75. Ordering by words puts
+    them in one batch and pads both to the longer — measured on RFC 9110 at
+    batch 32, 33.9% waste against 4.3% for ordering by tokens.
+    """
+    # "aa" is short in words and long in this metric; "bb cc dd" the reverse.
+    lengths = {"aa": 100, "bb cc dd": 10}
+    batches: list[Sequence[str]] = []
+
+    result = measure_throughput(
+        ("aa", "bb cc dd"),
+        lambda batch: batches.append(tuple(batch)),
+        model_id="BAAI/bge-m3",
+        weights_sha256=WEIGHTS,
+        pipeline_version=PIPELINE,
+        device="cpu",
+        batch_order=BatchOrder.LENGTH,
+        batch_size=1,
+        length_of=lambda text: lengths[text],
+    )
+
+    assert batches == [("bb cc dd",), ("aa",)]
+    assert result.length_metric is LengthMetric.TOKENS
+
+
+def test_without_a_measure_the_fallback_to_words_is_on_the_record() -> None:
+    """An unlabelled sort key is ambiguous by more than the reported precision."""
+    result = measure_throughput(
+        ("aa", "bb cc dd"),
+        lambda batch: None,
+        model_id="BAAI/bge-m3",
+        weights_sha256=WEIGHTS,
+        pipeline_version=PIPELINE,
+        device="cpu",
+        batch_order=BatchOrder.LENGTH,
+        batch_size=1,
+    )
+
+    assert result.length_metric is LengthMetric.WORDS
 
 
 def test_the_words_per_second_figure_accompanies_the_clause_rate() -> None:

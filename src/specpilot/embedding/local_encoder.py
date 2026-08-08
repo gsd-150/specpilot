@@ -27,6 +27,29 @@ class EmbeddingRuntimeUnavailable(RuntimeError):
     """The optional local embedding runtime is not installed."""
 
 
+def load_token_counter(model_dir: Path) -> Callable[[str], int]:
+    """Return the encoder's own token count for a string.
+
+    Ordering batches needs the length the model will actually pad to, and only
+    the tokenizer knows it. Loading the tokenizer alone costs a fraction of the
+    model, so this is cheap enough to use as a sort key.
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as error:  # pragma: no cover - exercised by absence
+        raise EmbeddingRuntimeUnavailable(
+            "install the 'embedding' extra to measure throughput"
+        ) from error
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
+
+    def count(text: str) -> int:
+        tokens: list[int] = tokenizer(text)["input_ids"]
+        return len(tokens)
+
+    return count
+
+
 def load_encoder(
     model_dir: Path, device: str, *, max_tokens: int = MAX_TOKENS
 ) -> Callable[[Sequence[str]], Any]:

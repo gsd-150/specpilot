@@ -52,6 +52,24 @@ class BatchOrder(StrEnum):
     LENGTH = "length"
 
 
+class LengthMetric(StrEnum):
+    """What "length" means when ordering by it — and it is not free either.
+
+    Words were a fine proxy for tokens while the corpus was all prose at a
+    steady 1.50 tokens per word. Admitting ABNF blocks at 2.90 broke the proxy:
+    a 50-word grammar block runs 145 tokens and a 50-word paragraph runs 75, so
+    ordering by words now groups them together and pads both to the longer.
+    Measured on RFC 9110 at batch 32, that is 33.9% padding waste against 4.3%
+    for ordering by tokens.
+
+    A corpus with one population hides this. Two populations expose it, and the
+    second one arrived without the sort key noticing.
+    """
+
+    WORDS = "words"
+    TOKENS = "tokens"
+
+
 class NoMeasurementError(RuntimeError):
     """An estimate was requested before anything was measured."""
 
@@ -113,6 +131,7 @@ class ThroughputMeasurement:
     pipeline_version: str
     device: str
     batch_order: BatchOrder
+    length_metric: LengthMetric
     batch_size: int
     sample_size: int
     sample_words: int
@@ -169,15 +188,24 @@ def measure_throughput(
     device: str,
     batch_order: BatchOrder = BatchOrder.DOCUMENT,
     batch_size: int,
+    length_of: Callable[[str], int] | None = None,
 ) -> ThroughputMeasurement:
-    """Time `encode` over `texts` in batches and return the labelled rate."""
+    """Time `encode` over `texts` in batches and return the labelled rate.
+
+    `length_of` decides what ordering by length means. Pass the encoder's own
+    token count when there is one; without it this falls back to words and says
+    so on the record, because the two are not interchangeable on a corpus that
+    mixes prose with grammar.
+    """
     if not texts:
         raise ValueError("a rate needs a non-empty sample")
     if batch_size <= 0:
         raise ValueError("batch size must be positive")
 
+    metric = LengthMetric.WORDS if length_of is None else LengthMetric.TOKENS
+    measure = length_of or (lambda text: len(text.split()))
     ordered = (
-        tuple(sorted(texts, key=lambda text: len(text.split())))
+        tuple(sorted(texts, key=measure))
         if batch_order is BatchOrder.LENGTH
         else tuple(texts)
     )
@@ -193,6 +221,7 @@ def measure_throughput(
         pipeline_version=pipeline_version,
         device=device,
         batch_order=batch_order,
+        length_metric=metric,
         batch_size=batch_size,
         sample_size=len(texts),
         sample_words=sum(len(text.split()) for text in texts),

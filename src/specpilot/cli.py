@@ -50,7 +50,11 @@ from specpilot.corpus.clauses import (
 from specpilot.corpus.overlap import question_gold_jaccard
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
-from specpilot.embedding.local_encoder import EmbeddingRuntimeUnavailable, load_encoder
+from specpilot.embedding.local_encoder import (
+    EmbeddingRuntimeUnavailable,
+    load_encoder,
+    load_token_counter,
+)
 from specpilot.embedding.throughput import (
     BatchOrder,
     estimate_full_corpus_seconds,
@@ -590,6 +594,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
     try:
         digest = weights_sha256(arguments.model_dir)
         encode = load_encoder(arguments.model_dir, arguments.device)
+        length_of = load_token_counter(arguments.model_dir)
     except EmbeddingRuntimeUnavailable:
         return _refuse("embedding_runtime_unavailable")
     except (OSError, ValueError):
@@ -604,6 +609,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
         device=arguments.device,
         batch_order=arguments.batch_order,
         batch_size=arguments.batch_size,
+        length_of=length_of,
     )
 
     return _emit(
@@ -615,6 +621,7 @@ def _embedding_measure(arguments: argparse.Namespace) -> int:
             "pipeline_version": measurement.pipeline_version,
             "device": measurement.device,
             "batch_order": measurement.batch_order.value,
+            "length_metric": measurement.length_metric.value,
             "batch_size": measurement.batch_size,
             "sample_size": measurement.sample_size,
             "sample_words": measurement.sample_words,
