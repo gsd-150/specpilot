@@ -128,6 +128,21 @@ No exception message or source text is emitted by the CLI.
 Publication-version unit IDs already migrate from the erroneous RFCXML grammar
 version to `2022-06`; the RFC 9112 §6.3 clause remains
 `817e50534fc9d2e00b485d0d445b95992b1fdc25ef354febcd87bfc1be60e7bb`.
-No official annotation exists, so no annotation successor is required. Any
-local BM25 or Qdrant index containing the old IDs must be rebuilt; new and old
-point IDs must not be mixed.
+
+After this design was approved, Gold provenance v2 was implemented and the
+user explicitly approved three RFC 9112 L2 records for formal entry. Those
+records already use the publication-version clause ID above, so they require
+no successor or content migration. The remaining snapshot work must preserve
+the three private add-only records byte-for-byte and must not replay, amend, or
+delete them.
+
+The three local `l2-dev-00{1,2,3}.json` candidates are now complete v2 records,
+not intentionally failing skeletons. Final snapshot verification revalidates
+their source-aware admission only in a fresh temporary annotation directory,
+then reads the existing formal directory through `annotation progress`. The
+preserved `model-drafted-not-gold.rfc9112-6.3.json` file remains a historical
+local draft and is not migrated as part of the security fix.
+
+Any local BM25 or Qdrant index containing the old IDs must still be rebuilt;
+new and old point IDs must not be mixed. Verification does not create a
+persistent index.
