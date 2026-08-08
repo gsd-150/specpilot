@@ -30,6 +30,7 @@ from specpilot.egress.enforcer import (
     EgressPolicyViolation,
     TokenAccountingUnavailable,
 )
+from specpilot.egress.policy import EgressPolicy
 from specpilot.manifests.store import ManifestStore
 from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
@@ -70,8 +71,35 @@ def fixture_store() -> ManifestStore:
     return ManifestStore(_FIXTURE_MANIFEST_DIR)
 
 
+FIXTURE_DOCUMENT = "iso-9001"
+OTHER_FIXTURE_DOCUMENT = "iso-14001"
+
+
+def fixture_policy(**document_caps: dict[str, int]) -> EgressPolicy:
+    """The shipped policy, extended to price this suite's invented documents.
+
+    ``corpus_document_unique`` fails closed on a document it does not price, so
+    a fixture standard has to be priced somewhere. It is priced here rather than
+    in ``default-v1.json`` on purpose: the shipped file lists the two frozen
+    RFCs and the synthetic demo corpus, all of which really ship, and adding
+    ``iso-9001`` to it would put test data in the artifact the container loads.
+    """
+    generous = {"excerpts": 1024, "tokens": 524288, "bytes": 8388608}
+    caps: dict[str, object] = {
+        FIXTURE_DOCUMENT: generous,
+        OTHER_FIXTURE_DOCUMENT: generous,
+    }
+    fields = EgressPolicy.load().model_dump(mode="json")
+    caps.update(fields["corpus_document_unique"])
+    caps.update(document_caps)
+    fields["corpus_document_unique"] = caps
+    return EgressPolicy.model_validate(fields)
+
+
 def fixture_enforcer() -> EgressPolicyEnforcer:
-    return EgressPolicyEnforcer(manifests=fixture_store(), clock=lambda: NOW)
+    return EgressPolicyEnforcer(
+        fixture_policy(), manifests=fixture_store(), clock=lambda: NOW
+    )
 
 
 def authorized_manifest(
@@ -309,6 +337,7 @@ def test_prepare_fails_closed_when_counting_is_not_positive(
 def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization() -> None:
     request = egress_request()
     expired = EgressPolicyEnforcer(
+        fixture_policy(),
         manifests=fixture_store(),
         clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
     )
@@ -318,6 +347,7 @@ def test_enforcer_uses_trusted_aware_clock_for_manifest_authorization() -> None:
     assert denied.value.code == "route_unauthorized"
 
     naive = EgressPolicyEnforcer(
+        fixture_policy(),
         manifests=fixture_store(),
         clock=lambda: datetime(2026, 8, 6, 4),
     )

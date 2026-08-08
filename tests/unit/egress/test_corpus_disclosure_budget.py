@@ -15,6 +15,7 @@ from tests.unit.egress.test_policy_projection import (
     FixtureTokenCounter,
     egress_request,
     fixture_enforcer,
+    fixture_policy,
     fixture_store,
     l1_payload,
 )
@@ -44,7 +45,7 @@ def apply_across_cases(
         None,
         corpus_usage,
         reservation,
-        policy or EgressPolicy.load(),
+        policy or fixture_policy(),
         FixtureTokenCounter(),
         fixture_store(),
         clock=lambda: NOW,
@@ -52,7 +53,7 @@ def apply_across_cases(
 
 
 def narrow_corpus_policy(tmp_path: Path, *, excerpts: int) -> EgressPolicy:
-    policy = EgressPolicy.load()
+    policy = fixture_policy()
     fields = policy.model_dump(mode="json")
     fields["corpus_unique"] = {
         "excerpts": excerpts,

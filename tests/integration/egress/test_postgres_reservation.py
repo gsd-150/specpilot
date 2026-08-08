@@ -3,16 +3,17 @@ from __future__ import annotations
 import pytest
 
 from specpilot.contracts.egress import EgressStage
-from specpilot.egress.enforcer import EgressPolicyViolation
+from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.ledger import AttemptOutcome, ReservationState, TransmittedUsage
-from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_policy_projection import (
+    FIXTURE_DOCUMENT,
     NOW,
     FixtureTokenCounter,
     egress_request,
     fixture_enforcer,
+    fixture_policy,
     fixture_store,
     l1_payload,
 )
@@ -26,7 +27,7 @@ PLAINTEXT_MARKERS = ("bounded evidence", "What controls are required?", "xxx")
 def ledger(dsn: str) -> PostgresEgressLedger:
     return PostgresEgressLedger(
         dsn,
-        policy=EgressPolicy.load(),
+        policy=fixture_policy(),
         manifests=fixture_store(),
         clock=lambda: NOW,
     )
@@ -192,3 +193,50 @@ async def test_attempts_are_recorded_against_a_reservation(
     assert attempt.reservation_id == reservation.reservation_id
     assert attempt.outcome is AttemptOutcome.SUCCEEDED
     assert attempt.duration_ms == 12
+
+
+async def test_the_per_document_account_survives_the_jsonb_round_trip(
+    clean_ledger: str,
+) -> None:
+    """A dropped ``document_usage`` would validate as empty and reset the cap.
+
+    That failure mode is silent and it raises a ceiling, so the durability of
+    this field gets its own test rather than riding on the corpus totals: the
+    only way the second call can be refused is if the first call's per-document
+    account came back out of the database.
+    """
+    tiny = {"excerpts": 1, "tokens": 512, "bytes": 8192}
+    book = PostgresEgressLedger(
+        clean_ledger,
+        policy=fixture_policy(**{FIXTURE_DOCUMENT: tiny}),
+        manifests=fixture_store(),
+        clock=lambda: NOW,
+    )
+    enforcer = EgressPolicyEnforcer(
+        fixture_policy(**{FIXTURE_DOCUMENT: tiny}),
+        manifests=fixture_store(),
+        clock=lambda: NOW,
+    )
+
+    def reserve(index: int):
+        request = egress_request(
+            payload=l1_payload(evidence_excerpts=(distinct_excerpt(index),))
+        )
+        return enforcer.prepare(
+            request.model_copy(update={"evaluation_root_id": f"case-{index}"}),
+            FixtureTokenCounter(),
+        )
+
+    first = await book.check_and_reserve(
+        reserve(1), FixtureTokenCounter(), idempotency_key="doc-1"
+    )
+    account = first.corpus_usage.document_usage
+    assert [item.document_id for item in account] == [FIXTURE_DOCUMENT]
+    assert account[0].unique_tokens == 2
+
+    with pytest.raises(EgressPolicyViolation) as caught:
+        await book.check_and_reserve(
+            reserve(2), FixtureTokenCounter(), idempotency_key="doc-2"
+        )
+
+    assert caught.value.code == "corpus_document_unique_excerpts_exceeded"

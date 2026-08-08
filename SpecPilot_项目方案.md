@@ -141,7 +141,7 @@ L1 和 L2 构成 W0–W6 主线。L3 不进入首发验收，也不占用主工�
 >
 > 收紧的理由不是“少发更安全”，而是它把 `docs/compliance/rfc-source-terms.md` 记录的 uncertainty #1 机械地解掉。该条原文说：五分之一以整份文档计量、本项目以 token 与字节计量，两套口径条款未规定如何换算，因此“累计摘录是否已触及该阈值”无法仅凭现有上限判定。**分母现在已经实测**，把上限设在其下即意味着 §3.c.iii(y) 的附加归属义务在任何运行下都不会产生。措辞须准确：超过五分之一触发的是“须一并包含全部 IETF 声明”的附加**义务**，不是禁止；此处收紧是让义务不产生，不是声称超过即违规。
 >
-> 落地清单：`default-v1.json` 增加逐文档 corpus 上限、enforcer 按 `document_id` 分账、一条上限断言测试，并在 §12.3 的数据处理附录中列出该层 —— 此前它完全不在方案里，附录会漏掉它。
+> **[已落地 2026-08-08]** 四步全部完成。`default-v1.json` 新增 `corpus_document_unique`，两份 RFC 的上限取实测量的整数五分之一：9110 = 311 excerpt / 17,509 tokens / 75,073 bytes（实测 1559 / 87,548 / 375,367），9112 = 70 / 3,906 / 16,334（实测 350 / 19,531 / 81,671）；合成 fixture 语料另立一档，因为 demo profile 必须能在无 key 下跑通。分母取的是**可索引条款文本**而非整份发布文件，比按分发原件计量更严。enforcer 按 `request.version.document_id` 分账，该键可信是因为 `_validate_version_binding` 已要求它等于 enforcer 从自有 store 解析出的 source manifest 的 `document_id`；账目存在同一行 corpus ledger 内，因此 ADR 0001 的单锁序列化不变。未被计价的 document 一律 fail closed（`corpus_document_cap_missing`），理由是没有实测分母就没有可辩护的上限，默认一个等于连许可论证一起默认了。测试覆盖逐文档独立累计、越限拒绝、未计价拒绝、jsonb 持久化往返（经变异验证：去掉该字段该测试即失败），以及一条**上限断言测试** —— 任何人调高上限而不重新测量，都会当场红。
 - **合规评估门禁（自评，无外部审批方）。** 每个真实语料 source_manifest 默认 `cloud_egress_authorized=false`。**先说清这道门是什么：没有任何机构会为本项目签字。** 3GPP 不会答复“能否用 API 处理其规范”这类询问，项目也没有法务或 DPO 参与。因此该字段的取值是作者本人的判断——这道门禁的价值不在于取得许可，而在于让判断被记录、可回溯、推理过程可被第三方复核。把它当成等待外部回复的动作，W0 会卡在一个永远不会到来的信号上。
 
   W0 内必须完成并留档的四项：
@@ -1017,7 +1017,7 @@ W5–W6 的成果作为增量更新，而不是简历上这个项目的首次出
 - **无任何 API key、无需下载真实 3GPP 语料即可运行四个预注册离线演示场景**，且除模型外的组件全部真实执行（§9.6）；
 - fixture-init/real-init 幂等，demo/real 两个 profile 的 manifest-scoped ready/health check 可复跑；MCP、Qdrant 与 PostgreSQL 不暴露宿主机端口；
 - provider 调用全经统一出站闸门；未授权、字段越权、单片段/累计超限和重试绕过测试全部 fail closed；
-- 出站账本在 PostgreSQL 中原子预占并可随 checkpoint 恢复；并发、进程重启、同条款多 span、跨 provider 重发均不能绕过 unique/transmitted 上限；
+- 出站账本在 PostgreSQL 中原子预占并可随 checkpoint 恢复；并发、进程重启、同条款多 span、跨 provider 重发均不能绕过 unique/transmitted 上限；逐文档 corpus 账本随同一把 corpus 锁持久化，未被计价的 document 一律 fail closed（`corpus_document_cap_missing`）；
 - 安全摄取测试覆盖路径穿越、符号链接、解压大小/数量上限、加密成员、宏/主动内容与外部关系，违规输入只进入隔离区；
 - 两份规范均通过 §4.1 的解析 QA 阻断线；冻结 Qdrant collection 只读，schema/point count/inventory root 启动校验通过；
 - API、工具和 Agent 边界均有 schema；
@@ -1039,7 +1039,7 @@ W5–W6 的成果作为增量更新，而不是简历上这个项目的首次出
 - **报告中的全部指标数字来自真实语料；CI 的 fixture 评测不产出任何质量指标**（§8.0）；
 - 报告明确区分锁定测试结果与已完成的 dev diagnostics；未完成项列入 backlog，不把职责分离的开发集差异写成泛化或因果结论；
 - evaluation `run_spec`、逐次 evaluation_run_manifest 与最终 evaluation_report_manifest 共同包含 §6.4 要求的处理条件、配对/artifact、代码、依赖、评测集、脚本、provider 政策、逐案例结果和实际运行环境元数据；
-- 报告有数据处理附录，列明 query/设计描述、派生 claim、版本元数据、有界 TOC 标题/路径、Evidence/gold excerpt 在各阶段的 provider、保留/训练政策、区域/子处理方、出站上限与处理链；
+- 报告有数据处理附录，列明 query/设计描述、派生 claim、版本元数据、有界 TOC 标题/路径、Evidence/gold excerpt 在各阶段的 provider、保留/训练政策、区域/子处理方、出站上限与处理链；出站上限须**逐层列全**：单片段、stage、run、evaluation-case 根、corpus，以及 **corpus 的逐文档层**（每份文档的 excerpt/token/byte 上限、其实测分母，以及“上限设在五分之一以下”这一推理与它对应解掉的 source-terms uncertainty）；
 - 报告同时包含成功、失败、成本和限制；
 - README 提供架构、快速开始、评测方法和数据许可说明；
 - 有架构决策记录、评测报告和 2–3 分钟演示视频；Dify DSL 与平台对照表仅在发布后扩展实际完成时追加；

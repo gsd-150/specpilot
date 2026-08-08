@@ -14,6 +14,19 @@ _POLICY_PACKAGE = "specpilot.egress.policies"
 _DEFAULT_POLICY_NAME = "default-v1.json"
 
 
+class MissingDocumentCap(LookupError):
+    """The policy prices no share of this document, so no share may be disclosed.
+
+    Raised rather than defaulted on purpose. Each per-document cap is one fifth
+    of that document's measured size; a document nobody measured has no such
+    number, and inventing one would be inventing the licence argument with it.
+    """
+
+    def __init__(self, document_id: str) -> None:
+        super().__init__(f"policy prices no outbound share for {document_id!r}")
+        self.document_id = document_id
+
+
 class _PolicyModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -34,6 +47,7 @@ class EgressPolicy(_PolicyModel):
     l2_root_unique: CapVector
     l2_root_transmitted: CapVector
     corpus_unique: CapVector
+    corpus_document_unique: dict[str, CapVector]
     toc_per_call: int
     toc_per_run: int
     l1_query_tokens: int
@@ -58,7 +72,13 @@ class EgressPolicy(_PolicyModel):
     def policy_hash(self) -> str:
         return _canonical_hash(self.model_dump(mode="json"))
 
-    def snapshot(self, *, task_level: str, payload_kind: str) -> CapSnapshot:
+    def snapshot(
+        self,
+        *,
+        task_level: str,
+        payload_kind: str,
+        document_id: str,
+    ) -> CapSnapshot:
         is_l1 = task_level == "L1"
         is_judge = payload_kind == "judge"
         projected_text_tokens: int | None
@@ -68,6 +88,9 @@ class EgressPolicy(_PolicyModel):
             projected_text_tokens = self.l2_design_tokens
         else:
             projected_text_tokens = None
+        document_cap = self.corpus_document_unique.get(document_id)
+        if document_cap is None:
+            raise MissingDocumentCap(document_id)
         return CapSnapshot(
             excerpt=self.excerpt,
             online_unique=None
@@ -90,6 +113,7 @@ class EgressPolicy(_PolicyModel):
                 self.l1_root_transmitted if is_l1 else self.l2_root_transmitted
             ),
             corpus_unique=self.corpus_unique,
+            corpus_document_unique=document_cap,
             toc_per_call=self.toc_per_call,
             toc_per_run=self.toc_per_run,
             max_claims_per_run=self.max_l2_claims_per_run,

@@ -188,6 +188,7 @@ class CapSnapshot(_FrozenModel):
     root_unique: CapVector
     root_transmitted: CapVector
     corpus_unique: CapVector
+    corpus_document_unique: CapVector
     toc_per_call: Annotated[int, Field(gt=0)]
     toc_per_run: Annotated[int, Field(gt=0)]
     max_claims_per_run: Annotated[int, Field(gt=0)]
@@ -240,6 +241,21 @@ class RunUsage(_FrozenModel):
     claim_usage: tuple[ClaimUsage, ...] = ()
 
 
+class CorpusDocumentUsage(_FrozenModel):
+    """One document's share of the corpus ledger.
+
+    Kept inside ``CorpusUsage`` rather than in its own row so the single corpus
+    lock still serializes every reservation. Splitting documents into separate
+    rows would buy concurrency this evaluation does not need and would cost the
+    fixed lock order that prevents deadlock.
+    """
+
+    document_id: Identifier
+    disclosure_ids: tuple[Sha256, ...] = ()
+    unique_tokens: Annotated[int, Field(ge=0)] = 0
+    unique_bytes: Annotated[int, Field(ge=0)] = 0
+
+
 class CorpusUsage(_FrozenModel):
     """Unique source text ever disclosed from one frozen corpus, across all cases.
 
@@ -248,14 +264,19 @@ class CorpusUsage(_FrozenModel):
     product plan's outbound-limit premise actually rests on. It counts unique
     disclosures only: re-sending the same excerpt is a transmitted-usage concern,
     not a new disclosure of source text.
+
+    ``document_usage`` is the same question asked per document, because the
+    licence condition behind the cap is written per document: pooling two
+    specifications cannot show that either one stayed under its own share.
     """
 
-    schema_version: Literal["egress-corpus-usage/v1"] = "egress-corpus-usage/v1"
+    schema_version: Literal["egress-corpus-usage/v2"] = "egress-corpus-usage/v2"
     corpus_manifest_id: Sha256
     policy_hash: Sha256
     disclosure_ids: tuple[Sha256, ...] = ()
     unique_tokens: Annotated[int, Field(ge=0)] = 0
     unique_bytes: Annotated[int, Field(ge=0)] = 0
+    document_usage: tuple[CorpusDocumentUsage, ...] = ()
 
 
 class UsageSnapshot(_FrozenModel):

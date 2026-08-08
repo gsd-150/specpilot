@@ -4,13 +4,13 @@ import pytest
 
 from specpilot.egress.enforcer import EgressPolicyViolation
 from specpilot.egress.ledger import LedgerUnavailable
-from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
 from tests.integration.egress.test_postgres_reservation import ledger, reservation_for
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_policy_projection import (
     NOW,
     FixtureTokenCounter,
+    fixture_policy,
     fixture_store,
 )
 
@@ -67,7 +67,7 @@ async def test_an_unreachable_ledger_fails_closed_rather_than_allowing_a_send(
 ) -> None:
     unreachable = PostgresEgressLedger(
         "postgresql://127.0.0.1:1/specpilot_does_not_exist?connect_timeout=1",
-        policy=EgressPolicy.load(),
+        policy=fixture_policy(),
         manifests=fixture_store(),
         clock=lambda: NOW,
     )
@@ -92,7 +92,7 @@ async def test_a_policy_change_stops_an_evaluation_root_mid_flight(
         idempotency_key="evidence-0",
     )
 
-    changed = EgressPolicy.load().model_copy(update={"toc_per_run": 25})
+    changed = fixture_policy().model_copy(update={"toc_per_run": 25})
     with_other_policy = PostgresEgressLedger(
         clean_ledger,
         policy=changed,

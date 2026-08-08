@@ -9,6 +9,7 @@ from specpilot.contracts.egress import (
     CapSnapshot,
     CapVector,
     ClaimUsage,
+    CorpusDocumentUsage,
     CorpusUsage,
     DisclosureFact,
     EgressRequest,
@@ -30,6 +31,7 @@ from specpilot.contracts.egress import (
 from specpilot.contracts.manifests import ProviderUse, SourceManifest
 from specpilot.egress.policy import (
     EgressPolicy,
+    MissingDocumentCap,
     disclosure_id,
 )
 
@@ -170,10 +172,17 @@ class EgressPolicyEnforcer:
             _reject("route_unauthorized", "source manifest does not authorize route")
         _verify_counter(counter, request)
 
-        snapshot = self._policy.snapshot(
-            task_level=task_level.value,
-            payload_kind=payload.kind,
-        )
+        try:
+            snapshot = self._policy.snapshot(
+                task_level=task_level.value,
+                payload_kind=payload.kind,
+                document_id=request.version.document_id,
+            )
+        except MissingDocumentCap:
+            _reject(
+                "corpus_document_cap_missing",
+                "policy prices no outbound share for this document",
+            )
         projected_text = _projected_text(payload)
         if projected_text is not None and snapshot.projected_text_tokens is not None:
             projected_count = _count(counter, projected_text)
@@ -333,7 +342,54 @@ def _apply_corpus_usage(
         disclosure_ids=disclosure_ids,
         unique_tokens=unique_tokens,
         unique_bytes=unique_bytes,
+        document_usage=_apply_document_usage(existing, request, derived),
     )
+
+
+def _apply_document_usage(
+    existing: CorpusUsage,
+    request: ReservationRequest,
+    derived: _DerivedReservation,
+) -> tuple[CorpusDocumentUsage, ...]:
+    """Charge this request's disclosures to the document its version names.
+
+    ``version.document_id`` is safe as the account key because
+    ``_validate_version_binding`` has already required it to equal the
+    ``document_id`` of the manifest the enforcer resolved from its own store.
+    A caller therefore cannot bill one document's excerpts to another's budget
+    without failing an earlier check.
+    """
+    document_id = request.version.document_id
+    accounts = {item.document_id: item for item in existing.document_usage}
+    current = accounts.get(document_id) or CorpusDocumentUsage(document_id=document_id)
+
+    known = set(current.disclosure_ids)
+    unique_tokens = current.unique_tokens
+    unique_bytes = current.unique_bytes
+    for fact in derived.disclosures:
+        if fact.disclosure_id in known:
+            continue
+        known.add(fact.disclosure_id)
+        unique_tokens += fact.token_count
+        unique_bytes += fact.byte_count
+    disclosure_ids = _ordered_union(
+        current.disclosure_ids,
+        tuple(fact.disclosure_id for fact in derived.disclosures),
+    )
+    _check_unique_cap(
+        disclosure_ids,
+        unique_tokens,
+        unique_bytes,
+        derived.cap_snapshot.corpus_document_unique,
+        "corpus_document_unique",
+    )
+    accounts[document_id] = CorpusDocumentUsage(
+        document_id=document_id,
+        disclosure_ids=disclosure_ids,
+        unique_tokens=unique_tokens,
+        unique_bytes=unique_bytes,
+    )
+    return tuple(accounts[key] for key in sorted(accounts))
 
 
 def _apply_usage(

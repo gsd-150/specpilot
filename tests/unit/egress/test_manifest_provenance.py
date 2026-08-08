@@ -9,13 +9,13 @@ from specpilot.contracts.manifests import (
     SourceManifestDraft,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
-from specpilot.egress.policy import EgressPolicy
 from tests.unit.egress.test_disclosure_caps import apply_reservation
 from tests.unit.egress.test_policy_projection import (
     NOW,
     FixtureTokenCounter,
     egress_request,
     fixture_enforcer,
+    fixture_policy,
     fixture_store,
     online_route,
 )
@@ -71,6 +71,7 @@ def test_apply_also_resolves_the_manifest_and_does_not_trust_the_reservation() -
     """A reservation minted against a permissive resolver still fails at apply."""
     manifest = unstored_authorized_manifest()
     reservation = EgressPolicyEnforcer(
+        fixture_policy(),
         manifests=_ResolverAlwaysReturning(manifest),
         clock=lambda: NOW,
     ).prepare(egress_request(manifest=manifest), FixtureTokenCounter())
@@ -86,6 +87,7 @@ def test_resolver_returning_a_different_manifest_is_rejected() -> None:
     substitute = unstored_authorized_manifest()
     assert substitute.manifest_id != stored.manifest_id
     enforcer = EgressPolicyEnforcer(
+        fixture_policy(),
         manifests=_ResolverAlwaysReturning(substitute),
         clock=lambda: NOW,
     )
@@ -113,7 +115,7 @@ def test_stored_default_deny_manifest_still_authorizes_nothing() -> None:
 
 def test_enforcer_requires_a_resolver_and_has_no_trusting_default() -> None:
     with pytest.raises(TypeError):
-        EgressPolicyEnforcer(EgressPolicy.load())  # type: ignore[call-arg]
+        EgressPolicyEnforcer(fixture_policy())  # type: ignore[call-arg]
 
 
 class _ResolverAlwaysReturning:

@@ -23,7 +23,7 @@ from specpilot.egress.enforcer import (
 from specpilot.egress.enforcer import (
     apply_reservation as apply_with_trusted_inputs,
 )
-from specpilot.egress.policy import EgressPolicy, disclosure_id
+from specpilot.egress.policy import disclosure_id
 from tests.unit.egress.test_policy_projection import (
     CORPUS_MANIFEST_ID,
     NOW,
@@ -32,6 +32,7 @@ from tests.unit.egress.test_policy_projection import (
     egress_request,
     excerpt,
     fixture_enforcer,
+    fixture_policy,
     fixture_store,
     l1_payload,
     online_route,
@@ -58,7 +59,7 @@ def apply_reservation(
         previous.usage if previous else None,
         previous.corpus_usage if previous else None,
         reservation,
-        EgressPolicy.load(),
+        fixture_policy(),
         counter or FixtureTokenCounter(),
         fixture_store(),
         clock=lambda: NOW,

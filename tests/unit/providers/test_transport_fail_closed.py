@@ -34,6 +34,7 @@ from tests.unit.egress.test_manifest_provenance import unstored_authorized_manif
 from tests.unit.egress.test_policy_projection import (
     NOW,
     egress_request,
+    fixture_policy,
     fixture_store,
     l1_payload,
 )
@@ -129,6 +130,7 @@ def transport(
 ) -> PolicyBoundTransport:
     return PolicyBoundTransport(
         enforcer=EgressPolicyEnforcer(
+            fixture_policy(),
             manifests=fixture_store(),
             clock=lambda: clock,
         ),

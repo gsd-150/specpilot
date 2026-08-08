@@ -33,6 +33,7 @@ from tests.unit.egress.test_policy_projection import (
     FixtureTokenCounter,
     egress_request,
     fixture_enforcer,
+    fixture_policy,
     fixture_store,
     l1_payload,
 )
@@ -187,7 +188,7 @@ def test_apply_recounts_disclosure_facts_with_trusted_policy_and_counter(
             None,
             None,
             altered,
-            EgressPolicy.load(),
+            fixture_policy(),
             FixtureTokenCounter(),
             fixture_store(),
             clock=lambda: NOW,
@@ -269,7 +270,7 @@ def test_cross_provider_resend_is_one_root_unique_and_two_transmissions() -> Non
 def test_policy_loading_and_hashing_are_semantic_and_deterministic(
     tmp_path: Path,
 ) -> None:
-    policy = EgressPolicy.load()
+    policy = fixture_policy()
     reordered = tmp_path / "reordered.json"
     source = policy.model_dump_json(indent=2)
     reordered.write_text(source, encoding="utf-8")

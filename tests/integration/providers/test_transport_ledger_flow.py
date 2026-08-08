@@ -6,7 +6,6 @@ import pytest
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
-from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
 from specpilot.providers.base import ProviderError
 from specpilot.providers.fake import FakeProvider
@@ -16,6 +15,7 @@ from tests.unit.egress.test_policy_projection import (
     NOW,
     authorized_manifest,
     egress_request,
+    fixture_policy,
     fixture_store,
     l1_payload,
 )
@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 def real_ledger(dsn: str) -> PostgresEgressLedger:
     return PostgresEgressLedger(
         dsn,
-        policy=EgressPolicy.load(),
+        policy=fixture_policy(),
         manifests=fixture_store(),
         clock=lambda: NOW,
     )
@@ -34,7 +34,9 @@ def real_ledger(dsn: str) -> PostgresEgressLedger:
 
 def transport(dsn: str, *providers: FakeProvider) -> PolicyBoundTransport:
     return PolicyBoundTransport(
-        enforcer=EgressPolicyEnforcer(manifests=fixture_store(), clock=lambda: NOW),
+        enforcer=EgressPolicyEnforcer(
+            fixture_policy(), manifests=fixture_store(), clock=lambda: NOW
+        ),
         ledger=real_ledger(dsn),
         adapters=providers,
     )
@@ -173,10 +175,12 @@ async def test_unrecordable_accounting_seals_the_run_against_further_sends(
             raise LedgerUnavailable()
 
     sealing_line = PolicyBoundTransport(
-        enforcer=EgressPolicyEnforcer(manifests=fixture_store(), clock=lambda: NOW),
+        enforcer=EgressPolicyEnforcer(
+            fixture_policy(), manifests=fixture_store(), clock=lambda: NOW
+        ),
         ledger=UnrecordableLedger(
             clean_ledger,
-            policy=EgressPolicy.load(),
+            policy=fixture_policy(),
             manifests=fixture_store(),
             clock=lambda: NOW,
         ),
