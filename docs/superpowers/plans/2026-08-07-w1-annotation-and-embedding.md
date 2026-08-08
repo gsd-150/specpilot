@@ -75,7 +75,11 @@ L2-adv is W3's and is not started here.
 - `src/specpilot/annotation/store.py` — create-only annotation storage.
 - `src/specpilot/annotation/progress.py` — countable progress without prose.
 - `src/specpilot/embedding/throughput.py` — sampled measurement and cache key.
-- `src/specpilot/cli.py` — `corpus parse`, `annotation progress`,
+- `src/specpilot/embedding/local_encoder.py` — the lazy, optional model load,
+  kept out of `throughput.py` so the timing harness imports without a runtime.
+- `src/specpilot/corpus/overlap.py` — the frozen literal-overlap measure.
+- `src/specpilot/cli.py` — `corpus parse`, `corpus clauses`, `corpus overlap`,
+  `annotation progress`, `annotation template`, `annotation add`,
   `embedding measure`.
 - `tests/unit/corpus/`, `tests/unit/annotation/`, `tests/unit/embedding/`.
 
