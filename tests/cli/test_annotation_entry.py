@@ -170,7 +170,152 @@ def test_the_template_is_a_record_the_contract_would_reject_until_filled_in(
     assert "gold_clause_ids" in template
 
 
-def test_adding_a_valid_record_stores_it_and_reports_its_id(
+def gold_record(
+    tmp_path: Path, corpus: Path, **overrides: object
+) -> tuple[Path, list[str]]:
+    """A record whose gold really is in the document it names."""
+    from specpilot.contracts.rfc import RfcLimits
+    from specpilot.corpus.clauses import ClauseLimits, build_clauses
+
+    arguments = source(tmp_path, corpus)
+    xml = Path(arguments[-1])
+    clause = build_clauses(xml, RfcLimits(), ClauseLimits())[0]
+    path = tmp_path / "record.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "annotation-l1/v1",
+                "item_id": "l1-dev-001",
+                "split": "dev",
+                "question": "Which condition makes a stored response stale?",
+                "direction": "clause_first",
+                "independent_path": "literal_search",
+                "document_id": "ietf-rfc-9999",
+                "document_version": "2026-08",
+                "gold_clause_ids": [clause.clause_id],
+                "gold_section_paths": [clause.section_path],
+                "expected_refusal": False,
+                "question_gold_jaccard": 0.12,
+                **overrides,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path, arguments
+
+
+def test_a_record_carrying_gold_needs_the_document_it_names(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Shape validation cannot tell whether a clause id exists."""
+    record, _ = gold_record(tmp_path, corpus)
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(tmp_path / "annotations"),
+        ]
+    )
+
+    assert code == 2
+    assert capsys.readouterr().err == "source_required_for_gold\n"
+
+
+def test_a_gold_clause_the_document_does_not_contain_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record, arguments = gold_record(tmp_path, corpus, gold_clause_ids=["f" * 64])
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(tmp_path / "annotations"),
+            *arguments,
+        ]
+    )
+
+    assert code == 2
+    assert capsys.readouterr().err == "unknown_gold_clause\n"
+
+
+def test_a_record_pointed_at_the_wrong_document_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record, arguments = gold_record(tmp_path, corpus, document_id="ietf-rfc-9111")
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(tmp_path / "annotations"),
+            *arguments,
+        ]
+    )
+
+    assert code == 2
+    assert capsys.readouterr().err == "document_id_mismatch\n"
+
+
+def test_a_key_point_that_restates_its_clause_is_refused(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§8.1: a key point may carry factual values but may not reproduce the
+    clause's wording as a sentence."""
+    record, arguments = gold_record(
+        tmp_path,
+        corpus,
+        key_points=[
+            {
+                "point_id": "kp-1",
+                "criterion": "This paragraph exists so the tree has content",
+            }
+        ],
+    )
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(tmp_path / "annotations"),
+            *arguments,
+        ]
+    )
+
+    assert code == 2
+    assert capsys.readouterr().err == "key_point_restates_clause\n"
+
+
+def test_a_record_whose_gold_checks_out_is_stored(
+    corpus: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record, arguments = gold_record(tmp_path, corpus)
+
+    code = main(
+        [
+            "annotation", "add",
+            "--record", str(record),
+            "--annotation-dir", str(tmp_path / "annotations"),
+            *arguments,
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "stored"
+
+
+def test_an_unanswerable_record_needs_no_source_because_it_has_no_gold(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -186,10 +331,7 @@ def test_adding_a_valid_record_stores_it_and_reports_its_id(
                 "independent_path": "literal_search",
                 "document_id": "ietf-rfc-9111",
                 "document_version": "2022-06",
-                "gold_clause_ids": ["a" * 64],
-                "gold_section_paths": ["Freshness"],
-                "expected_refusal": False,
-                "question_gold_jaccard": 0.12,
+                "expected_refusal": True,
             }
         ),
         encoding="utf-8",

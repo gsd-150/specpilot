@@ -97,6 +97,23 @@ class KeyPoint(_FrozenModel):
     criterion: CriterionText
     factual_values: tuple[FactualValue, ...] = ()
 
+    @model_validator(mode="after")
+    def _refuse_a_verdict_as_a_factual_value(self) -> Self:
+        """§8.1 keeps task-level gold and scoring criteria in separate fields.
+
+        A verdict label sitting in a key point makes an answer scoreable for
+        producing the word rather than the reasoning, and duplicates a value
+        that ``expected_verdict`` already owns — so the two could disagree.
+        """
+        labels = {verdict.value for verdict in Verdict}
+        for value in self.factual_values:
+            if value.strip().lower() in labels:
+                raise ValueError(
+                    "a verdict label belongs in expected_verdict, "
+                    "not in a key point's factual values"
+                )
+        return self
+
 
 class Adjudication(_FrozenModel):
     """One completeness-audit decision, per section 8.2.3.

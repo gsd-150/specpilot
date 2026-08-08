@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from specpilot.cli import _section_matches
-from specpilot.corpus.overlap import jaccard_overlap, question_gold_jaccard, tokenize
+from specpilot.corpus.overlap import (
+    containment,
+    jaccard_overlap,
+    question_gold_jaccard,
+    restates,
+    tokenize,
+)
 
 
 def test_a_section_filter_matches_components_not_string_prefixes() -> None:
@@ -86,3 +92,52 @@ def test_an_item_with_no_gold_clause_has_no_overlap_figure() -> None:
     """An unanswerable item is not in the stratification at all."""
     with pytest.raises(ValueError, match="gold"):
         question_gold_jaccard("alpha beta", ())
+
+
+CLAUSE = (
+    "An intermediary that chooses to forward the message MUST first remove the "
+    "received Content-Length field and process the Transfer-Encoding prior to "
+    "forwarding the message downstream."
+)
+
+
+def test_containment_asks_how_much_of_this_came_from_that() -> None:
+    """Jaccard cannot answer it: a short criterion drawn entirely from a long
+    clause scores low, which reads as independence."""
+    taken = "the intermediary MUST first remove the received Content-Length field"
+
+    assert containment(taken, CLAUSE) == 1.0
+    assert jaccard_overlap(taken, CLAUSE) < 0.5
+
+
+def test_containment_of_unrelated_text_is_zero() -> None:
+    assert containment("alpha beta gamma", CLAUSE) == 0.0
+
+
+def test_containment_of_nothing_is_zero_rather_than_undefined() -> None:
+    assert containment("", CLAUSE) == 0.0
+
+
+def test_a_criterion_that_preserves_the_clauses_sentence_is_a_restatement() -> None:
+    restatement = (
+        "requires a forwarding intermediary to remove the received "
+        "Content-Length and process Transfer-Encoding first"
+    )
+
+    assert restates(restatement, CLAUSE) is True
+
+
+def test_a_criterion_written_as_a_judgement_standard_is_not() -> None:
+    """Measured at 33% containment on the first drafted item, against 93% for
+    the restatement above. The gap is what makes the line placeable."""
+    criterion = (
+        "recognizes that both framing fields trigger the conflicting-framing rule"
+    )
+
+    assert restates(criterion, CLAUSE) is False
+
+
+def test_a_criterion_too_short_to_be_a_sentence_is_never_a_restatement() -> None:
+    """Three words can be 100% clause vocabulary without reproducing wording."""
+    assert containment("Content-Length field", CLAUSE) == 1.0
+    assert restates("Content-Length field", CLAUSE) is False

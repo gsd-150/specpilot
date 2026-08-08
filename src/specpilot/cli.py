@@ -47,7 +47,7 @@ from specpilot.corpus.clauses import (
     build_normative_index,
     iter_clause_texts,
 )
-from specpilot.corpus.overlap import question_gold_jaccard
+from specpilot.corpus.overlap import question_gold_jaccard, restates
 from specpilot.corpus.qa import QaThresholds, run_parse_qa
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
@@ -534,6 +534,57 @@ def _annotation_template(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _check_gold_against_source(
+    arguments: argparse.Namespace, record: L1Annotation | L2Annotation
+) -> str | None:
+    """Check an answerable record against the document it names.
+
+    Three things a record can get wrong that no amount of shape validation
+    catches: naming a clause the document does not contain, naming the wrong
+    document, and writing a key point that restates its clause instead of
+    stating a criterion. All three need the source, so the source is required
+    whenever the record carries gold.
+    """
+    if arguments.xml is None or arguments.manifest is None:
+        return "source_required_for_gold"
+
+    manifest = _frozen_source(arguments)
+    if isinstance(manifest, str):
+        return manifest
+    if manifest.document_id != record.document_id:
+        # A record pointed at the wrong document would resolve its gold against
+        # clauses from a specification it does not cite.
+        return "document_id_mismatch"
+
+    try:
+        texts = {
+            clause.clause_id: text
+            for clause, text in iter_clause_texts(
+                arguments.xml, RfcLimits(), _clause_limits(manifest)
+            )
+        }
+    except UnsafeRfcError as error:
+        return error.code.value
+    except OversizedClauseError:
+        return "clause_too_large"
+    except OSError:
+        return "io_error"
+
+    missing = [
+        clause_id for clause_id in record.gold_clause_ids if clause_id not in texts
+    ]
+    if missing:
+        return "unknown_gold_clause"
+
+    gold = [texts[clause_id] for clause_id in record.gold_clause_ids]
+    for point in record.key_points:
+        if any(restates(point.criterion, clause) for clause in gold):
+            # §8.1: a key point may carry necessary factual values but may not
+            # reproduce the clause's wording as a sentence.
+            return "key_point_restates_clause"
+    return None
+
+
 def _annotation_add(arguments: argparse.Namespace) -> int:
     """Validate one authored record and store it.
 
@@ -557,6 +608,11 @@ def _annotation_add(arguments: argparse.Namespace) -> int:
         record = model.model_validate(data)
     except ValidationError:
         return _refuse("invalid_annotation_record")
+
+    if record.gold_clause_ids:
+        refusal = _check_gold_against_source(arguments, record)
+        if refusal is not None:
+            return _refuse_source(refusal)
 
     try:
         stored = AnnotationStore(arguments.annotation_dir).create(record)
@@ -1211,6 +1267,11 @@ def _parser() -> argparse.ArgumentParser:
     add = annotation.add_parser("add")
     add.add_argument("--record", type=Path, required=True)
     add.add_argument("--annotation-dir", type=Path, required=True)
+    # Required whenever the record carries gold. A record's gold lives in the
+    # one document it names, so one source is enough.
+    add.add_argument("--manifest", default=None)
+    add.add_argument("--manifest-dir", type=Path, default=None)
+    add.add_argument("--xml", type=Path, default=None)
     add.set_defaults(handler=_annotation_add)
 
     embedding = commands.add_parser("embedding").add_subparsers(

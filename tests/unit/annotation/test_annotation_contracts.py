@@ -201,3 +201,29 @@ def test_one_item_id_owns_one_lineage(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         store.create(l1(question="A different question entirely?"))
+
+
+def test_a_verdict_label_cannot_hide_in_a_key_points_factual_values() -> None:
+    """§8.1 keeps task-level gold and scoring criteria in separate fields.
+
+    A verdict inside a key point makes an answer scoreable for producing the
+    word rather than the reasoning, and duplicates a value expected_verdict
+    already owns — so the two could disagree.
+    """
+    for label in ("violating", "compliant", "Insufficient_Evidence"):
+        with pytest.raises(ValidationError):
+            KeyPoint(
+                point_id="kp-1",
+                criterion="names the rule",
+                factual_values=(label,),
+            )
+
+
+def test_a_real_factual_value_is_still_accepted() -> None:
+    point = KeyPoint(
+        point_id="kp-1",
+        criterion="names the default",
+        factual_values=("5 octets", "RRC_CONNECTED"),
+    )
+
+    assert point.factual_values == ("5 octets", "RRC_CONNECTED")

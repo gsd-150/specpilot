@@ -14,6 +14,62 @@ question, choose a gold clause, or decide a verdict — and it is built so that 
 cannot: there is no command that proposes an item, and `IndependentPath` has no
 value for retrieval, so gold discovered by the system has no representation.
 
+## Using a language model while annotating
+
+Not covered by §8.2.1's letter, which names `search_clauses` and this system's
+dense, sparse, and hybrid rankings. An outside model is none of those. It is
+still governed, and the line falls in a specific place.
+
+**A model may not choose the gold clause or decide the verdict.** Reading a
+model's proposal and agreeing with it is not independent discovery — it is
+§8.2.1's own banned pattern, "run the system, see whether the output looks
+reasonable, adopt it if so", with a different producer. Checking the proposal
+against the source afterwards does not convert it, because that check is the
+agreeing.
+
+For L2 this bites harder than for L1. The system's Verifier is itself a language
+model, so a model-authored `expected_verdict` makes part of the verdict
+confusion matrix a measurement of whether two models agree. §4.6 and §8.3.3
+already concede that a different model slug reduces same-model self-evaluation
+bias without proving the errors independent; a model-authored gold verdict is
+that same problem one level earlier, where nothing downstream can correct it.
+
+**A scenario written from a known clause is contaminated too**, not just its
+fields. If the design description was composed to violate a specific clause, the
+answer is built into the question, and re-deriving the gold afterwards only
+returns to the same clause. Such an item is discarded rather than repaired.
+
+**A model may polish wording**, as long as it does not decide which clause or
+which verdict. Then `independent_path` remains true and the record stands — with
+one line in the report saying prose was model-assisted, because §8.1 already
+requires disclosing that annotation was single-annotator and that disclosure has
+to be complete.
+
+There is deliberately no `IndependentPath` member for a model proposal. Adding
+one to accommodate a draft would be widening the gate until it passes, which is
+the same move as raising a QA threshold to make a document parse.
+
+## Two checks the entry path enforces
+
+Both need the source, which is why `annotation add` requires `--manifest`,
+`--manifest-dir`, and `--xml` whenever a record carries gold.
+
+- **`unknown_gold_clause`** — a gold clause id that the named document does not
+  contain. Shape validation cannot see this; a stale or mistyped id would sit in
+  the set as a clause the retriever can never return, quietly depressing recall.
+- **`key_point_restates_clause`** — a criterion of eight tokens or more whose
+  vocabulary is more than 80% drawn from its gold clause. §8.1 permits factual
+  values and forbids reproducing wording as sentences; the threshold sits in the
+  wide gap measured on real drafts, between criteria written as judgement
+  standards at about 33% and one that preserved the clause's sentence at 93%.
+  The eight-token floor exists because three words can be entirely clause
+  vocabulary without reproducing any expression.
+
+A verdict label inside a key point's `factual_values` is refused by the contract
+itself, before the source is consulted: §8.1 keeps task-level gold and scoring
+criteria in separate fields, and a verdict in a key point makes an answer
+scoreable for producing the word rather than the reasoning.
+
 ## Targets
 
 | Set | Total | dev | locked | W1's share |
@@ -100,7 +156,8 @@ exists to expose.
 ```bash
 specpilot annotation template --level l1 > tmp/l1-dev-001.json
 # fill it in, then:
-specpilot annotation add --record tmp/l1-dev-001.json --annotation-dir artifacts/restricted/annotations
+specpilot annotation add --record tmp/l1-dev-001.json --annotation-dir artifacts/restricted/annotations \
+  --manifest "$SP_MANIFEST" --manifest-dir manifests/local/r0/source --xml "$SP_XML"
 ```
 
 The template is deliberately invalid as printed — empty question, no gold — so
@@ -115,7 +172,12 @@ What the contract will refuse, all of them worth knowing before you hit them:
 | `invalid_annotation_record` | Answerable with no gold, or no overlap figure |
 | `invalid_annotation_record` | Unanswerable carrying gold or an overlap figure |
 | `invalid_annotation_record` | `independent_path` not one of the four |
+| `invalid_annotation_record` | A verdict label in a key point's factual values |
 | `invalid_annotation_record` | Any field the contract does not declare |
+| `source_required_for_gold` | The record carries gold but no source was given |
+| `document_id_mismatch` | The record names a different document than the source |
+| `unknown_gold_clause` | A gold clause id the document does not contain |
+| `key_point_restates_clause` | A criterion reproducing its clause's wording |
 | `item_id_already_annotated` | That `item_id` already owns a different record |
 
 L2 additionally requires `claim_id`, `expected_verdict`, `proposed_verdict`, and
