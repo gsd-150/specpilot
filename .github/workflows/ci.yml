@@ -49,7 +49,7 @@ jobs:
       - run: python -m pytest tests/unit -q
 
   ledger:
-    name: ledger integration and fixture smoke
+    name: ledger and collection integration, fixture smoke
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -65,8 +65,17 @@ jobs:
           --health-interval 3s
           --health-timeout 3s
           --health-retries 20
+      # Pinned to the same tag compose.yaml runs. The collection tests assert a
+      # schema and a read-only-after-freeze posture, and both are server
+      # behaviour: testing them against a different build would be testing a
+      # different server than the one the corpus is frozen on.
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
     env:
       SPECPILOT_TEST_DSN: postgresql://specpilot:specpilot-ci-only@127.0.0.1:5432/specpilot_test
+      SPECPILOT_TEST_QDRANT_URL: http://127.0.0.1:6333
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,9 +83,28 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      # These targets refuse to run without a DSN rather than skipping, so a
-      # broken service container fails the job instead of quietly passing it.
+      # Waited for here rather than with a service health-cmd: the image has no
+      # curl, and `/readyz` is the condition the client actually needs. Failing
+      # here is louder than letting the tests open a connection to nothing.
+      - name: wait for qdrant
+        run: |
+          for attempt in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:6333/readyz > /dev/null; then
+              echo "qdrant ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "qdrant never became ready"
+          exit 1
+      # Every target here refuses to run without its dependency rather than
+      # skipping, so a broken service container fails the job instead of
+      # quietly passing it. integration-qdrant is listed separately even though
+      # integration-db already covers the directory: its `require-qdrant` guard
+      # is what proves the URL was set, and a silent skip here would let the
+      # frozen-collection release blocker look satisfied by nothing.
       - run: make integration-db
+      - run: make integration-qdrant
       - run: make fixture-smoke
 
   images:

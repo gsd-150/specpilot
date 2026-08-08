@@ -830,6 +830,8 @@ CI 至少运行：
 - fixture 语料上的端到端管线冒烟测试（检索、MCP 分发、预算、异常恢复、Verifier 确定性检查全部真跑，模型走 fake）；
 - Docker 镜像构建检查。
 
+> **[已补齐]** 上表漏了两类**服务依赖型**证据，而 §8.6 把它们列为硬发布阻断项：PostgreSQL 出站账本的原子预占/并发/恢复，以及冻结 Qdrant collection 的 schema、point count 与只读校验。前者 CI 一直在跑；后者此前**在 CI 里静默 skip** —— `ledger` job 只起了 postgres，`SPECPILOT_TEST_QDRANT_URL` 未设，8 个 collection 测试因此每次都跳过，而绿灯看起来毫无异样。现已按 compose 同一 tag（`qdrant/qdrant:v1.12.4`）加了 service，并显式跑 `make integration-qdrant` —— 该 target 在变量未设时**硬失败而不是跳过**，所以服务容器坏掉会让 job 红，而不是悄悄变绿。本地对同版本真实服务实测：设两个变量后 `tests/integration` 为 34 passed / 0 skipped（此前 26 passed / 8 skipped）。跑真实服务不违反“CI 不做模型推理、不下载权重”——Qdrant 不是模型，向量是测试内合成的确定性单位向量。
+
 **CI 不做任何模型推理，也不下载任何模型权重。** fixture 向量已预先提交（§4.6.2），LLM 走确定性 fake（§9.6）。这既保证测试可重复，也让 CI 时长与网络状况脱钩。
 
 **CI 的评测输出不得包含任何形似质量指标的数字**——它的通过标准是“没崩、schema 合法、拦截路径被触发过”，理由见 §8.0。
