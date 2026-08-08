@@ -17,6 +17,9 @@ data/inbox/
 data/inspections/
 artifacts/restricted/
 manifests/local/
+# Annotation drafts in progress. Records land in artifacts/restricted via
+# `annotation add`; the JSON being edited on the way there is scratch.
+tmp/
 *.local.manifest.json
 provider-snapshots/
 data/provider-snapshots/
