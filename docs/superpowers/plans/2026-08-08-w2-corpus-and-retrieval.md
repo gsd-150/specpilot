@@ -180,7 +180,7 @@ the 2% ceiling; orphan normative keywords 0 of 445 and 0 of 149.
 - Produces: `Bm25Tokenizer`, `Bm25Index.build(...)`, `.search(query, k)`, and
   frozen `Bm25Parameters(k1, b)` recorded with the index.
 
-- [ ] **Step 1: Write failing tokenizer and ranking tests**
+- [x] **Step 1: Write failing tokenizer and ranking tests**
 
 Assert `5.6.2` survives as one term, `Content-Length` as one term (and also
 contributes its parts, so a query saying "content length" still matches),
@@ -188,14 +188,28 @@ contributes its parts, so a query saying "content length" still matches),
 together. Assert IDF is computed over the frozen corpus and travels with the
 index, and that scores are stable across two builds of the same input.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, with the parameters frozen at their baseline**
+- [x] **Step 3: Implement, with the parameters frozen at their baseline**
 
 `k1` and `b` take standard baseline values and are recorded, not tuned. §8.2.3
 requires the pooling configuration to be reconstructible afterwards.
 
-- [ ] **Step 4: Verify GREEN and record term statistics**
+- [x] **Step 4: Verify GREEN and record term statistics**
+
+1924 units, 4599 distinct terms, built in 0.04 s, mean 39.8 terms per unit.
+Every high-signal compound survived: `5.6.2` at df 3, `obs-fold` 8, `206` 27,
+`transfer-encoding` 34, `content-length` 49, `http/1.1` 99. Splitting a dotted
+number never leaks its digits — `5` appears 4 times in the whole corpus, all of
+them bare numerals in prose.
+
+**A section cannot be found by its own number, and that is not a tokenizer
+bug.** Searching `5.6.2` reaches the three clauses that *cite* §5.6.2, not §5.6.2
+itself, because a section number is a locator and never appears in its own body
+text. Whether the number and section path join a unit's indexable text is a
+corpus-level decision that both routes must share, so it is settled in Task 4
+where that text is assembled — not here, where the index is deliberately
+agnostic about what it is given.
 
 ---
 
