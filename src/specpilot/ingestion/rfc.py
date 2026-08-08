@@ -42,8 +42,6 @@ _EXPECTED_ROOT = "rfc"
 _DOCTYPE = re.compile(r"<!DOCTYPE", re.IGNORECASE)
 _ENTITY_DECLARATION = re.compile(r"<!ENTITY", re.IGNORECASE)
 _EXTERNAL_ID = re.compile(r"\b(?:SYSTEM|PUBLIC)\b")
-_XML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-_PROCESSING_INSTRUCTION = re.compile(r"<\?(?!xml\s)[^>]*\?>")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,11 +99,41 @@ def read_rfc_snapshot(path: Path, limits: RfcLimits) -> RfcByteSnapshot:
         os.close(descriptor)
 
 
+def _has_non_xml_processing_instruction(text: str) -> bool:
+    """Scan XML lexical regions without letting their delimiters cross states."""
+    index = 0
+    while index < len(text):
+        if text.startswith("<!--", index):
+            end = text.find("-->", index + 4)
+            if end < 0:
+                return False
+            index = end + 3
+            continue
+        if text.startswith("<![CDATA[", index):
+            end = text.find("]]>", index + 9)
+            if end < 0:
+                return False
+            index = end + 3
+            continue
+        if text.startswith("<?", index):
+            end = text.find("?>", index + 2)
+            if end < 0:
+                return False
+            is_xml_declaration = text.startswith("<?xml", index) and (
+                index + 5 < len(text) and text[index + 5].isspace()
+            )
+            if not is_xml_declaration:
+                return True
+            index = end + 2
+            continue
+        index += 1
+    return False
+
+
 def _refuse_hostile_prologue(text: str) -> None:
     """Reject dangerous constructs before a parser ever sees the document."""
     root_start = text.find(f"<{_EXPECTED_ROOT}")
     prologue = text if root_start < 0 else text[:root_start]
-    text_without_comments = _XML_COMMENT.sub("", text)
 
     if _ENTITY_DECLARATION.search(prologue):
         # An external identifier inside an entity declaration is the more
@@ -115,7 +143,7 @@ def _refuse_hostile_prologue(text: str) -> None:
         raise UnsafeRfcError(RfcRejectionCode.ENTITY_DECLARATION)
     if _DOCTYPE.search(prologue):
         raise UnsafeRfcError(RfcRejectionCode.DOCTYPE)
-    if _PROCESSING_INSTRUCTION.search(text_without_comments):
+    if _has_non_xml_processing_instruction(text):
         raise UnsafeRfcError(RfcRejectionCode.PROCESSING_INSTRUCTION)
 
 

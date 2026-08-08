@@ -130,6 +130,22 @@ def test_a_comment_decoy_cannot_hide_a_later_processing_instruction(
     assert raised.value.code is RfcRejectionCode.PROCESSING_INSTRUCTION
 
 
+def test_comment_syntax_inside_processing_instruction_data_cannot_hide_it(
+    workspace: Path,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML.replace(
+        "\n<rfc",
+        "\n<?evil <!-- ?>\n<!-- closes -->\n<rfc",
+        1,
+    )
+    path = rfc_factory.write(workspace, "pi-comment-syntax.xml", xml)
+
+    with pytest.raises(UnsafeRfcError) as raised:
+        inspect_rfc_xml(path, RfcLimits())
+
+    assert raised.value.code is RfcRejectionCode.PROCESSING_INSTRUCTION
+
+
 def test_processing_instruction_shaped_text_inside_a_comment_is_allowed(
     workspace: Path,
 ) -> None:
@@ -143,6 +159,37 @@ def test_processing_instruction_shaped_text_inside_a_comment_is_allowed(
     inspection = inspect_rfc_xml(path, RfcLimits())
 
     assert inspection.root_tag == "rfc"
+
+
+def test_processing_instruction_shaped_text_inside_cdata_is_allowed(
+    workspace: Path,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML.replace(
+        "This paragraph exists so the tree has content.",
+        "<![CDATA[<?evil?>]]>",
+        1,
+    )
+    path = rfc_factory.write(workspace, "cdata-text.xml", xml)
+
+    inspection = inspect_rfc_xml(path, RfcLimits())
+
+    assert inspection.root_tag == "rfc"
+
+
+def test_a_processing_instruction_inside_element_content_is_refused(
+    workspace: Path,
+) -> None:
+    xml = rfc_factory.SAFE_RFC_XML.replace(
+        "\n  <middle>",
+        "\n  <?evil?>\n  <middle>",
+        1,
+    )
+    path = rfc_factory.write(workspace, "content-pi.xml", xml)
+
+    with pytest.raises(UnsafeRfcError) as raised:
+        inspect_rfc_xml(path, RfcLimits())
+
+    assert raised.value.code is RfcRejectionCode.PROCESSING_INSTRUCTION
 
 
 def test_an_oversized_document_is_refused_before_parsing(workspace: Path) -> None:
