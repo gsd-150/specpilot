@@ -56,6 +56,18 @@ When a record has gold, `annotation add` requires `--manifest`,
 - malformed records (`invalid_annotation_record`);
 - v1 or unknown schemas (`unsupported_annotation_schema`).
 
+| Refusal | Cause |
+|---|---|
+| `document_hash_mismatch` | The readable bounded snapshot does not match the manifest; XML is not interpreted. |
+| `unsupported_rfcxml_version` | The hash-matched XML is missing RFCXML `version="3"` or names another grammar version. |
+| `invalid_document_identity` | The hash-matched RFC has no unique valid RFC number/publication month. |
+| `document_id_mismatch` | The manifest or annotation names a different RFC. |
+| `document_version_mismatch` | The manifest or annotation names a different publication month. |
+
+The manifest hash, XML safety, grammar, and identity checks, plus all corpus
+and Gold work, consume one bounded `O_NOFOLLOW` in-memory snapshot. No later
+step reopens or reinterprets the path.
+
 Records contain no clause prose. Answerable records need at least one gold
 clause, a Gold-origin event, and `question_gold_jaccard`; key points remain
 criteria rather than quotations.
