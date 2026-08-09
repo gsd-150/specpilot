@@ -293,27 +293,27 @@ Report PostgreSQL/Qdrant skips as missing integration evidence.
 - Consumes frozen RFC snapshots, local BGE-M3 weights, and frozen Qdrant collection.
 - Produces one sealed 20-item run and zero L1 items awaiting adjudication.
 
-- [ ] **Step 1: Start or verify Qdrant and validate the collection**
+- [x] **Step 1: Start or verify Qdrant and validate the collection**
 
 Do not create or delete a collection during the audit. Refuse identity, schema,
 or point-count mismatches.
 
-- [ ] **Step 2: Register the production run once**
+- [x] **Step 2: Register the production run once**
 
 Confirm it names 20 items without printing source text.
 
-- [ ] **Step 3: Present all items and record author decisions**
+- [x] **Step 3: Present all items and record author decisions**
 
 The agent may operate the CLI and explain candidates. The author supplies every
 choice. For `l1-dev-010`, present existing paragraph 3 and candidate paragraph
 2; never append paragraph 2 automatically.
 
-- [ ] **Step 4: Seal and verify**
+- [x] **Step 4: Seal and verify**
 
 Required evidence: L1 `awaiting_adjudication=0`, pooling 20/20, blocked 0,
 sealed run, valid successor chains, and `0700`/`0600` permissions.
 
-- [ ] **Step 5: Commit sanitized documentation only**
+- [x] **Step 5: Commit sanitized documentation only**
 
 Record counts, timing, disagreements, added-gold count, and the consecutive-
 paragraph rule without questions, clause text, or candidate pools.

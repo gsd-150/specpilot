@@ -115,7 +115,9 @@ class DenseIndex:
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
 
-        client = QdrantClient(url=url)
+        # Qdrant is a local/private service. Host proxy settings must never
+        # redirect corpus inventory or vectors through an egress proxy.
+        client = QdrantClient(url=url, trust_env=False)
         if client.collection_exists(name):
             client.delete_collection(name)
         client.create_collection(
@@ -133,7 +135,11 @@ class DenseIndex:
     def open(cls, url: str, name: str, *, frozen: bool = False) -> DenseIndex:
         from qdrant_client import QdrantClient
 
-        return cls(name=name, _client=QdrantClient(url=url), _frozen=frozen)
+        return cls(
+            name=name,
+            _client=QdrantClient(url=url, trust_env=False),
+            _frozen=frozen,
+        )
 
     def freeze(self) -> None:
         self._frozen = True

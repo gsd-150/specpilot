@@ -368,7 +368,7 @@ the candidate hashes §8.2.4 requires.
 The store already refuses gold removal and already writes a successor rather
 than mutating. Pooling proposes into that, and no further.
 
-- [ ] **Step 4: Execute the run once gold exists** — OWNER: the author for every
+- [x] **Step 4: Execute the run once gold exists** — OWNER: the author for every
   adjudication; tooling may present candidates and record decisions only.
 
 ---

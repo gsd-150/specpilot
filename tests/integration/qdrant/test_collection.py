@@ -51,6 +51,20 @@ def test_a_created_collection_has_the_models_vector_width(
     assert index.vector_size() == VECTOR_SIZE
 
 
+def test_a_local_collection_ignores_host_proxy_settings(
+    index: DenseIndex,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+
+    reopened = DenseIndex.open(qdrant_url, index.name, frozen=True)
+
+    assert reopened.vector_size() == VECTOR_SIZE
+
+
 def test_upserted_points_are_counted(index: DenseIndex) -> None:
     index.upsert(
         [
