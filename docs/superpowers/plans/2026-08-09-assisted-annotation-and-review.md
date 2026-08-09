@@ -172,7 +172,7 @@ means structurally near: another clause in the same section, then a sibling
 section under the same parent, then the same top-level section. Never the whole
 document at random, and never anything a retriever ranked.
 
-- [ ] **Step 1: Write failing selection tests**
+- [x] **Step 1: Write failing selection tests**
 
 Assert distractors never include the gold clause; that they come from the
 nearest available structural tier and widen only when a tier is exhausted; that
@@ -182,9 +182,35 @@ the retriever must be unable to reach this even by mistake.
 
 - [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify against the frozen corpus**
+- [x] **Step 3: Implement and verify against the frozen corpus**
 
-Report the tier distribution actually used across a sample of gold clauses.
+Five tiers rather than three, because three could not be ordered consistently.
+Written as "same section, sibling section, top-level section" they invert for a
+gold in a top-level section: its own subsections are nearer than any sibling,
+yet they land in the widest tier. The tiers are therefore nested scopes of the
+source's own numbering — the gold's section, its parent, a higher ancestor, its
+top-level section, the rest of the document — so each contains the one before it
+and "widen only when exhausted" holds by construction rather than by care.
+`same_section` includes the gold section's subsections: §5.6.2 contains §5.6.2.1
+and a reader citing the outer number has cited both.
+
+One rule the plan did not name and the corpus needs: a distractor must come from
+the same document and version as the gold. A clause from the other RFC is not a
+plausible wrong answer, it is a giveaway.
+
+**Tier distribution, measured over every clause as gold in turn** — 1,559 golds
+in RFC 9110 and 348 in RFC 9112, three distractors each, seed `r1-2026-08`:
+
+| tier | RFC 9110 | RFC 9112 |
+| --- | --- | --- |
+| `same_section` | 4,355 (93.1%) | 961 (92.0%) |
+| `same_parent` | 322 (6.9%) | 83 (8.0%) |
+| `same_ancestor` / `same_top_level` / `same_document` | 0 | 0 |
+
+No gold anywhere in either document produced a short set, and none had to widen
+past its parent. The 7–8% that widen are the 48 single-clause sections. So the
+forced choice is between clauses that sit within one section of each other in
+every case — which is the point, and was not guaranteed before it was measured.
 
 ---
 
