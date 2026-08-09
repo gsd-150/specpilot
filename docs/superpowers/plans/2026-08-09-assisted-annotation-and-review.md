@@ -85,6 +85,21 @@ workflow that sentence is no longer accurate and becomes:
 > deep-review sample size and the error rate found in it, whether drafted key
 > points were edited, and the full `gold_origin_chains` distribution.
 
+**Measured, for the first 20 L1 items** — these are the numbers that sentence
+takes, not placeholders:
+
+> 20 items drafted by `claude-opus-5` and adjudicated by one reviewer by forced
+> choice against three structurally selected distractors. 19 accepted as
+> proposed, 1 gold changed, 0 rejected, 0 drafted key points edited; acceptance
+> rate 0.95. A pre-registered sample of 5 (rate 0.25, salt `r1-2026-08`,
+> committed before the pass) was read against the full source: 5 of 5 confirmed
+> the gold complete, 0 additional clauses found, median 91s and minimum 34s per
+> read. **0 errors in 5 reads bounds the gold error rate below 45% at 95%
+> one-sided confidence** — enough to exclude a badly wrong gold, not enough to
+> call it verified. Gold origin chain for every answerable item:
+> `model_proposal@claude-opus-5 > human_source_review`. No inter-annotator
+> agreement exists for any item.
+
 Two limits go in the same paragraph, not in a footnote:
 
 1. **Different vendor is not independent error.** The drafter is
@@ -536,19 +551,50 @@ Four decisions in it:
   — a terminal can be left open — but skipping currently costs nothing at all,
   and that is the whole difference.
 
-Until findings exist for the sample, the §8.1 disclosure may not claim a
-deep-review sample, and the 0.95 acceptance rate stands unseparated between "the
-proposals were good" and "the review was shallow".
+The sample now has findings, so the §8.1 disclosure may claim one — bounded as
+Step 2 below bounds it.
 
 The timings matter as much as the records. Product plan §11 now says completion
 is determined entirely by annotation throughput and that the throughput has
 never been measured. This pass measures the throughput of the workflow that will
 actually be used, not of the one that produced nothing.
 
-- [ ] **Step 2: Deep-review the sampled subset against the frozen source**
+- [x] **Step 2: Deep-review the sampled subset against the frozen source**
 
-The sample is already chosen. Read the full section, not just the candidates,
-and record what the deep read found — including finding nothing.
+All five, 13m41s. `gold_complete` on every one, no gold added, no question
+flagged. `deep_review_coverage` is 1.0 and this time it is computed from
+findings.
+
+**Giving the read somewhere to land is what made it happen.** The same five
+items, under the choice pass and then under the deep pass:
+
+| item | scope | choice | deep | s/clause |
+| --- | --- | ---: | ---: | ---: |
+| `l1-dev-007` | §14.2, 13 ¶ | 14s | **483s** | 37.2 |
+| `l1-dev-008` | §14.5, 4 ¶ | 15s | 163s | 40.8 |
+| `l1-locked-004` | search, 8 hits | 24s | 91s | 11.4 |
+| `l1-locked-001` | §15.5.17, 6 ¶ | 30s | 50s | 8.3 |
+| `l1-locked-002` | §7.6.2, 5 ¶ | 38s | **34s** | 6.8 |
+
+The largest section went from 14 seconds to eight minutes. Nothing about the
+reviewer changed between the two passes; what changed is that the second one
+could not be completed without producing a finding.
+
+**The per-clause rate still spans six-fold, and the report should say so.** The
+first two reads ran at ~38-41 s/clause and the rest at 7-11. Five points cannot
+distinguish attention decay from those sections simply being shorter per
+paragraph, and `l1-locked-002` at 34 seconds total is the one a reader should be
+allowed to weigh. That is why `deep_review_seconds_min` is reported beside the
+median rather than only the median.
+
+**What 0 errors in 5 reads is worth, stated before anyone rounds it up.** The
+95% one-sided upper bound on the gold error rate is **45%** (Clopper-Pearson;
+the rule of three gives 60%). So this sample rules out a catastrophically wrong
+gold and establishes nothing stronger. It moves the 0.95 acceptance rate from
+uninterpretable to weakly supported — the deep reads did happen and found
+nothing — and it does not make the gold verified. Widening that bound
+meaningfully needs a bigger sample, not a better argument: 0 in 20 would bound
+it at 14%.
 
 ---
 
