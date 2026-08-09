@@ -22,7 +22,7 @@ from specpilot.corpus.freezing import (
 )
 from specpilot.corpus.indexable import IndexTextPolicy
 from specpilot.embedding.throughput import PIPELINE_VERSION
-from specpilot.manifests.corpus_store import CorpusManifestStore
+from specpilot.manifests.corpus_store import CorpusManifestStore, CorpusPredecessorError
 from specpilot.manifests.store import ManifestStore
 from specpilot.retrieval.dense import (
     DenseRecord,
@@ -105,6 +105,7 @@ class FreezeFixture:
     request: FreezeCorpusRequest
     source_store: ManifestStore
     corpus_store: CorpusManifestStore
+    corpus_root: Path
     dense: FakeDense
 
 
@@ -177,10 +178,12 @@ def freeze_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FreezeFix
         "specpilot.corpus.freezing.DenseSnapshotAdmin.open",
         lambda url, name, store, lease: dense,
     )
+    corpus_root = tmp_path / "corpus"
     return FreezeFixture(
         request=request,
         source_store=source_store,
-        corpus_store=CorpusManifestStore(tmp_path / "corpus"),
+        corpus_store=CorpusManifestStore(corpus_root),
+        corpus_root=corpus_root,
         dense=dense,
     )
 
@@ -300,9 +303,63 @@ def test_source_bytes_are_bound_before_parsing(freeze_fixture: FreezeFixture) ->
     _assert_refusal("corpus_source_mismatch", lambda: _freeze(freeze_fixture))
 
 
-def test_duplicate_document_identity_is_refused(freeze_fixture: FreezeFixture) -> None:
+def test_duplicate_document_identity_is_refused(
+    freeze_fixture: FreezeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     first = freeze_fixture.request.sources[0]
-    request = replace(freeze_fixture.request, sources=(first, first))
+    first_manifest = freeze_fixture.source_store.read_source(first.manifest_id)
+    duplicate_manifest = freeze_fixture.source_store.create_source_v2(
+        RfcSourceManifestDraft(
+            document_id=first_manifest.document_id,
+            document_version=first_manifest.document_version,
+            text_url="https://mirror.example.test/duplicate.txt",
+            xml_url="https://mirror.example.test/duplicate.xml",
+            text_sha256="e" * 64,
+            xml_sha256=hashlib.sha256(first.xml_path.read_bytes()).hexdigest(),
+            downloaded_at=datetime(2026, 8, 10, tzinfo=UTC),
+            created_at=datetime(2026, 8, 10, 1, tzinfo=UTC),
+        )
+    )
+    duplicate = CorpusSourceInput(duplicate_manifest.manifest_id, first.xml_path)
+    assert duplicate.manifest_id != first.manifest_id
+    assert duplicate_manifest.document_id == first_manifest.document_id
+    request = replace(freeze_fixture.request, sources=(first, duplicate))
+    monkeypatch.setattr(
+        "specpilot.corpus.freezing.LocalCorpus.load",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate identity reached local corpus construction")
+        ),
+    )
+    _assert_refusal("corpus_source_mismatch", lambda: _freeze(freeze_fixture, request))
+
+
+@pytest.mark.parametrize(
+    ("document_id", "document_version"),
+    [("ietf-rfc-7777", "2022-06"), ("ietf-rfc-9999", "2022-07")],
+)
+def test_source_manifest_identity_must_match_parsed_xml(
+    freeze_fixture: FreezeFixture,
+    document_id: str,
+    document_version: str,
+) -> None:
+    source = freeze_fixture.request.sources[0]
+    mismatch = freeze_fixture.source_store.create_source_v2(
+        RfcSourceManifestDraft(
+            document_id=document_id,
+            document_version=document_version,
+            text_url="https://example.test/mismatch.txt",
+            xml_url="https://example.test/mismatch.xml",
+            text_sha256="d" * 64,
+            xml_sha256=hashlib.sha256(source.xml_path.read_bytes()).hexdigest(),
+            downloaded_at=datetime(2026, 8, 11, tzinfo=UTC),
+            created_at=datetime(2026, 8, 11, 1, tzinfo=UTC),
+        )
+    )
+    request = replace(
+        freeze_fixture.request,
+        sources=(CorpusSourceInput(mismatch.manifest_id, source.xml_path),),
+    )
     _assert_refusal("corpus_source_mismatch", lambda: _freeze(freeze_fixture, request))
 
 
@@ -401,6 +458,30 @@ def test_changed_collection_requires_explicit_successor(
     assert successor.manifest.predecessor_manifest_id == first.manifest.manifest_id
     assert successor.manifest.manifest_id != first.manifest.manifest_id
     assert freeze_fixture.dense.snapshot_calls == 2
+
+
+def test_verify_leaves_corrupt_predecessor_graph_as_raw_storage_error(
+    freeze_fixture: FreezeFixture,
+) -> None:
+    first = _freeze(freeze_fixture)
+    record = freeze_fixture.dense.records[0]
+    freeze_fixture.dense.records = (
+        replace(record, vector=(1.0, *record.vector[1:])),
+        *freeze_fixture.dense.records[1:],
+    )
+    successor = _freeze(
+        freeze_fixture,
+        replace(
+            freeze_fixture.request,
+            predecessor_manifest_id=first.manifest.manifest_id,
+            created_at=freeze_fixture.request.created_at + timedelta(hours=1),
+        ),
+    )
+    (freeze_fixture.corpus_root / f"{first.manifest.manifest_id}.json").unlink()
+
+    with pytest.raises(CorpusPredecessorError, match="does not exist") as caught:
+        _verify(freeze_fixture, successor.manifest.manifest_id)
+    assert not isinstance(caught.value, CorpusManifestRefusal)
 
 
 def test_publication_crash_leaves_orphan_non_authoritative(

@@ -458,8 +458,6 @@ def verify_corpus(
             manifest.collection_name,
             manifest.predecessor_manifest_id,
         )
-        if reconstructed.predecessor_manifest_id != manifest.predecessor_manifest_id:
-            _refuse("corpus_predecessor_mismatch")
         if reconstructed != manifest.intent:
             _refuse("corpus_configuration_mismatch")
     except BaseException:
