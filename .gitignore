@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.worktrees/
 
 # Restricted and machine-local data
 data/real/
