@@ -151,6 +151,93 @@ class Adjudication(_FrozenModel):
     note: AdjudicationNote
 
 
+class ReviewOutcome(StrEnum):
+    ACCEPTED_AS_PROPOSED = "accepted_as_proposed"
+    GOLD_CHANGED = "gold_changed"
+    ITEM_REJECTED = "item_rejected"
+
+
+class ReviewDecision(_FrozenModel):
+    """What a forced-choice review of a drafted proposal decided.
+
+    `gold_origins` already records that a human reviewed a model proposal. It
+    does not record what the review found, so a reviewer who approves
+    everything and one who catches real errors leave identical records — and
+    gold is the ruler, so a wrong gold makes every downstream metric wrong with
+    nothing to catch it.
+
+    This is a record beside the annotation rather than a field on it, for two
+    reasons found by trying the other way first. Annotations are content
+    addressed, so adding any field — even one defaulting to null — changes the
+    canonical bytes and makes every stored record unreadable. And an
+    annotation's identity should not move because somebody reviewed it: the
+    question, the gold, and the key points are what the item *is*, while a
+    review is a later judgement about it by a different actor.
+
+    There is no note field. A free-text justification is unfalsifiable, invites
+    clause prose into a committable record, and lets a shallow review look
+    thorough. What the report needs is how often the reviewer disagreed, and
+    that is a number.
+    """
+
+    schema_version: Literal["annotation-review/v1"] = "annotation-review/v1"
+    # Not `annotation_id`: `canonical_json` strips that name as a record's own
+    # content ID, so a foreign key spelled that way is silently dropped from
+    # the bytes it is hashed over and from the file written.
+    reviewed_annotation_id: Sha256
+    item_id: Identifier
+    outcome: ReviewOutcome
+    candidates_shown: Annotated[int, Field(ge=0)]
+    chose_proposal: StrictBool
+    reviewer_id: Identifier
+    proposal_producer: Identifier
+    key_points_edited: StrictBool = False
+    deep_reviewed: StrictBool = False
+    unanswerable: StrictBool = False
+    review_id: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _verify_review_id(self) -> Self:
+        if self.review_id is not None:
+            from specpilot.manifests.canonical import canonical_sha256
+
+            if self.review_id != canonical_sha256(self):
+                raise ValueError("review_id does not match canonical content")
+        return self
+
+    @model_validator(mode="after")
+    def _one_fact_not_two(self) -> Self:
+        """`chose_proposal` and the outcome say the same thing, so they agree.
+
+        Two fields that can drift apart eventually do, and the acceptance rate
+        is computed from one of them.
+        """
+        accepted = self.outcome is ReviewOutcome.ACCEPTED_AS_PROPOSED
+        if self.chose_proposal != accepted:
+            raise ValueError(
+                "chose_proposal must be true exactly when the outcome is "
+                "accepted_as_proposed"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_choice_needs_something_to_choose_between(self) -> Self:
+        """Two candidates minimum, except where there is nothing to choose.
+
+        An unanswerable item's review confirms that no clause in the document
+        answers the question, which is a different act with no candidate set.
+        """
+        if self.unanswerable:
+            if self.candidates_shown:
+                raise ValueError(
+                    "an unanswerable item's review has no candidates to show"
+                )
+            return self
+        if self.candidates_shown < 2:
+            raise ValueError("a choice between fewer than two candidates is not one")
+        return self
+
+
 class L1Annotation(_FrozenModel):
     schema_version: Literal["annotation-l1/v2"] = "annotation-l1/v2"
     item_id: Identifier

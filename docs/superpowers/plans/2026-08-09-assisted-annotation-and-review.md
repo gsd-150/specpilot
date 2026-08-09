@@ -126,21 +126,35 @@ rejected item is a real record with no gold, no overlap figure, and no gold
 origins — the same shape an unanswerable L1 item already has, distinguished by
 its review outcome rather than by absence.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Assert a record whose `gold_origins` contain `model_proposal` requires a
 `review`; that a human-only record does not; that `item_rejected` forbids gold
 and `accepted_as_proposed` requires it; that `chose_proposal` is false whenever
 the outcome is `gold_changed`; and that no review field can hold prose.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, leaving v2 schema literals unchanged**
+- [x] **Step 3: Implement, leaving v2 schema literals unchanged**
 
-The schema version does not move. `review` is an optional field on the same v2
-models, so the three existing records stay valid and stay readable — they record
-a review that happened under the older, weaker discipline, and that is exactly
-what they should continue to say.
+**Corrected during execution: the decision is a record beside the annotation,
+not a field on it.** Adding `review` to the model was tried first and broke all
+three stored records immediately. `canonical_sha256` hashes every field, so a
+new field — even one defaulting to null — changes the canonical bytes and the
+stored `annotation_id` no longer matches. Content addressing makes any field
+addition a schema change, which the plan asserted it would not be.
+
+Separating it turned out to be the better shape anyway, for a reason the schema
+problem only surfaced: an annotation's identity should not move because somebody
+reviewed it. The question, the gold, and the key points are what the item *is*;
+a review is a later judgement about it by a different actor. Keeping them apart
+also makes a re-review an additional record rather than an edit, so a change of
+mind leaves both decisions behind.
+
+One trap found on the way: `canonical_json` strips a fixed set of field names —
+`manifest_id` and `annotation_id` — as a record's own content ID. A foreign key
+spelled `annotation_id` is therefore dropped from both the hash and the file.
+The field is `reviewed_annotation_id`, and the reason is a comment beside it.
 
 ---
 
@@ -166,7 +180,7 @@ selection is deterministic under a seed so a review can be reconstructed; and
 that the function's signature admits no ranking, score, or query input at all —
 the retriever must be unable to reach this even by mistake.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 - [ ] **Step 3: Implement and verify against the frozen corpus**
 
@@ -192,7 +206,7 @@ answer; that the realised rate over many ids approaches the configured one; and
 that changing the salt changes the sample, so the salt has to be recorded with
 the evaluation set.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 - [ ] **Step 3: Implement, with the rate and salt recorded, not hard-coded**
 
@@ -225,7 +239,7 @@ yields `item_rejected` with no gold; that a deep-review item is labelled as such
 before the choice is taken; and that the proposal file is never treated as a
 record.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 - [ ] **Step 3: Implement and verify GREEN**
 
@@ -246,7 +260,7 @@ coverage is reported against the configured rate so an under-sampled set is
 visible; and that `key_points_edited` is counted. Assert none of these appear
 anywhere near a retrieval or answer figure in the output.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 - [ ] **Step 3: Implement and verify GREEN**
 
