@@ -50,13 +50,14 @@ cleans up only each test's own collection and snapshots.
 The implementation sequence is recorded by commits `896df9b`, `4d610c3`,
 `ba8bb51`, `aeccc00`, `c70d564`, `9acba5d`, `2b49fd5`, `c87cd4c`, `14fcba6`,
 `762fd34`, `148b9e5`, `ea75f66`, `baa3154`, `6da2c93`, `419d36b`, `5b72284`,
-`cfdcba7`, and `8b1f876`. Task 9 adds the live freeze tests and this completion
-record.
+`cfdcba7`, `8b1f876`, `b60357c`, `bc89b75`, `7e682c6`, and `ff488ab`.
+Task 9 adds the live freeze tests and this completion record; the final commit
+closes the CLI storage/lease/contract failure boundary found by broad review.
 
 - Ruff: all checks passed.
 - mypy: no issues in 63 source files.
-- Unit plus CLI: 1,152 passed.
-- Full suite with live Qdrant: 1,179 passed, 25 skipped.
+- Unit plus CLI: 1,174 passed.
+- Full suite with live Qdrant: 1,201 passed, 25 skipped.
 - Mandatory Qdrant integration: 17 passed, 0 skipped.
 
 The 25 full-suite skips are the documented PostgreSQL integration cases whose
