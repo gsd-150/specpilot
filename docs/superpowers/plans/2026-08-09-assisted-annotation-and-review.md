@@ -462,7 +462,55 @@ the rate and salt rather than trusting what a run happened to record. Three of
 the five are `locked` items, which is where a wrong gold is most expensive: the
 locked split is not looked at again.
 
-- [ ] **Step 1: Review the 20 proposals and record the wall-clock time**
+- [x] **Step 1: Review the 20 proposals and record the wall-clock time**
+
+20 of 20 reviewed on 2026-08-09. 19 accepted as proposed, 1 gold changed, 0
+rejected, 0 key points edited. L1 reaches 20 of 40: dev 15 of 15, locked 5 of 25.
+
+**Throughput, the figure §11 said had never been measured: 22 seconds median per
+item**, 8m11s for 19 items. The twentieth, `l1-dev-001`, recorded 2179s and is
+the session where the runner was being debugged; it is excluded as an artifact
+rather than averaged in, which would have reported 172s and described nothing
+that happened. At ~25s per item the remaining 20 L1 items are well under an
+hour of adjudication, so annotation throughput is no longer the schedule's
+binding constraint. §11 needs rewriting around that.
+
+**The one disagreement is a real find, and it is about the corpus rather than
+the drafting.** `l1-dev-010` asks which header fields a 304 must carry over from
+the 200 it replaces. The proposal named §15.4.5 ¶2, which states the obligation
+and ends in a colon; the reviewer chose ¶3, which is the list the colon leads
+into — `Content-Location, Date, ETag, and Vary`. Neither is wrong and neither is
+sufficient: RFC 9110 splits the requirement across two paragraph anchors and a
+clause is a paragraph, so the correct gold is the pair. A forced choice over one
+clause cannot express that. The item now carries ¶3 alone at overlap 0.0, which
+means a system that retrieves ¶2 and answers correctly scores as a retrieval
+miss. Owed: a §8.2.3 adjudication adding ¶2, and a rule for requirements that
+span consecutive paragraphs.
+
+- [ ] **Step 1a (new): give the deep read somewhere to land**
+
+**`deep_review_coverage: 1.0` is not evidence that a deep review happened, and
+that is a defect in this plan's own design.** Sampled items took a median of 24
+seconds against 22 for the rest — indistinguishable. `l1-dev-007` sits in §14.2,
+thirteen paragraphs long, and was answered in 14 seconds. Whatever the reviewer
+did, it was not reading the section.
+
+The cause is that `deep_reviewed` records that the banner was printed, not what a
+deep read found. A reviewer who ignores it leaves a byte-identical record, and
+the report then says coverage is complete. That is exactly the defect this plan
+was written to fix — "the chain records that review happened and not what it
+found" — reproduced one level down, by me, in the mechanism meant to be the
+check on everything else. Step 2 below asks to record what the deep read found
+"including finding nothing", and there is no field that holds it.
+
+A boolean cannot be repaired into evidence. What the deep read has to produce is
+a separate recorded act with a finding in it, and it has to be a separate pass:
+asking someone to alternate between 20-second choices and 10-minute reads
+guarantees the reads lose.
+
+Until that exists, the §8.1 disclosure may not claim a deep-review sample, and
+the 0.95 acceptance rate stands unseparated between "the proposals were good"
+and "the review was shallow".
 
 The timings matter as much as the records. Product plan §11 now says completion
 is determined entirely by annotation throughput and that the throughput has
