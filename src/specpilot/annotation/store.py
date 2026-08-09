@@ -60,6 +60,7 @@ class AnnotationStore:
         added_gold_section_paths: tuple[str, ...],
         added_gold_origins: tuple[GoldOriginEvent, ...],
         adjudication: str,
+        question_gold_jaccard: float | None = None,
         removed_gold_clause_ids: tuple[str, ...] = (),
     ) -> Annotation:
         previous = self.read(annotation_id)
@@ -86,6 +87,11 @@ class AnnotationStore:
                 "gold_clause_ids": merged_ids,
                 "gold_section_paths": merged_paths,
                 "gold_origins": (*previous.gold_origins, *added_gold_origins),
+                "question_gold_jaccard": (
+                    previous.question_gold_jaccard
+                    if question_gold_jaccard is None
+                    else question_gold_jaccard
+                ),
                 "predecessor_annotation_id": annotation_id,
                 "adjudications": (
                     *previous.adjudications,

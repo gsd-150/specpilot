@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from specpilot.annotation.store import AnnotationStore
+from specpilot.contracts.annotation import GoldOriginEvent, L1Annotation
 from specpilot.retrieval.hybrid import FusedRanking, RouteRanking, RrfParameters
 from specpilot.retrieval.pooling import (
     PoolingApplication,
@@ -17,6 +19,7 @@ from specpilot.retrieval.pooling import (
     PoolingRun,
     PoolingStore,
     PoolingUnitFact,
+    apply_decision,
     build_pool,
     seal_run,
 )
@@ -60,7 +63,9 @@ def sample_run(*, item_id: str = "l1-dev-001", annotation: str = "1") -> Pooling
         items=(
             PoolingItem(
                 item_id=item_id,
-                annotation_id=digest(annotation),
+                annotation_id=(
+                    annotation if len(annotation) == 64 else digest(annotation)
+                ),
                 candidates=sample_pool(),
             ),
         ),
@@ -223,3 +228,161 @@ def test_tampered_run_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="ID does not match"):
         store.read_run(stored.run_id)
+
+
+def annotation(**overrides: object) -> L1Annotation:
+    values: dict[str, object] = {
+        "item_id": "l1-dev-001",
+        "split": "dev",
+        "question": "Which alpha and beta condition applies?",
+        "direction": "clause_first",
+        "content_origin": "model",
+        "label_origin": "mixed",
+        "document_id": "rfc9110",
+        "document_version": "2022-06",
+        "gold_clause_ids": (digest("existing-gold"),),
+        "gold_section_paths": ("HTTP Semantics > Existing",),
+        "key_points": ({"point_id": "kp-1", "criterion": "names the condition"},),
+        "expected_refusal": False,
+        "question_gold_jaccard": 0.0,
+        "gold_origins": (
+            {"origin": "model_proposal", "producer": "draft-model"},
+            {"origin": "human_source_review"},
+        ),
+    }
+    return L1Annotation(**{**values, **overrides})
+
+
+def application_fixture(tmp_path: Path) -> tuple[
+    PoolingStore,
+    AnnotationStore,
+    PoolingRun,
+    L1Annotation,
+    str,
+]:
+    annotations = AnnotationStore(tmp_path / "annotations")
+    root = annotations.create(annotation())
+    selected_text = "alpha beta gamma"
+    selected = PoolingUnitFact(
+        unit_id=digest("selected"),
+        document_id="rfc9110",
+        document_version="2022-06",
+        section_number="15.4.5",
+        section_path="HTTP Semantics > 15.4.5",
+        content_sha256=hashlib.sha256(selected_text.encode()).hexdigest(),
+    )
+    candidates = build_pool(
+        RouteRanking(route="bm25", unit_ids=(selected.unit_id,)),
+        RouteRanking(route="dense", unit_ids=(selected.unit_id,)),
+        units={selected.unit_id: selected},
+    )
+    run = PoolingStore(tmp_path / "pool").create_run(
+        PoolingRun(
+            source_manifest_ids=(digest("manifest"),),
+            bm25_fingerprint=digest("bm25"),
+            dense_collection="specpilot_fixture",
+            embedding_weights_sha256=digest("weights"),
+            vector_size=1024,
+            point_count=1,
+            items=(
+                PoolingItem(
+                    item_id=root.item_id,
+                    annotation_id=root.annotation_id,
+                    candidates=candidates,
+                ),
+            ),
+            author_id="chunxue",
+            created_at=datetime(2026, 8, 9, 8, 0, tzinfo=UTC),
+        )
+    )
+    return PoolingStore(tmp_path / "pool"), annotations, run, root, selected_text
+
+
+def test_gold_complete_creates_an_adjudication_only_successor(tmp_path: Path) -> None:
+    pool_store, annotations, run, root, selected_text = application_fixture(tmp_path)
+    review = decision(run, PoolingOutcome.GOLD_COMPLETE)
+
+    successor = apply_decision(
+        pool_store,
+        annotations,
+        run,
+        review,
+        unit_texts={
+            root.gold_clause_ids[0]: "unrelated existing clause",
+            run.items[0].candidates[0].unit_id: selected_text,
+        },
+    )
+
+    assert successor.gold_clause_ids == root.gold_clause_ids
+    assert successor.predecessor_annotation_id == root.annotation_id
+    assert successor.adjudications[-1].candidate_origin == "pooling"
+    assert len(pool_store.read_decisions(run.run_id)) == 1
+    assert len(pool_store.read_applications(run.run_id)) == 1
+
+
+def test_gold_extension_is_add_only_and_recomputes_overlap(tmp_path: Path) -> None:
+    pool_store, annotations, run, root, selected_text = application_fixture(tmp_path)
+    review = decision(run, PoolingOutcome.GOLD_EXTENDED).model_copy(
+        update={"selected_unit_ids": (run.items[0].candidates[0].unit_id,)}
+    )
+    review = PoolingDecision.model_validate(review.model_dump(exclude={"decision_id"}))
+
+    successor = apply_decision(
+        pool_store,
+        annotations,
+        run,
+        review,
+        unit_texts={
+            root.gold_clause_ids[0]: "unrelated existing clause",
+            run.items[0].candidates[0].unit_id: selected_text,
+        },
+    )
+
+    assert successor.gold_clause_ids == (
+        root.gold_clause_ids[0],
+        run.items[0].candidates[0].unit_id,
+    )
+    assert successor.question_gold_jaccard == pytest.approx(2 / 7)
+    assert successor.gold_origins[-3:] == (
+        GoldOriginEvent(origin="bm25_retrieval", producer=run.bm25_fingerprint),
+        GoldOriginEvent(origin="dense_retrieval", producer=run.dense_collection),
+        GoldOriginEvent(origin="human_source_review"),
+    )
+
+
+def test_an_extension_cannot_select_existing_gold(tmp_path: Path) -> None:
+    pool_store, annotations, run, root, selected_text = application_fixture(tmp_path)
+    candidate = run.items[0].candidates[0]
+    rooted = annotations.create(
+        annotation(
+            item_id="l1-dev-002",
+            gold_clause_ids=(candidate.unit_id,),
+            gold_section_paths=(candidate.section_path,),
+        )
+    )
+    changed_run = PoolingRun(
+        **run.model_dump(
+            exclude={"run_id", "items"},
+        ),
+        items=(
+            PoolingItem(
+                item_id=rooted.item_id,
+                annotation_id=rooted.annotation_id,
+                candidates=(candidate,),
+            ),
+        ),
+    )
+    changed_store = PoolingStore(tmp_path / "other-pool")
+    changed_run = changed_store.create_run(changed_run)
+    review = decision(changed_run, PoolingOutcome.GOLD_EXTENDED)
+
+    with pytest.raises(ValueError, match="already established"):
+        apply_decision(
+            changed_store,
+            annotations,
+            changed_run,
+            review,
+            unit_texts={candidate.unit_id: selected_text},
+        )
+
+    assert changed_store.read_decisions(changed_run.run_id) == ()

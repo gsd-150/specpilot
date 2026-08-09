@@ -17,8 +17,10 @@ from typing import Annotated, Literal, Self, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from specpilot.contracts.annotation import SectionPath
+from specpilot.annotation.store import Annotation, AnnotationStore
+from specpilot.contracts.annotation import GoldOrigin, GoldOriginEvent, SectionPath
 from specpilot.contracts.manifests import Identifier, Sha256
+from specpilot.corpus.overlap import question_gold_jaccard
 from specpilot.retrieval.hybrid import RouteRanking
 
 _MAX_RECORD_BYTES = 512 * 1024
@@ -290,11 +292,112 @@ class PoolingStore:
             "pooling run",
         )
 
+    def create_decision(self, decision: PoolingDecision) -> PoolingDecision:
+        directory = self._scoped_directory("decisions", decision.run_id)
+        for path in sorted(directory.glob("*.json")):
+            existing = self._read(
+                path,
+                PoolingDecision,
+                "decision_id",
+                path.stem,
+                "pooling decision",
+            )
+            if existing.item_id != decision.item_id:
+                continue
+            if existing.decision_id != decision.decision_id:
+                raise ValueError("that item already owns a different decision")
+            return existing
+        decision_id = cast(str, decision.decision_id)
+        self._write(
+            directory / f"{decision_id}.json",
+            _record_bytes(decision, "decision_id"),
+        )
+        return self._read(
+            directory / f"{decision_id}.json",
+            PoolingDecision,
+            "decision_id",
+            decision_id,
+            "pooling decision",
+        )
+
+    def read_decisions(self, run_id: str) -> tuple[PoolingDecision, ...]:
+        directory = self._directory / "decisions" / run_id
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            self._read(
+                path,
+                PoolingDecision,
+                "decision_id",
+                path.stem,
+                "pooling decision",
+            )
+            for path in sorted(directory.glob("*.json"))
+        )
+
+    def create_application(
+        self,
+        run_id: str,
+        application: PoolingApplication,
+    ) -> PoolingApplication:
+        decisions = {item.decision_id for item in self.read_decisions(run_id)}
+        if application.decision_id not in decisions:
+            raise ValueError("application names an unknown pooling decision")
+        directory = self._scoped_directory("applications", run_id)
+        for path in sorted(directory.glob("*.json")):
+            existing = self._read(
+                path,
+                PoolingApplication,
+                "application_id",
+                path.stem,
+                "pooling application",
+            )
+            if existing.decision_id != application.decision_id:
+                continue
+            if existing.application_id != application.application_id:
+                raise ValueError("that decision already owns a different application")
+            return existing
+        application_id = cast(str, application.application_id)
+        self._write(
+            directory / f"{application_id}.json",
+            _record_bytes(application, "application_id"),
+        )
+        return self._read(
+            directory / f"{application_id}.json",
+            PoolingApplication,
+            "application_id",
+            application_id,
+            "pooling application",
+        )
+
+    def read_applications(self, run_id: str) -> tuple[PoolingApplication, ...]:
+        directory = self._directory / "applications" / run_id
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            self._read(
+                path,
+                PoolingApplication,
+                "application_id",
+                path.stem,
+                "pooling application",
+            )
+            for path in sorted(directory.glob("*.json"))
+        )
+
     def _prepare_directory(self, child: Path) -> None:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._directory.chmod(0o700)
         child.mkdir(parents=True, exist_ok=True)
         child.chmod(0o700)
+
+    def _scoped_directory(self, category: str, run_id: str) -> Path:
+        category_path = self._directory / category
+        self._prepare_directory(category_path)
+        scoped = category_path / run_id
+        scoped.mkdir(parents=False, exist_ok=True)
+        scoped.chmod(0o700)
+        return scoped
 
     @staticmethod
     def _write(path: Path, data: bytes) -> None:
@@ -343,6 +446,95 @@ class PoolingStore:
         return record
 
 
+def apply_decision(
+    pool_store: PoolingStore,
+    annotation_store: AnnotationStore,
+    run: PoolingRun,
+    decision: PoolingDecision,
+    *,
+    unit_texts: Mapping[str, str],
+) -> Annotation:
+    """Apply one human decision as an add-only annotation successor."""
+    if decision.run_id != run.run_id:
+        raise ValueError("decision does not belong to this run")
+    registered = {item.item_id: item for item in run.items}
+    item = registered.get(decision.item_id)
+    if item is None:
+        raise ValueError("decision names an unregistered item")
+    if decision.reviewed_annotation_id != item.annotation_id:
+        raise ValueError("decision names a stale annotation head")
+    if decision.outcome is PoolingOutcome.AUDIT_BLOCKED:
+        raise ValueError("a blocked decision cannot be applied")
+
+    previous = annotation_store.read(decision.reviewed_annotation_id)
+    if previous.item_id != decision.item_id:
+        raise ValueError("annotation head belongs to another item")
+    candidates = {candidate.unit_id: candidate for candidate in item.candidates}
+    if set(decision.selected_unit_ids) - set(candidates):
+        raise ValueError("decision selects an unregistered candidate")
+    if set(decision.selected_unit_ids) & set(previous.gold_clause_ids):
+        raise ValueError("selected gold is already established")
+
+    selected = tuple(candidates[unit_id] for unit_id in decision.selected_unit_ids)
+    for candidate in selected:
+        text = unit_texts.get(candidate.unit_id)
+        if text is None:
+            raise ValueError("selected candidate text is unavailable")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != candidate.content_sha256:
+            raise ValueError("selected candidate content hash changed")
+
+    overlap = previous.question_gold_jaccard
+    origins: list[GoldOriginEvent] = []
+    if selected:
+        gold_texts: list[str] = []
+        for unit_id in (*previous.gold_clause_ids, *decision.selected_unit_ids):
+            text = unit_texts.get(unit_id)
+            if text is None:
+                raise ValueError("gold clause text is unavailable")
+            gold_texts.append(text)
+        overlap = question_gold_jaccard(previous.question, gold_texts)
+        routes = {route for candidate in selected for route in candidate.route_ranks}
+        if "bm25" in routes:
+            origins.append(
+                GoldOriginEvent(
+                    origin=GoldOrigin.BM25_RETRIEVAL,
+                    producer=run.bm25_fingerprint,
+                )
+            )
+        if "dense" in routes:
+            origins.append(
+                GoldOriginEvent(
+                    origin=GoldOrigin.DENSE_RETRIEVAL,
+                    producer=run.dense_collection,
+                )
+            )
+        origins.append(GoldOriginEvent(origin=GoldOrigin.HUMAN_SOURCE_REVIEW))
+
+    stored_decision = pool_store.create_decision(decision)
+    successor = annotation_store.amend(
+        decision.reviewed_annotation_id,
+        added_gold_clause_ids=decision.selected_unit_ids,
+        added_gold_section_paths=tuple(
+            candidate.section_path for candidate in selected
+        ),
+        added_gold_origins=tuple(origins),
+        adjudication=(
+            "pooling audit found additional gold"
+            if selected
+            else "pooling audit confirmed the existing gold"
+        ),
+        question_gold_jaccard=overlap,
+    )
+    pool_store.create_application(
+        run.run_id,
+        PoolingApplication(
+            decision_id=cast(str, stored_decision.decision_id),
+            successor_annotation_id=cast(str, successor.annotation_id),
+        ),
+    )
+    return successor
+
+
 __all__ = [
     "PoolingApplication",
     "PoolingCandidate",
@@ -353,6 +545,7 @@ __all__ = [
     "PoolingSeal",
     "PoolingStore",
     "PoolingUnitFact",
+    "apply_decision",
     "build_pool",
     "seal_run",
 ]
