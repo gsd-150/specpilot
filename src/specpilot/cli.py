@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -100,7 +100,21 @@ from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_doc
 from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
+from specpilot.retrieval.dense import DenseIndex
+from specpilot.retrieval.hybrid import RouteRanking
 from specpilot.retrieval.local import LocalCorpus
+from specpilot.retrieval.pooling import (
+    PoolingCandidate,
+    PoolingDecision,
+    PoolingItem,
+    PoolingOutcome,
+    PoolingRun,
+    PoolingStore,
+    PoolingUnitFact,
+    apply_decision,
+    build_pool,
+    seal_run,
+)
 from specpilot.rfc.structure import extract_structure
 
 # Exit codes, matching the ingestion worker: 2 is a refused input or policy
@@ -1226,6 +1240,355 @@ def _annotation_deep_review(arguments: argparse.Namespace) -> int:
     )
 
 
+def _pool_sources(
+    arguments: argparse.Namespace,
+) -> tuple[tuple[RfcSourceManifest, VerifiedRfc], ...] | str:
+    manifests: list[str] = arguments.manifest
+    xml_paths: list[Path] = arguments.xml
+    if len(manifests) != len(xml_paths):
+        return "source_pair_count_mismatch"
+    sources: list[tuple[RfcSourceManifest, VerifiedRfc]] = []
+    for manifest_id, xml_path in zip(manifests, xml_paths, strict=True):
+        scoped = argparse.Namespace(
+            **{
+                **vars(arguments),
+                "manifest": manifest_id,
+                "xml": xml_path,
+            }
+        )
+        source = _frozen_source(scoped)
+        if isinstance(source, str):
+            return source
+        sources.append((source.manifest, source.document))
+    return tuple(sources)
+
+
+def _annotation_heads(directory: Path) -> tuple[L1Annotation, ...]:
+    records = tuple(AnnotationStore(directory).iter_records())
+    predecessors = {
+        record.predecessor_annotation_id
+        for record in records
+        if record.predecessor_annotation_id is not None
+    }
+    heads = tuple(
+        record
+        for record in records
+        if record.annotation_id not in predecessors
+        and not isinstance(record, L2Annotation)
+    )
+    by_item: dict[str, L1Annotation] = {}
+    for record in heads:
+        if record.item_id in by_item:
+            raise ValueError("one item owns more than one annotation head")
+        by_item[record.item_id] = record
+    return tuple(by_item[item_id] for item_id in sorted(by_item))
+
+
+def _pool_corpus(
+    sources: tuple[tuple[RfcSourceManifest, VerifiedRfc], ...],
+) -> LocalCorpus:
+    return LocalCorpus.load(
+        [
+            (document, _clause_limits(manifest))
+            for manifest, document in sources
+        ],
+        RfcLimits(),
+    )
+
+
+def _annotation_pool_register(arguments: argparse.Namespace) -> int:
+    if not arguments.annotation_dir.is_dir():
+        return _refuse("annotation_dir_not_found")
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    try:
+        heads = _annotation_heads(arguments.annotation_dir)
+        if not heads:
+            return _refuse("no_l1_annotations")
+        corpus = _pool_corpus(resolved)
+    except (OSError, ValueError):
+        return _refuse("invalid_annotation_record")
+    except (UnsafeRfcError, OversizedClauseError):
+        return _refuse("invalid_corpus")
+
+    actual_weights = weights_sha256(arguments.model_dir)
+    if actual_weights != arguments.weights_sha256:
+        return _refuse("embedding_weights_mismatch")
+    try:
+        encoder = load_encoder(arguments.model_dir, arguments.device)
+        dense = DenseIndex.open(
+            arguments.qdrant_url,
+            arguments.collection,
+            frozen=True,
+        )
+        if dense.vector_size() != 1024:
+            return _refuse("dense_vector_size_mismatch")
+        if dense.point_count() != corpus.unit_count():
+            return _refuse("dense_point_count_mismatch")
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+    except Exception:
+        return _refuse("dense_index_unavailable", EXIT_IO)
+
+    units = {
+        unit_id: corpus.get_clause(unit_id) for unit_id in corpus.unit_ids()
+    }
+    facts = {
+        unit_id: PoolingUnitFact(
+            unit_id=unit.unit_id,
+            document_id=unit.document_id,
+            document_version=unit.document_version,
+            section_number=unit.section_number,
+            section_path=unit.section_path,
+            content_sha256=hashlib.sha256(unit.text.encode("utf-8")).hexdigest(),
+        )
+        for unit_id, unit in units.items()
+    }
+    sparse = Bm25Index.build(corpus.indexable())
+    items: list[PoolingItem] = []
+    try:
+        for record in heads:
+            encoded = encoder([record.question])
+            row = encoded[0]
+            vector: list[float] = row.tolist()
+            bm25 = RouteRanking(
+                route="bm25",
+                unit_ids=tuple(
+                    hit.unit_id for hit in sparse.search(record.question, 5)
+                ),
+            )
+            dense_ranking = RouteRanking(
+                route="dense",
+                unit_ids=tuple(hit.unit_id for hit in dense.search(vector, 5)),
+            )
+            items.append(
+                PoolingItem(
+                    item_id=record.item_id,
+                    annotation_id=cast(str, record.annotation_id),
+                    candidates=build_pool(bm25, dense_ranking, units=facts),
+                )
+            )
+        run = PoolingStore(arguments.pool_dir).create_run(
+            PoolingRun(
+                source_manifest_ids=tuple(
+                    manifest.manifest_id for manifest, _ in resolved
+                ),
+                bm25_fingerprint=sparse.fingerprint,
+                dense_collection=arguments.collection,
+                embedding_weights_sha256=actual_weights,
+                vector_size=dense.vector_size(),
+                point_count=dense.point_count(),
+                items=tuple(items),
+                author_id=arguments.author_id,
+                created_at=arguments.created_at,
+            )
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return _refuse("pooling_run_not_registered", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "registered",
+            "run_id": run.run_id,
+            "item_count": len(run.items),
+            "candidate_count": sum(len(item.candidates) for item in run.items),
+            "bm25_fingerprint": run.bm25_fingerprint,
+            "embedding_weights_sha256": run.embedding_weights_sha256,
+        }
+    )
+
+
+def _print_pool_sheet(
+    record: L1Annotation,
+    candidates: tuple[PoolingCandidate, ...],
+    unit_texts: dict[str, str],
+) -> None:
+    print(f"item {record.item_id} · {record.document_id}")
+    print()
+    print(f"Q. {record.question}")
+    print()
+    print("Current gold:")
+    if record.gold_clause_ids:
+        for unit_id in record.gold_clause_ids:
+            print(f"  {unit_texts[unit_id]}")
+    else:
+        print("  (expected refusal; no gold clause)")
+    print()
+    print("Retrieved candidates:")
+    for letter, candidate in zip(_LETTERS, candidates, strict=False):
+        routes = ", ".join(
+            f"{route}#{rank}" for route, rank in candidate.route_ranks.items()
+        )
+        print(f"  [{letter}] §{candidate.section_number} · {routes}")
+        print(f"      {unit_texts[candidate.unit_id]}")
+    print()
+    print('Type "complete", candidate letters such as "A,C", or "blocked".')
+
+
+def _pool_choice(count: int) -> tuple[PoolingOutcome, tuple[int, ...]] | str:
+    line = sys.stdin.readline()
+    if line == "":
+        return "pooling_review_paused"
+    value = line.strip().lower()
+    if value == "complete":
+        return PoolingOutcome.GOLD_COMPLETE, ()
+    if value == "blocked":
+        return PoolingOutcome.AUDIT_BLOCKED, ()
+    letters = [part.strip().upper() for part in line.split(",") if part.strip()]
+    if not letters or len(set(letters)) != len(letters):
+        return "invalid_choice"
+    if any(letter not in _LETTERS[:count] for letter in letters):
+        return "invalid_choice"
+    return PoolingOutcome.GOLD_EXTENDED, tuple(
+        _LETTERS.index(letter) for letter in letters
+    )
+
+
+def _annotation_pool_review(arguments: argparse.Namespace) -> int:
+    store = PoolingStore(arguments.pool_dir)
+    try:
+        run = store.read_run(arguments.run_id)
+    except (OSError, ValueError):
+        return _refuse("pooling_run_not_found")
+    existing_seals = store.read_seals(arguments.run_id)
+    if existing_seals:
+        return _emit(
+            {
+                "status": "sealed",
+                "run_id": run.run_id,
+                "adjudicated_items": len(run.items),
+                "seal_id": existing_seals[0].seal_id,
+            }
+        )
+
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    source_ids = tuple(manifest.manifest_id for manifest, _ in resolved)
+    if source_ids != run.source_manifest_ids:
+        return _refuse("pooling_source_mismatch")
+    try:
+        corpus = _pool_corpus(resolved)
+        units = {unit_id: corpus.get_clause(unit_id) for unit_id in corpus.unit_ids()}
+        unit_texts = {unit_id: unit.text for unit_id, unit in units.items()}
+        heads = {
+            item.item_id: item
+            for item in _annotation_heads(arguments.annotation_dir)
+        }
+    except (OSError, RuntimeError, ValueError):
+        return _refuse("pooling_corpus_unavailable", EXIT_IO)
+
+    decisions = {item.item_id: item for item in store.read_decisions(arguments.run_id)}
+    applications = {
+        item.decision_id: item for item in store.read_applications(arguments.run_id)
+    }
+    for item in run.items:
+        existing = decisions.get(item.item_id)
+        if existing is not None and existing.decision_id in applications:
+            continue
+        if existing is None:
+            current = heads.get(item.item_id)
+            if current is None or current.annotation_id != item.annotation_id:
+                return _refuse("pooling_annotation_head_changed")
+            for candidate in item.candidates:
+                text = unit_texts.get(candidate.unit_id)
+                if text is None:
+                    return _refuse("pooling_candidate_missing")
+                actual_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if actual_hash != candidate.content_sha256:
+                    return _refuse("pooling_candidate_hash_mismatch")
+            _print_pool_sheet(current, item.candidates, unit_texts)
+            started = time.monotonic()
+            chosen = _pool_choice(len(item.candidates))
+            if isinstance(chosen, str):
+                if chosen == "pooling_review_paused":
+                    return _emit(
+                        {
+                            "status": "paused",
+                            "run_id": run.run_id,
+                            "adjudicated_items": len(applications),
+                        }
+                    )
+                return _refuse(chosen)
+            outcome, indexes = chosen
+            existing = PoolingDecision(
+                run_id=cast(str, run.run_id),
+                item_id=item.item_id,
+                reviewed_annotation_id=item.annotation_id,
+                outcome=outcome,
+                selected_unit_ids=tuple(
+                    item.candidates[index].unit_id for index in indexes
+                ),
+                reviewer_id=arguments.reviewer,
+                elapsed_seconds=int(time.monotonic() - started),
+            )
+            if outcome is PoolingOutcome.AUDIT_BLOCKED:
+                store.create_decision(existing)
+                return _refuse("pooling_audit_blocked")
+        try:
+            apply_decision(
+                store,
+                AnnotationStore(arguments.annotation_dir),
+                run,
+                existing,
+                unit_texts=unit_texts,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _refuse("pooling_decision_not_applied", EXIT_IO)
+        decisions[item.item_id] = existing
+        applications = {
+            applied.decision_id: applied
+            for applied in store.read_applications(arguments.run_id)
+        }
+
+    try:
+        final_decisions = store.read_decisions(arguments.run_id)
+        final_applications = store.read_applications(arguments.run_id)
+        sealed = store.create_seal(
+            seal_run(
+                run,
+                decisions=final_decisions,
+                applications=final_applications,
+            )
+        )
+    except (OSError, RuntimeError, ValueError):
+        return _refuse("pooling_run_not_sealed", EXIT_IO)
+    return _emit(
+        {
+            "status": "sealed",
+            "run_id": run.run_id,
+            "adjudicated_items": len(final_decisions),
+            "seal_id": sealed.seal_id,
+        }
+    )
+
+
+def _annotation_pool_status(arguments: argparse.Namespace) -> int:
+    store = PoolingStore(arguments.pool_dir)
+    try:
+        run = store.read_run(arguments.run_id)
+        decisions = store.read_decisions(arguments.run_id)
+        applications = store.read_applications(arguments.run_id)
+        seals = store.read_seals(arguments.run_id)
+    except (OSError, ValueError):
+        return _refuse("pooling_run_not_found")
+    outcomes: dict[str, int] = {}
+    for decision in decisions:
+        outcomes[decision.outcome.value] = outcomes.get(decision.outcome.value, 0) + 1
+    return _emit(
+        {
+            "status": "reported",
+            "run_id": run.run_id,
+            "registered_items": len(run.items),
+            "adjudicated_items": len(applications),
+            "outcomes": dict(sorted(outcomes.items())),
+            "sealed": bool(seals),
+            "seal_id": seals[0].seal_id if seals else None,
+        }
+    )
+
+
 def _read_deep_answer(
     count: int, *, allow_clauses: bool
 ) -> tuple[DeepReviewOutcome, tuple[int, ...]] | str:
@@ -2059,6 +2422,37 @@ def _parser() -> argparse.ArgumentParser:
     deep.add_argument("--deep-review-rate", type=float, required=True)
     deep.add_argument("--deep-review-salt", required=True)
     deep.set_defaults(handler=_annotation_deep_review)
+
+    pool_register = annotation.add_parser("pool-register")
+    pool_register.add_argument("--annotation-dir", type=Path, required=True)
+    pool_register.add_argument("--pool-dir", type=Path, required=True)
+    pool_register.add_argument("--manifest-dir", type=Path, required=True)
+    pool_register.add_argument("--manifest", action="append", required=True)
+    pool_register.add_argument("--xml", action="append", type=Path, required=True)
+    pool_register.add_argument("--model-dir", type=Path, required=True)
+    pool_register.add_argument("--model-id", required=True)
+    pool_register.add_argument("--device", choices=["mps", "cpu"], required=True)
+    pool_register.add_argument("--qdrant-url", required=True)
+    pool_register.add_argument("--collection", required=True)
+    pool_register.add_argument("--weights-sha256", required=True)
+    pool_register.add_argument("--author-id", required=True)
+    pool_register.add_argument("--created-at", type=_aware_timestamp, required=True)
+    pool_register.set_defaults(handler=_annotation_pool_register)
+
+    pool_review = annotation.add_parser("pool-review")
+    pool_review.add_argument("--annotation-dir", type=Path, required=True)
+    pool_review.add_argument("--pool-dir", type=Path, required=True)
+    pool_review.add_argument("--run-id", required=True)
+    pool_review.add_argument("--manifest-dir", type=Path, required=True)
+    pool_review.add_argument("--manifest", action="append", required=True)
+    pool_review.add_argument("--xml", action="append", type=Path, required=True)
+    pool_review.add_argument("--reviewer", required=True)
+    pool_review.set_defaults(handler=_annotation_pool_review)
+
+    pool_status = annotation.add_parser("pool-status")
+    pool_status.add_argument("--pool-dir", type=Path, required=True)
+    pool_status.add_argument("--run-id", required=True)
+    pool_status.set_defaults(handler=_annotation_pool_status)
 
     embedding = commands.add_parser("embedding").add_subparsers(
         dest="command", required=True

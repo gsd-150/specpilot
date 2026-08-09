@@ -385,6 +385,48 @@ class PoolingStore:
             for path in sorted(directory.glob("*.json"))
         )
 
+    def create_seal(self, seal: PoolingSeal) -> PoolingSeal:
+        directory = self._scoped_directory("seals", seal.run_id)
+        existing = tuple(directory.glob("*.json"))
+        if existing:
+            stored = self._read(
+                existing[0],
+                PoolingSeal,
+                "seal_id",
+                existing[0].stem,
+                "pooling seal",
+            )
+            if stored.seal_id != seal.seal_id:
+                raise ValueError("that run already owns a different seal")
+            return stored
+        seal_id = cast(str, seal.seal_id)
+        self._write(
+            directory / f"{seal_id}.json",
+            _record_bytes(seal, "seal_id"),
+        )
+        return self._read(
+            directory / f"{seal_id}.json",
+            PoolingSeal,
+            "seal_id",
+            seal_id,
+            "pooling seal",
+        )
+
+    def read_seals(self, run_id: str) -> tuple[PoolingSeal, ...]:
+        directory = self._directory / "seals" / run_id
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            self._read(
+                path,
+                PoolingSeal,
+                "seal_id",
+                path.stem,
+                "pooling seal",
+            )
+            for path in sorted(directory.glob("*.json"))
+        )
+
     def _prepare_directory(self, child: Path) -> None:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._directory.chmod(0o700)
