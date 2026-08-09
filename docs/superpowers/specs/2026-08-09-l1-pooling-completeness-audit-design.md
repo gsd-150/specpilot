@@ -84,10 +84,11 @@ candidate clauses. The author selects one outcome:
 `gold_complete` records a pooling adjudication without changing the annotation.
 `gold_extended` first records the adjudication and then calls
 `AnnotationStore.amend` to create a successor containing the union of old and
-new gold. It appends a `retrieval_pooling` origin followed by
-`human_source_review`; it cannot remove or replace prior gold. If amendment
-writing fails, the adjudication remains as an explicit record of the successor
-that is still owed, and the run cannot be sealed.
+new gold. It appends the candidate's concrete `bm25_retrieval` and/or
+`dense_retrieval` origin followed by `human_source_review`; it cannot remove or
+replace prior gold. If amendment writing fails, the adjudication remains as an
+explicit record of the successor that is still owed, and the run cannot be
+sealed.
 
 `audit_blocked` records the reason and leaves the item incomplete. The command
 returns non-zero when any item is blocked.
