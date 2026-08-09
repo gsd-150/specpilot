@@ -598,6 +598,81 @@ it at 14%.
 
 ---
 
+---
+
+### Task 8 (added): score the frozen retrieval protocol on the dev split
+
+The annotation was the input to an evaluation that had never run. The corpus was
+frozen, three routes existed, fifteen dev items were adjudicated and pooled — and
+there was not one retrieval number in the project. This closes that.
+
+- [x] **`src/specpilot/evaluation/retrieval.py` + `specpilot retrieval evaluate`**
+
+The protocol is read from the frozen corpus manifest, not from flags: top-k per
+route, the fusion constant and the final cut-off were bound at freeze time
+precisely so an evaluation cannot quietly score a different retriever than the
+one the corpus was frozen with. The run verified the BM25 fingerprint, the
+embedding weights hash and the Qdrant point count against the manifest before
+scoring anything.
+
+**Dev split, N=12 answerable items, corpus `1abafff7…`, protocol 20/20 → RRF(60)
+→ 5:**
+
+| route | Macro-Recall@5 | Hit@5 | MRR | gold found |
+| --- | ---: | ---: | ---: | ---: |
+| bm25 | 0.792 | 0.833 (10/12) | 0.792 | 10/13 |
+| dense | 0.875 | 0.917 (11/12) | 0.847 | 11/13 |
+| rrf | 0.875 | 0.917 (11/12) | 0.856 | 11/13 |
+
+**Stratified by question-to-gold literal overlap, median boundary 0.268** — this
+is the finding §8.2.2 built the stratification to surface:
+
+| route | low overlap (n=6) | high overlap (n=6) |
+| --- | ---: | ---: |
+| bm25 | 0.667 | 0.917 |
+| dense | 0.833 | 0.917 |
+| rrf | 0.833 | 0.917 |
+
+Sparse and dense are indistinguishable where the question shares wording with its
+clause, and sparse falls away where it does not. That is the expected shape, and
+it is now measured on this corpus instead of assumed — which is the whole reason
+the overlap figure is a required annotation field.
+
+**What these numbers are not.** N=12, so one item is 8.3 points and every
+percentage is descriptive; dense beating bm25 overall is a one-item difference
+and RRF's MRR edge over dense is one rank position. The stratified gap is the
+only comparison here with a mechanism behind it, and it rests on six items a
+side. Dev split only — locked stays unread until W6, which is why `--split` is
+required and echoed in the output.
+
+**The two items that cost the points, both instructive:**
+
+- `l1-dev-002` — the scenario-first proxy-retry question, gold §9.2.2 ¶7, literal
+  overlap 0.065, the lowest in the set. Every route misses it at k=5; RRF puts it
+  at rank 13. It is the entire gap between 11/12 and 12/12, and it is the item the
+  set most needs: a question phrased the way a user would phrase it, sharing
+  almost no vocabulary with the clause that answers it.
+- `l1-dev-010` — recall 0.50 because the pooling audit gave it a second gold
+  clause. This is the split-requirement case: §15.4.5 ¶2 states the obligation and
+  ends in a colon, ¶3 is the list it introduces. The forced choice could only take
+  one and took ¶3; **the completeness audit independently added ¶2 back**, with the
+  chain recording exactly how it was found — `model_proposal >
+  human_source_review > bm25_retrieval > dense_retrieval > human_source_review`.
+  Retrieval now finds one of the two at k=5, which is the honest score for a
+  requirement that spans two paragraph anchors.
+
+**Three §8.4 metrics are deliberately absent, and the command says so in its own
+output** rather than leaving a reader to notice: nDCG@10, which §8.4 excludes by
+name because binary single-annotator labels cannot support graded gain; the
+unanswerable false-trigger rate, which needs a frozen confidence threshold and
+the deterministic answer path, neither of which exists; and the cross-reference
+expansion hit rate, whose denominator is an annotation mark no field carries.
+
+Raw output, per item: `artifacts/restricted/eval-retrieval-dev-2026-08-09.json`
+(not committed).
+
+---
+
 ## Plan self-review record
 
 - **Scope decision:** this plan changes how gold is produced and recorded. It

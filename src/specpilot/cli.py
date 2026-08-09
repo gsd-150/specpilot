@@ -107,6 +107,11 @@ from specpilot.embedding.throughput import (
     measure_throughput,
     weights_sha256,
 )
+from specpilot.evaluation.retrieval import (
+    RetrievedItem,
+    score_route,
+    stratify_by_overlap,
+)
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
@@ -114,7 +119,11 @@ from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.dense import DenseIndex
-from specpilot.retrieval.hybrid import RouteRanking
+from specpilot.retrieval.hybrid import (
+    RouteRanking,
+    RrfParameters,
+    reciprocal_rank_fusion,
+)
 from specpilot.retrieval.local import LocalCorpus
 from specpilot.retrieval.pooling import (
     PoolingCandidate,
@@ -129,6 +138,7 @@ from specpilot.retrieval.pooling import (
     inventory_sha256,
     seal_run,
 )
+from specpilot.retrieval.protocol import locator_for_unit
 from specpilot.rfc.structure import extract_structure
 
 # Exit codes, matching the ingestion worker: 2 is a refused input or policy
@@ -1401,6 +1411,166 @@ def _pool_corpus(
     )
 
 
+def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
+    """Score the frozen retrieval protocol against one split's gold.
+
+    Development-set diagnostics. §11 and §8.5 keep the locked splits unread
+    until W6, so `--split` is required and printed back: a number whose split
+    is implicit is one that ends up quoted as a test result.
+
+    The protocol comes from the frozen corpus manifest, not from flags. Top-k
+    per route, the fusion constant and the final cut-off were bound at freeze
+    time precisely so an evaluation cannot quietly run a different retriever
+    than the one the corpus was frozen with.
+    """
+    try:
+        corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_manifest_not_found")
+
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    if {manifest.manifest_id for manifest, _ in resolved} != set(
+        corpus_manifest.source_manifest_ids
+    ):
+        # Scoring against a different set of documents than the corpus was
+        # frozen over would report retrieval over a corpus that never existed.
+        return _refuse("corpus_source_mismatch")
+
+    try:
+        heads = _annotation_heads(arguments.annotation_dir)
+        corpus = _pool_corpus(resolved)
+    except (OSError, ValueError):
+        return _refuse("invalid_annotation_record")
+    except (UnsafeRfcError, OversizedClauseError):
+        return _refuse("invalid_corpus")
+
+    scored_heads = tuple(
+        record
+        for record in heads
+        if record.split.value == arguments.split
+        and not record.expected_refusal
+        and record.gold_clause_ids
+    )
+    if not scored_heads:
+        return _refuse("no_scorable_annotations")
+
+    if weights_sha256(arguments.model_dir) != corpus_manifest.embedding_weights_sha256:
+        return _refuse("embedding_weights_mismatch")
+    try:
+        encoder = load_encoder(arguments.model_dir, arguments.device)
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+
+    protocol = corpus_manifest.retrieval
+    dense: DenseIndex | None = None
+    try:
+        try:
+            dense = DenseIndex.open(
+                arguments.qdrant_url, corpus_manifest.collection_name
+            )
+            if dense.point_count() != corpus_manifest.point_count:
+                return _refuse("dense_point_count_mismatch")
+        except EgressPolicyViolation:
+            raise
+        except Exception:
+            return _refuse("dense_index_unavailable", EXIT_IO)
+
+        sparse = Bm25Index.build(corpus.indexable())
+        if sparse.fingerprint != corpus_manifest.bm25.index_fingerprint:
+            return _refuse("bm25_fingerprint_mismatch")
+
+        locators = {
+            unit_id: locator_for_unit(
+                corpus_manifest.manifest_id, corpus.get_clause(unit_id)
+            )
+            for unit_id in corpus.unit_ids()
+        }
+        rankings: dict[str, list[RetrievedItem]] = {
+            "bm25": [],
+            "dense": [],
+            "rrf": [],
+        }
+        for record in scored_heads:
+            vector = encoder([record.question])[0].tolist()
+            bm25_ids = tuple(
+                hit.unit_id
+                for hit in sparse.search(record.question, protocol.bm25_top_k)
+            )
+            dense_ids = tuple(
+                hit.unit_id for hit in dense.search(vector, protocol.dense_top_k)
+            )
+            fused = reciprocal_rank_fusion(
+                [
+                    RouteRanking(route="bm25", unit_ids=bm25_ids),
+                    RouteRanking(route="dense", unit_ids=dense_ids),
+                ],
+                locators=locators,
+                parameters=RrfParameters(k=protocol.rrf_k),
+            )
+            for route, ranked in (
+                ("bm25", bm25_ids),
+                ("dense", dense_ids),
+                ("rrf", tuple(hit.unit_id for hit in fused.hits)),
+            ):
+                rankings[route].append(
+                    RetrievedItem(
+                        item_id=record.item_id,
+                        gold_unit_ids=tuple(record.gold_clause_ids),
+                        ranked_unit_ids=ranked,
+                        question_gold_jaccard=record.question_gold_jaccard or 0.0,
+                    )
+                )
+    finally:
+        if dense is not None:
+            dense.close()
+
+    cut = protocol.final_top_k
+    routes: dict[str, Any] = {}
+    for route, items in rankings.items():
+        metrics = score_route(route, items, k=cut)
+        strata = stratify_by_overlap(route, items, k=cut)
+        routes[route] = {
+            **metrics.payload(),
+            "overlap_strata": strata.payload() if strata else None,
+        }
+
+    return _emit(
+        {
+            "status": "scored",
+            # Printed, never inferred. §8.5 forbids reading a locked split
+            # before W6, and a result without its split named is one that gets
+            # quoted as a test number.
+            "split": arguments.split,
+            "diagnostic_only": arguments.split == "dev",
+            "corpus_manifest_id": corpus_manifest.manifest_id,
+            "collection_name": corpus_manifest.collection_name,
+            "bm25_index_fingerprint": corpus_manifest.bm25.index_fingerprint,
+            "embedding_weights_sha256": corpus_manifest.embedding_weights_sha256,
+            "protocol": {
+                "bm25_top_k": protocol.bm25_top_k,
+                "dense_top_k": protocol.dense_top_k,
+                "final_top_k": cut,
+                "rrf_k": protocol.rrf_k,
+            },
+            "scored_item_count": len(scored_heads),
+            "not_reported": {
+                "ndcg_at_10": "§8.4 excludes it: binary single-annotator labels",
+                "unanswerable_false_trigger_rate": (
+                    "needs a frozen confidence threshold and the answer path"
+                ),
+                "cross_reference_expansion_hit_rate": (
+                    "no annotation field marks which items require following one"
+                ),
+            },
+            "routes": routes,
+        }
+    )
+
+
 def _annotation_pool_register(arguments: argparse.Namespace) -> int:
     if not arguments.annotation_dir.is_dir():
         return _refuse("annotation_dir_not_found")
@@ -2547,6 +2717,21 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--route", choices=["bm25"], default="bm25")
     search.add_argument("--k", type=int, default=5)
     search.set_defaults(handler=_retrieval_search)
+
+    evaluate = retrieval.add_parser("evaluate")
+    evaluate.add_argument("--annotation-dir", type=Path, required=True)
+    evaluate.add_argument("--corpus-manifest", required=True)
+    evaluate.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    evaluate.add_argument("--manifest-dir", type=Path, required=True)
+    evaluate.add_argument("--manifest", action="append", required=True)
+    evaluate.add_argument("--xml", action="append", type=Path, required=True)
+    evaluate.add_argument("--model-dir", type=Path, required=True)
+    evaluate.add_argument("--device", choices=["mps", "cpu"], required=True)
+    evaluate.add_argument("--qdrant-url", required=True)
+    # Required and echoed. §8.5 keeps the locked splits unread until W6, and a
+    # number whose split is implicit is one that gets quoted as a test result.
+    evaluate.add_argument("--split", choices=["dev", "locked"], required=True)
+    evaluate.set_defaults(handler=_retrieval_evaluate)
 
     annotation = commands.add_parser("annotation").add_subparsers(
         dest="command", required=True
