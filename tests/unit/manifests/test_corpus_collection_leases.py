@@ -245,6 +245,7 @@ def test_close_waits_for_manifest_publication_before_releasing_freeze(
     freeze = store.acquire_freeze_lease(draft.collection_name)
     publication_entered = threading.Event()
     allow_publication = threading.Event()
+    final_fsync_enabled = threading.Event()
     fsync_entered = threading.Event()
     allow_fsync = threading.Event()
     close_finished = threading.Event()
@@ -264,10 +265,12 @@ def test_close_waits_for_manifest_publication_before_releasing_freeze(
         publication_entered.set()
         if not allow_publication.wait(timeout=2):
             raise TimeoutError("publication test barrier timed out")
-        return original_publish(self, name, data, max_bytes=max_bytes)
+        stored = original_publish(self, name, data, max_bytes=max_bytes)
+        final_fsync_enabled.set()
+        return stored
 
     def paused_root_fsync(descriptor: int) -> None:
-        if descriptor == root_fd:
+        if final_fsync_enabled.is_set() and descriptor == root_fd:
             fsync_entered.set()
             if not allow_fsync.wait(timeout=2):
                 raise TimeoutError("fsync test barrier timed out")
@@ -355,6 +358,106 @@ def test_close_inside_an_active_operation_fails_without_deadlocking(
         lease.require_active_for(collection)
 
     lease.close()
+
+
+@pytest.mark.parametrize("control_flow", [KeyboardInterrupt, SystemExit])
+def test_interrupted_close_still_releases_lease_after_active_operation_drains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control_flow: type[BaseException],
+) -> None:
+    from specpilot.manifests import corpus_store as corpus_store_module
+
+    store = CorpusManifestStore(tmp_path / "corpus")
+    collection = corpus_intent().collection_name
+    lease = store.acquire_write_lease(collection)
+    lock_fd = lease._lock_fd  # noqa: SLF001
+    root_fd = lease._root_fd  # noqa: SLF001
+    state = lease._state  # noqa: SLF001
+    original_wait = state.condition.wait
+    active_entered = threading.Event()
+    allow_active_exit = threading.Event()
+    wait_interrupted = threading.Event()
+    leader_errors: list[BaseException] = []
+    holder_errors: list[BaseException] = []
+    interrupt_pending = True
+
+    def interrupt_first_wait(timeout: float | None = None) -> bool:
+        nonlocal interrupt_pending
+        if interrupt_pending:
+            interrupt_pending = False
+            wait_interrupted.set()
+            raise control_flow("injected close interruption")
+        return original_wait(timeout)
+
+    def hold_operation() -> None:
+        try:
+            with lease.active_operation(collection):
+                active_entered.set()
+                if not allow_active_exit.wait(timeout=2):
+                    raise TimeoutError("active-operation test barrier timed out")
+        except BaseException as error:
+            holder_errors.append(error)
+
+    def close_as_leader() -> None:
+        try:
+            lease.close()
+        except BaseException as error:
+            leader_errors.append(error)
+
+    holder = threading.Thread(target=hold_operation)
+    holder.start()
+    assert active_entered.wait(timeout=1)
+    monkeypatch.setattr(state.condition, "wait", interrupt_first_wait)
+    leader = threading.Thread(target=close_as_leader)
+    leader.start()
+    try:
+        assert wait_interrupted.wait(timeout=1)
+    finally:
+        allow_active_exit.set()
+        holder.join(timeout=1)
+        leader.join(timeout=1)
+
+    second_close_finished = threading.Event()
+
+    def close_again() -> None:
+        try:
+            lease.close()
+        finally:
+            second_close_finished.set()
+
+    second = threading.Thread(target=close_again)
+    second.start()
+    closed_without_recovery = second_close_finished.wait(timeout=0.2)
+    if not closed_without_recovery:
+        # Keep the RED candidate from leaving a waiter, flock, or fd behind.
+        with state.condition:
+            state.closing = False
+            state.closed = True
+            state.condition.notify_all()
+        second.join(timeout=1)
+        try:
+            corpus_store_module.fcntl.flock(
+                lock_fd,
+                corpus_store_module.fcntl.LOCK_UN,
+            )
+        finally:
+            os.close(lock_fd)
+            os.close(root_fd)
+    else:
+        second.join(timeout=1)
+
+    assert not holder.is_alive()
+    assert not leader.is_alive()
+    assert not second.is_alive()
+    assert holder_errors == []
+    assert len(leader_errors) == 1
+    assert isinstance(leader_errors[0], control_flow)
+    assert closed_without_recovery
+    _assert_closed(lock_fd)
+    _assert_closed(root_fd)
+    with store.acquire_freeze_lease(collection, blocking=False):
+        pass
 
 
 def test_lock_files_are_permanent(tmp_path: Path) -> None:

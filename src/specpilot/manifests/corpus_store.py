@@ -371,6 +371,7 @@ class _CollectionLease:
         )
 
     def close(self) -> None:
+        errors: list[BaseException] = []
         try:
             if self._issue_token is not _LEASE_ISSUER:
                 raise CollectionLeaseError("collection lease is closed")
@@ -391,13 +392,17 @@ class _CollectionLease:
                 return
             state.closing = True
             state.condition.notify_all()
+            # A published close leader must not orphan ``closing``. Defer
+            # control-flow exceptions until active work drains and cleanup ends.
             while state.active_operations:
-                state.condition.wait()
+                try:
+                    state.condition.wait()
+                except BaseException as error:
+                    errors.append(error)
             lock_fd = self._lock_fd
             root_fd = self._root_fd
             self._lock_fd = -1
             self._root_fd = -1
-        errors: list[BaseException] = []
         try:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
