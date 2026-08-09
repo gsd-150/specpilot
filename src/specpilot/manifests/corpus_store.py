@@ -8,6 +8,8 @@ import os
 import re
 import stat
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -80,7 +82,13 @@ class _LeaseNamespace:
 
 @dataclass(slots=True)
 class _LeaseState:
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    condition: threading.Condition = field(
+        default_factory=threading.Condition,
+        repr=False,
+    )
+    active_operations: int = 0
+    holders: dict[int, int] = field(default_factory=dict, repr=False)
+    closing: bool = False
     closed: bool = False
 
 
@@ -168,7 +176,29 @@ class _CollectionLease:
         return self._root_fd
 
     def require_active_for(self, collection_name: str) -> None:
+        """Check this instant only; mutations must use ``active_operation``."""
         _CollectionLease._require_active_state(self, collection_name)
+
+    @contextmanager
+    def active_operation(self, collection_name: str) -> Iterator[None]:
+        """Keep lease authority for a complete mutation or admin operation.
+
+        Task 5 dense mutation and snapshot administration must run inside this
+        guard rather than treating ``require_active_for`` as a lasting grant.
+        """
+        lease_type = type(self)
+        if lease_type is CollectionWriteLease:
+            exclusive = False
+        elif lease_type is CollectionFreezeLease:
+            exclusive = True
+        else:
+            raise CollectionLeaseError("collection lease is invalid")
+        with _CollectionLease._operation_scope(
+            self,
+            collection_name,
+            exclusive=exclusive,
+        ):
+            yield
 
     def _require_active_state(
         self,
@@ -183,23 +213,87 @@ class _CollectionLease:
             bound_collection = self._namespace.collection_name
         except AttributeError as error:
             raise CollectionLeaseError("collection lease is closed") from error
-        with state.lock:
-            if self._issue_token is not _LEASE_ISSUER or state.closed:
-                raise CollectionLeaseError("collection lease is closed")
-            if bound_collection != collection_name:
-                raise CollectionLeaseError("collection lease names another collection")
-            if validate_owner and self._owner_token is not owner_token:
-                raise CollectionLeaseError(
-                    "collection lease is not active for this store"
-                )
-            if exclusive is not None and self._exclusive is not exclusive:
-                raise CollectionLeaseError("collection lease has the wrong mode")
-            _CollectionLease._validate_namespace(self)
+        thread_id = threading.get_ident()
+        with state.condition:
+            _CollectionLease._validate_active_locked(
+                self,
+                state,
+                thread_id=thread_id,
+                bound_collection=bound_collection,
+                collection_name=collection_name,
+                owner_token=owner_token,
+                validate_owner=validate_owner,
+                exclusive=exclusive,
+            )
+
+    def _validate_active_locked(
+        self,
+        state: _LeaseState,
+        *,
+        thread_id: int,
+        bound_collection: str,
+        collection_name: str,
+        owner_token: object | None,
+        validate_owner: bool,
+        exclusive: bool | None,
+    ) -> None:
+        if self._issue_token is not _LEASE_ISSUER or state.closed:
+            raise CollectionLeaseError("collection lease is closed")
+        if state.closing and state.holders.get(thread_id, 0) == 0:
+            raise CollectionLeaseError("collection lease is closing")
+        if bound_collection != collection_name:
+            raise CollectionLeaseError("collection lease names another collection")
+        if validate_owner and self._owner_token is not owner_token:
+            raise CollectionLeaseError("collection lease is not active for this store")
+        if exclusive is not None and self._exclusive is not exclusive:
+            raise CollectionLeaseError("collection lease has the wrong mode")
+        _CollectionLease._validate_namespace(self)
+
+    @contextmanager
+    def _operation_scope(
+        self,
+        collection_name: str,
+        *,
+        owner_token: object | None = None,
+        validate_owner: bool = False,
+        exclusive: bool | None = None,
+    ) -> Iterator[None]:
+        try:
+            state = self._state
+            bound_collection = self._namespace.collection_name
+        except AttributeError as error:
+            raise CollectionLeaseError("collection lease is closed") from error
+        thread_id = threading.get_ident()
+        with state.condition:
+            _CollectionLease._validate_active_locked(
+                self,
+                state,
+                thread_id=thread_id,
+                bound_collection=bound_collection,
+                collection_name=collection_name,
+                owner_token=owner_token,
+                validate_owner=validate_owner,
+                exclusive=exclusive,
+            )
+            state.active_operations += 1
+            state.holders[thread_id] = state.holders.get(thread_id, 0) + 1
+        try:
+            yield
+        finally:
+            with state.condition:
+                depth = state.holders[thread_id] - 1
+                if depth:
+                    state.holders[thread_id] = depth
+                else:
+                    del state.holders[thread_id]
+                state.active_operations -= 1
+                if state.active_operations == 0:
+                    state.condition.notify_all()
 
     def _validate_namespace(self) -> None:
         namespace = self._namespace
         locks_fd: int | None = None
-        failure: BaseException | None = None
+        failure: Exception | None = None
         try:
             root_status = os.fstat(self._root_fd)
             if (
@@ -247,13 +341,13 @@ class _CollectionLease:
             ):
                 path = namespace.directory / _LOCKS_DIRECTORY / namespace.lock_name
                 raise FileExistsError(path)
-        except BaseException as error:
+        except Exception as error:
             failure = error
         finally:
             if locks_fd is not None:
                 try:
                     os.close(locks_fd)
-                except BaseException as error:
+                except Exception as error:
                     if failure is None:
                         failure = error
         if failure is not None:
@@ -283,27 +377,44 @@ class _CollectionLease:
             state = self._state
         except AttributeError as error:
             raise CollectionLeaseError("collection lease is closed") from error
-        with state.lock:
+        thread_id = threading.get_ident()
+        with state.condition:
+            if state.holders.get(thread_id, 0):
+                raise CollectionLeaseError(
+                    "collection lease cannot close inside an active operation"
+                )
             if state.closed:
                 return
-            state.closed = True
+            if state.closing:
+                while not state.closed:
+                    state.condition.wait()
+                return
+            state.closing = True
+            state.condition.notify_all()
+            while state.active_operations:
+                state.condition.wait()
             lock_fd = self._lock_fd
             root_fd = self._root_fd
             self._lock_fd = -1
             self._root_fd = -1
         errors: list[BaseException] = []
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except BaseException as error:
-            errors.append(error)
-        try:
-            os.close(lock_fd)
-        except BaseException as error:
-            errors.append(error)
-        try:
-            os.close(root_fd)
-        except BaseException as error:
-            errors.append(error)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except BaseException as error:
+                errors.append(error)
+            try:
+                os.close(lock_fd)
+            except BaseException as error:
+                errors.append(error)
+            try:
+                os.close(root_fd)
+            except BaseException as error:
+                errors.append(error)
+        finally:
+            with state.condition:
+                state.closed = True
+                state.condition.notify_all()
         _raise_first(errors)
 
 
@@ -370,15 +481,19 @@ class CorpusManifestStore:
         *,
         lease: CollectionFreezeLease,
     ) -> CorpusManifest | None:
-        self._require_freeze_lease(lease, intent.collection_name)
-        manifests = self._read_all_under(lease)
-        self._validate_predecessor_reference(intent, manifests)
-        matches = tuple(item for item in manifests if item.intent == intent)
-        if len(matches) > 1:
-            raise CorpusManifestIntentConflictError(
-                "intent already has multiple corpus manifests"
-            )
-        return matches[0] if matches else None
+        with self._owned_operation(
+            lease,
+            collection_name=intent.collection_name,
+            exclusive=True,
+        ):
+            manifests = self._read_all_under(lease)
+            self._validate_predecessor_reference(intent, manifests)
+            matches = tuple(item for item in manifests if item.intent == intent)
+            if len(matches) > 1:
+                raise CorpusManifestIntentConflictError(
+                    "intent already has multiple corpus manifests"
+                )
+            return matches[0] if matches else None
 
     def require_publishable_intent(
         self,
@@ -386,9 +501,13 @@ class CorpusManifestStore:
         *,
         lease: CollectionFreezeLease,
     ) -> None:
-        self._require_freeze_lease(lease, intent.collection_name)
-        manifests = self._read_all_under(lease)
-        self._require_publishable_against(intent, manifests)
+        with self._owned_operation(
+            lease,
+            collection_name=intent.collection_name,
+            exclusive=True,
+        ):
+            manifests = self._read_all_under(lease)
+            self._require_publishable_against(intent, manifests)
 
     def create(
         self,
@@ -396,17 +515,21 @@ class CorpusManifestStore:
         *,
         lease: CollectionFreezeLease,
     ) -> CorpusManifest:
-        self._require_freeze_lease(lease, draft.collection_name)
-        existing = self.find_by_intent(draft.intent, lease=lease)
-        manifest = CorpusManifest.from_draft(draft)
-        if existing is not None:
-            if existing != manifest:
-                raise CorpusManifestIntentConflictError(
-                    "intent already has a corpus manifest"
-                )
-            return existing
-        self.require_publishable_intent(draft.intent, lease=lease)
-        return self._publish_under(manifest, lease=lease)
+        with self._owned_operation(
+            lease,
+            collection_name=draft.collection_name,
+            exclusive=True,
+        ):
+            existing = self.find_by_intent(draft.intent, lease=lease)
+            manifest = CorpusManifest.from_draft(draft)
+            if existing is not None:
+                if existing != manifest:
+                    raise CorpusManifestIntentConflictError(
+                        "intent already has a corpus manifest"
+                    )
+                return existing
+            self.require_publishable_intent(draft.intent, lease=lease)
+            return self._publish_under(manifest, lease=lease)
 
     def acquire_write_lease(
         self,
@@ -526,12 +649,23 @@ class CorpusManifestStore:
         self,
         lease: CollectionWriteLease | CollectionFreezeLease,
     ) -> tuple[CorpusManifest, ...]:
-        self._require_owned_lease(lease)
-        with SecureRecordDirectory.from_fd(
-            self._directory,
-            lease._root_fd,
-            close_fd=False,
-        ) as records:
+        if type(lease) not in {CollectionWriteLease, CollectionFreezeLease}:
+            raise CollectionLeaseError("collection lease is invalid")
+        try:
+            collection_name = lease._namespace.collection_name
+        except AttributeError as error:
+            raise CollectionLeaseError("collection lease is closed") from error
+        with (
+            self._owned_operation(
+                lease,
+                collection_name=collection_name,
+            ),
+            SecureRecordDirectory.from_fd(
+                self._directory,
+                lease._root_fd,
+                close_fd=False,
+            ) as records,
+        ):
             return self._decode_all(
                 records,
                 expected_locks_identity=lease._namespace.locks_identity,
@@ -543,49 +677,52 @@ class CorpusManifestStore:
         *,
         lease: CollectionFreezeLease,
     ) -> CorpusManifest:
-        self._require_freeze_lease(lease, manifest.collection_name)
         data = canonical_json(manifest, include_manifest_id=True)
         if len(data) > _MAX_MANIFEST_BYTES:
             raise ValueError("corpus manifest exceeds maximum storage size")
         destination_name = f"{manifest.manifest_id}.json"
-        with SecureRecordDirectory.from_fd(
-            self._directory,
-            lease._root_fd,
-            close_fd=False,
-        ) as records:
-            manifests = self._decode_all(
-                records,
-                expected_locks_identity=lease._namespace.locks_identity,
+        with self._owned_operation(
+            lease,
+            collection_name=manifest.collection_name,
+            exclusive=True,
+        ):
+            with SecureRecordDirectory.from_fd(
+                self._directory,
+                lease._root_fd,
+                close_fd=False,
+            ) as records:
+                manifests = self._decode_all(
+                    records,
+                    expected_locks_identity=lease._namespace.locks_identity,
+                )
+                matching_intent = tuple(
+                    item for item in manifests if item.intent == manifest.intent
+                )
+                if matching_intent:
+                    if len(matching_intent) != 1 or matching_intent[0] != manifest:
+                        raise CorpusManifestIntentConflictError(
+                            "intent already has a corpus manifest"
+                        )
+                    return matching_intent[0]
+                self._require_publishable_against(manifest.intent, manifests)
+                records.publish(
+                    destination_name,
+                    data,
+                    max_bytes=_MAX_MANIFEST_BYTES,
+                )
+                stored_manifests = self._decode_all(
+                    records,
+                    expected_locks_identity=lease._namespace.locks_identity,
+                )
+                os.fsync(records.fd)
+            stored = tuple(
+                item
+                for item in stored_manifests
+                if item.manifest_id == manifest.manifest_id
             )
-            matching_intent = tuple(
-                item for item in manifests if item.intent == manifest.intent
-            )
-            if matching_intent:
-                if len(matching_intent) != 1 or matching_intent[0] != manifest:
-                    raise CorpusManifestIntentConflictError(
-                        "intent already has a corpus manifest"
-                    )
-                return matching_intent[0]
-            self._require_publishable_against(manifest.intent, manifests)
-            records.publish(
-                destination_name,
-                data,
-                max_bytes=_MAX_MANIFEST_BYTES,
-            )
-            stored_manifests = self._decode_all(
-                records,
-                expected_locks_identity=lease._namespace.locks_identity,
-            )
-            os.fsync(records.fd)
-
-        stored = tuple(
-            item
-            for item in stored_manifests
-            if item.manifest_id == manifest.manifest_id
-        )
-        if len(stored) != 1 or stored[0] != manifest:
-            raise FileExistsError(self._directory / destination_name)
-        return stored[0]
+            if len(stored) != 1 or stored[0] != manifest:
+                raise FileExistsError(self._directory / destination_name)
+            return stored[0]
 
     def _decode_all(
         self,
@@ -774,6 +911,25 @@ class CorpusManifestStore:
             owner_token=self._owner_token,
             collection_name=collection_name,
         )
+
+    @contextmanager
+    def _owned_operation(
+        self,
+        lease: CollectionWriteLease | CollectionFreezeLease,
+        *,
+        collection_name: str,
+        exclusive: bool | None = None,
+    ) -> Iterator[None]:
+        if type(lease) not in {CollectionWriteLease, CollectionFreezeLease}:
+            raise CollectionLeaseError("collection lease is invalid")
+        with _CollectionLease._operation_scope(
+            lease,
+            collection_name,
+            owner_token=self._owner_token,
+            validate_owner=True,
+            exclusive=exclusive,
+        ):
+            yield
 
     def _require_freeze_lease(
         self,

@@ -7,7 +7,6 @@ import pickle
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -23,7 +22,7 @@ from specpilot.manifests.corpus_store import (
 )
 from tests.helpers.corpus_manifest_factory import corpus_draft, corpus_intent
 
-FROZEN_EXIT = 74
+KERNEL_CONTENDED_EXIT = 74
 CONTENTION_MISSED_EXIT = 75
 PROBE_FAILURE_EXIT = 76
 WRITER_PROBE = f"""
@@ -31,7 +30,6 @@ import sys
 from pathlib import Path
 
 from specpilot.manifests.corpus_store import (
-    CollectionFrozenError,
     CollectionLeaseUnavailableError,
     CorpusManifestStore,
 )
@@ -40,23 +38,12 @@ store = CorpusManifestStore(Path(sys.argv[1]))
 try:
     uncontended = store.acquire_write_lease(sys.argv[2], blocking=False)
 except CollectionLeaseUnavailableError:
-    pass
+    raise SystemExit({KERNEL_CONTENDED_EXIT})
 except BaseException:
     raise SystemExit({PROBE_FAILURE_EXIT})
 else:
     uncontended.close()
     raise SystemExit({CONTENTION_MISSED_EXIT})
-
-Path(sys.argv[3]).write_text("contended", encoding="utf-8")
-Path(sys.argv[4]).write_text("blocking-started", encoding="utf-8")
-try:
-    with store.acquire_write_lease(sys.argv[2]):
-        pass
-except CollectionFrozenError:
-    raise SystemExit({FROZEN_EXIT})
-except BaseException:
-    raise SystemExit({PROBE_FAILURE_EXIT})
-raise SystemExit(0)
 """
 
 
@@ -91,28 +78,6 @@ def _ignore_subclass_guard(cls: type[object], **kwargs: object) -> None:
 
 def _ignore_lease_validation(*args: object, **kwargs: object) -> None:
     del args, kwargs
-
-
-class _RacingClosedState:
-    def __init__(self) -> None:
-        self._read_barrier = threading.Barrier(2)
-        self._write_barrier = threading.Barrier(2)
-        self._value = False
-
-    def __get__(self, instance: object, owner: type[object]) -> object:
-        del owner
-        if instance is None:
-            return self
-        value = self._value
-        if not value:
-            self._read_barrier.wait(timeout=1)
-        return value
-
-    def __set__(self, instance: object, value: bool) -> None:
-        del instance
-        if value:
-            self._write_barrier.wait(timeout=1)
-        self._value = value
 
 
 def test_shared_writers_coexist(tmp_path: Path) -> None:
@@ -158,44 +123,238 @@ def test_writer_is_refused_after_collection_is_frozen(tmp_path: Path) -> None:
         store.acquire_write_lease(corpus_intent().collection_name)
 
 
-def test_waiting_writer_rechecks_registry_after_freeze_publishes(
+def test_subprocess_nonblocking_writer_observes_real_freeze_contention(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "corpus"
     store = CorpusManifestStore(root)
     collection = corpus_intent().collection_name
-    contended = tmp_path / "writer-contended"
-    blocking_started = tmp_path / "writer-blocking-started"
-    waiting: subprocess.Popen[bytes] | None = None
+    probe: subprocess.Popen[bytes] | None = None
     try:
-        with store.acquire_freeze_lease(collection) as freeze_lease:
-            waiting = subprocess.Popen(
+        with store.acquire_freeze_lease(collection):
+            probe = subprocess.Popen(
                 [
                     sys.executable,
                     "-c",
                     WRITER_PROBE,
                     str(root),
                     collection,
-                    str(contended),
-                    str(blocking_started),
                 ]
             )
-            deadline = time.monotonic() + 1
-            while (
-                not (contended.exists() and blocking_started.exists())
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
-            assert contended.exists()
-            assert blocking_started.exists()
-            assert waiting.poll() is None
-            store.create(corpus_draft(), lease=freeze_lease)
-        assert _wait_or_terminate(waiting) == FROZEN_EXIT
-        waiting = None
+            assert _wait_or_terminate(probe) == KERNEL_CONTENDED_EXIT
+            probe = None
     finally:
-        if waiting is not None and waiting.poll() is None:
-            waiting.terminate()
-            _wait_or_terminate(waiting, timeout=1)
+        if probe is not None and probe.poll() is None:
+            probe.terminate()
+            _wait_or_terminate(probe, timeout=1)
+
+
+def test_waiting_writer_rescans_registry_after_controlled_flock_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import corpus_store as corpus_store_module
+
+    root = tmp_path / "corpus"
+    store = CorpusManifestStore(root)
+    draft = corpus_draft()
+    collection = draft.collection_name
+    freeze = store.acquire_freeze_lease(collection)
+    original_flock = corpus_store_module.fcntl.flock
+    original_read_all_under = CorpusManifestStore._read_all_under  # noqa: SLF001
+    blocking_entered = threading.Event()
+    allow_lock_return = threading.Event()
+    writer_done = threading.Event()
+    writer_thread_id: list[int] = []
+    events: list[str] = []
+    events_lock = threading.Lock()
+    writer_errors: list[BaseException] = []
+
+    def record(event: str) -> None:
+        with events_lock:
+            events.append(event)
+
+    def controlled_flock(descriptor: int, operation: int) -> None:
+        if (
+            writer_thread_id
+            and threading.get_ident() == writer_thread_id[0]
+            and operation == corpus_store_module.fcntl.LOCK_SH
+        ):
+            record("blocking-entered")
+            blocking_entered.set()
+            if not allow_lock_return.wait(timeout=2):
+                raise TimeoutError("flock-return test barrier timed out")
+            original_flock(descriptor, operation)
+            record("lock-return")
+            return
+        original_flock(descriptor, operation)
+
+    def recording_read_all_under(
+        self: CorpusManifestStore,
+        lease: CollectionWriteLease | CollectionFreezeLease,
+    ) -> tuple[object, ...]:
+        if writer_thread_id and threading.get_ident() == writer_thread_id[0]:
+            record("registry-scan")
+        return original_read_all_under(self, lease)
+
+    def acquire_waiting_writer() -> None:
+        writer_thread_id.append(threading.get_ident())
+        try:
+            with store.acquire_write_lease(collection):
+                raise AssertionError("frozen writer unexpectedly acquired a lease")
+        except BaseException as error:
+            writer_errors.append(error)
+        finally:
+            writer_done.set()
+
+    monkeypatch.setattr(corpus_store_module.fcntl, "flock", controlled_flock)
+    monkeypatch.setattr(
+        CorpusManifestStore,
+        "_read_all_under",
+        recording_read_all_under,
+    )
+    writer = threading.Thread(target=acquire_waiting_writer)
+    writer.start()
+    try:
+        assert blocking_entered.wait(timeout=1)
+        assert not writer_done.wait(timeout=0.1)
+        store.create(draft, lease=freeze)
+        freeze.close()
+        allow_lock_return.set()
+        writer.join(timeout=2)
+    finally:
+        freeze.close()
+        allow_lock_return.set()
+        writer.join(timeout=2)
+
+    assert not writer.is_alive()
+    assert len(writer_errors) == 1
+    assert isinstance(writer_errors[0], CollectionFrozenError)
+    assert events == ["blocking-entered", "lock-return", "registry-scan"]
+
+
+def test_close_waits_for_manifest_publication_before_releasing_freeze(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests._secure_records import SecureRecordDirectory
+
+    root = tmp_path / "corpus"
+    store = CorpusManifestStore(root)
+    draft = corpus_draft()
+    freeze = store.acquire_freeze_lease(draft.collection_name)
+    publication_entered = threading.Event()
+    allow_publication = threading.Event()
+    fsync_entered = threading.Event()
+    allow_fsync = threading.Event()
+    close_finished = threading.Event()
+    original_publish = SecureRecordDirectory.publish
+    original_fsync = os.fsync
+    root_fd = freeze._root_fd  # noqa: SLF001
+    creator_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+
+    def paused_publish(
+        self: SecureRecordDirectory,
+        name: str,
+        data: bytes,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        publication_entered.set()
+        if not allow_publication.wait(timeout=2):
+            raise TimeoutError("publication test barrier timed out")
+        return original_publish(self, name, data, max_bytes=max_bytes)
+
+    def paused_root_fsync(descriptor: int) -> None:
+        if descriptor == root_fd:
+            fsync_entered.set()
+            if not allow_fsync.wait(timeout=2):
+                raise TimeoutError("fsync test barrier timed out")
+        original_fsync(descriptor)
+
+    def create_manifest() -> None:
+        try:
+            store.create(draft, lease=freeze)
+        except BaseException as error:
+            creator_errors.append(error)
+
+    def close_freeze() -> None:
+        try:
+            freeze.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_finished.set()
+
+    monkeypatch.setattr(SecureRecordDirectory, "publish", paused_publish)
+    monkeypatch.setattr(os, "fsync", paused_root_fsync)
+    creator = threading.Thread(target=create_manifest)
+    closer = threading.Thread(target=close_freeze)
+    creator.start()
+    assert publication_entered.wait(timeout=1)
+    closer.start()
+    with freeze._state.condition:  # noqa: SLF001
+        close_started = freeze._state.condition.wait_for(  # noqa: SLF001
+            lambda: freeze._state.closing,  # noqa: SLF001
+            timeout=1,
+        )
+    close_returned_before_publication = close_finished.is_set()
+    writer_entered_before_publication = False
+    writer_entered_before_fsync = False
+    writers: list[CollectionWriteLease] = []
+    try:
+        try:
+            writers.append(
+                store.acquire_write_lease(draft.collection_name, blocking=False)
+            )
+            writer_entered_before_publication = True
+        except CollectionLeaseUnavailableError:
+            pass
+        allow_publication.set()
+        assert fsync_entered.wait(timeout=1)
+        close_returned_before_fsync = close_finished.is_set()
+        try:
+            writers.append(
+                store.acquire_write_lease(draft.collection_name, blocking=False)
+            )
+            writer_entered_before_fsync = True
+        except CollectionLeaseUnavailableError:
+            pass
+    finally:
+        for writer in writers:
+            writer.close()
+        allow_publication.set()
+        allow_fsync.set()
+        creator.join(timeout=2)
+        closer.join(timeout=2)
+
+    assert not creator.is_alive()
+    assert not closer.is_alive()
+    assert close_started
+    assert not close_returned_before_publication
+    assert not close_returned_before_fsync
+    assert not writer_entered_before_publication
+    assert not writer_entered_before_fsync
+    assert creator_errors == []
+    assert close_errors == []
+    with pytest.raises(CollectionFrozenError):
+        store.acquire_write_lease(draft.collection_name)
+
+
+def test_close_inside_an_active_operation_fails_without_deadlocking(
+    tmp_path: Path,
+) -> None:
+    store = CorpusManifestStore(tmp_path / "corpus")
+    collection = corpus_intent().collection_name
+    lease = store.acquire_write_lease(collection)
+
+    with lease.active_operation(collection):
+        with pytest.raises(CollectionLeaseError, match="active operation"):
+            lease.close()
+        lease.require_active_for(collection)
+
+    lease.close()
 
 
 def test_lock_files_are_permanent(tmp_path: Path) -> None:
@@ -287,6 +446,51 @@ def test_live_writer_rejects_a_replaced_named_lock_file(tmp_path: Path) -> None:
             pytest.raises(CollectionLeaseError, match="namespace"),
         ):
             writer.require_active_for(collection)
+
+
+def test_namespace_validation_preserves_control_flow_exceptions_and_closes_temp_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import corpus_store as corpus_store_module
+
+    store = CorpusManifestStore(tmp_path / "corpus")
+    collection = corpus_intent().collection_name
+    lease = store.acquire_write_lease(collection)
+    original_fstat = corpus_store_module.os.fstat
+    original_revalidate = corpus_store_module.revalidate_directory_path
+    opened_locks_fds: list[int] = []
+    root_revalidated = False
+
+    def recording_revalidate(path: Path, descriptor: int) -> None:
+        nonlocal root_revalidated
+        original_revalidate(path, descriptor)
+        root_revalidated = True
+
+    def interrupting_fstat(descriptor: int) -> os.stat_result:
+        if root_revalidated and descriptor not in {
+            lease._root_fd,  # noqa: SLF001
+            lease._lock_fd,  # noqa: SLF001
+        }:
+            opened_locks_fds.append(descriptor)
+            raise KeyboardInterrupt
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(
+        corpus_store_module,
+        "revalidate_directory_path",
+        recording_revalidate,
+    )
+    monkeypatch.setattr(corpus_store_module.os, "fstat", interrupting_fstat)
+
+    with pytest.raises(KeyboardInterrupt):
+        lease.require_active_for(collection)
+
+    assert len(opened_locks_fds) == 1
+    with pytest.raises(OSError) as raised:
+        original_fstat(opened_locks_fds[0])
+    assert raised.value.errno == errno.EBADF
+    lease.close()
 
 
 def test_concrete_leases_cannot_be_publicly_constructed() -> None:
@@ -484,13 +688,28 @@ def test_concurrent_close_retires_descriptors_exactly_once(
     lease = store.acquire_write_lease(corpus_intent().collection_name)
     lock_fd = lease._lock_fd  # noqa: SLF001
     root_fd = lease.root_fd
-    lease_base = type(lease).__mro__[1]
-    racing_closed = _RacingClosedState()
+    state = lease._state  # noqa: SLF001
     original_close = corpus_store_module.os.close
     original_flock = corpus_store_module.fcntl.flock
     call_lock = threading.Lock()
     close_calls = {lock_fd: 0, root_fd: 0}
     unlock_calls = 0
+    active_entered = threading.Event()
+    allow_active_exit = threading.Event()
+    active_errors: list[BaseException] = []
+
+    def hold_active_operation() -> None:
+        try:
+            with lease.active_operation(corpus_intent().collection_name):
+                active_entered.set()
+                if not allow_active_exit.wait(timeout=2):
+                    raise TimeoutError("active-operation test barrier timed out")
+        except BaseException as error:
+            active_errors.append(error)
+
+    holder = threading.Thread(target=hold_active_operation)
+    holder.start()
+    assert active_entered.wait(timeout=1)
 
     def controlled_close(descriptor: int) -> None:
         if descriptor not in close_calls:
@@ -513,7 +732,6 @@ def test_concurrent_close_retires_descriptors_exactly_once(
         if first:
             original_flock(descriptor, operation)
 
-    monkeypatch.setattr(lease_base, "_closed", racing_closed, raising=False)
     monkeypatch.setattr(corpus_store_module.os, "close", controlled_close)
     monkeypatch.setattr(corpus_store_module.fcntl, "flock", controlled_flock)
     errors: list[BaseException] = []
@@ -527,13 +745,39 @@ def test_concurrent_close_retires_descriptors_exactly_once(
     threads = [threading.Thread(target=close_lease) for _ in range(2)]
     for thread in threads:
         thread.start()
+
+    with state.condition:
+        closing_started = state.condition.wait_for(lambda: state.closing, timeout=1)
+    assert closing_started
+    assert all(thread.is_alive() for thread in threads)
+    assert unlock_calls == 0
+    assert close_calls == {lock_fd: 0, root_fd: 0}
+    with (
+        pytest.raises(CollectionLeaseError, match="closing"),
+        lease.active_operation(corpus_intent().collection_name),
+    ):
+        pass
+
+    allow_active_exit.set()
+    holder.join(timeout=1)
     for thread in threads:
         thread.join(timeout=1)
 
+    assert not holder.is_alive()
     assert not any(thread.is_alive() for thread in threads)
+    assert active_errors == []
     assert errors == []
     assert unlock_calls == 1
     assert close_calls == {lock_fd: 1, root_fd: 1}
+    _assert_closed(lock_fd)
+    _assert_closed(root_fd)
+
+    reused = os.open(os.devnull, os.O_RDONLY)
+    try:
+        lease.close()
+        os.fstat(reused)
+    finally:
+        original_close(reused)
 
 
 def test_close_attempts_both_descriptors_when_unlock_fails(
