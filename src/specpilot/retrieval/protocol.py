@@ -8,11 +8,18 @@ from dataclasses import dataclass
 from specpilot.corpus.indexable import IndexUnit
 
 
+def _is_appendix_label(label: str) -> bool:
+    return bool(label) and label.isascii() and all(
+        "A" <= character <= "Z" or "a" <= character <= "z"
+        for character in label
+    )
+
+
 def _appendix_number(label: str) -> int:
+    if not _is_appendix_label(label):
+        raise ValueError("appendix label is not alphabetic")
     value = 0
     for character in label.upper():
-        if not "A" <= character <= "Z":
-            raise ValueError("appendix label is not alphabetic")
         value = value * 26 + ord(character) - ord("A") + 1
     return value
 
@@ -30,8 +37,7 @@ def numeric_clause_path(unit: IndexUnit) -> tuple[int, ...]:
         section = (0, *(int(part) for part in parts))
     elif (
         parts
-        and parts[0]
-        and all("A" <= character <= "Z" for character in parts[0].upper())
+        and _is_appendix_label(parts[0])
         and all(_is_decimal(part) for part in parts[1:])
     ):
         section = (

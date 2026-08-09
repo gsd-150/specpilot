@@ -86,9 +86,11 @@ def test_numeric_paths_sort_body_sections_and_subsections_numerically() -> None:
     ("section_number", "expected"),
     [
         ("A", (1, 1, -1, 1, 0)),
+        ("a", (1, 1, -1, 1, 0)),
         ("B", (1, 2, -1, 1, 0)),
         ("C", (1, 3, -1, 1, 0)),
         ("AA", (1, 27, -1, 1, 0)),
+        ("aa", (1, 27, -1, 1, 0)),
         ("A.2", (1, 1, 2, -1, 1, 0)),
         ("A.10", (1, 1, 10, -1, 1, 0)),
     ],
@@ -146,6 +148,9 @@ def test_clause_and_table_at_one_ordinal_have_distinct_paths_and_payloads() -> N
         {"section_number": "A..1"},
         {"section_number": "A-1"},
         {"section_number": "²"},
+        {"section_number": "ſ"},
+        {"section_number": "ß"},
+        {"section_number": "ﬀ"},
         {"kind": "figure"},
     ],
 )

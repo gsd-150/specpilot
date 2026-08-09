@@ -73,7 +73,7 @@ def test_rrf_deduplicates_by_full_identity_and_preserves_route_ranks() -> None:
     assert fused.hits[0].locator == shared
 
 
-def test_each_route_scores_an_identity_once_but_display_uses_minimum_unit_id() -> None:
+def test_each_route_scores_and_displays_only_its_first_identity_alias() -> None:
     shared = _locator(clause_id="shared", numeric_clause_path=(0, 2, -1, 1, 0))
 
     fused = reciprocal_rank_fusion(
@@ -82,9 +82,26 @@ def test_each_route_scores_an_identity_once_but_display_uses_minimum_unit_id() -
     )
 
     assert len(fused.hits) == 1
-    assert fused.hits[0].unit_id == "a"
+    assert fused.hits[0].unit_id == "z"
     assert fused.hits[0].ranks == {"bm25": 1}
     assert fused.hits[0].score == pytest.approx(1 / 61)
+
+
+def test_display_alias_is_minimum_of_each_routes_first_identity_alias() -> None:
+    shared = _locator(clause_id="shared", numeric_clause_path=(0, 2, -1, 1, 0))
+
+    fused = reciprocal_rank_fusion(
+        (
+            RouteRanking("bm25", ("z", "a")),
+            RouteRanking("dense", ("m", "b")),
+        ),
+        locators={alias: shared for alias in ("z", "a", "m", "b")},
+    )
+
+    assert len(fused.hits) == 1
+    assert fused.hits[0].unit_id == "m"
+    assert fused.hits[0].ranks == {"bm25": 1, "dense": 1}
+    assert fused.hits[0].score == pytest.approx(2 / 61)
 
 
 def test_rrf_is_invariant_to_route_input_order() -> None:

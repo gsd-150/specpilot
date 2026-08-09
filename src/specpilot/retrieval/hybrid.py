@@ -100,7 +100,6 @@ def reciprocal_rank_fusion(
 
     grouped: dict[tuple[object, ...], dict[str, tuple[int, str]]] = {}
     identity_locator: dict[tuple[object, ...], RetrievalLocator] = {}
-    identity_unit_ids: dict[tuple[object, ...], set[str]] = {}
     tie_owner: dict[tuple[object, ...], tuple[object, ...]] = {}
     for ranking in rankings:
         for rank, unit_id in enumerate(ranking.unit_ids, start=1):
@@ -112,7 +111,6 @@ def reciprocal_rank_fusion(
             owner = tie_owner.setdefault(locator.stable_tie_key, identity)
             if owner != identity:
                 raise ValueError("two identities share one stable tie key")
-            identity_unit_ids.setdefault(identity, set()).add(unit_id)
             grouped.setdefault(identity, {}).setdefault(
                 ranking.route, (rank, unit_id)
             )
@@ -125,7 +123,7 @@ def reciprocal_rank_fusion(
         )
         hits.append(
             FusedHit(
-                unit_id=min(identity_unit_ids[identity]),
+                unit_id=min(value[1] for value in by_route.values()),
                 score=score,
                 ranks={
                     route: value[0]
