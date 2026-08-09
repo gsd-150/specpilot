@@ -139,7 +139,11 @@ class EgressRequest(_FrozenModel):
     stage: EgressStage
     route: ProviderRouteBinding
     model_id: Identifier
-    source_manifest: SourceManifest
+    # Both manifest families, matching `SourceManifestResolver`: egress
+    # authorization is a property of the recorded compliance decision, not of
+    # the source document's file format. Pinned to `SourceManifest` alone, the
+    # RFC corpus — the only corpus there is — could not build a request at all.
+    source_manifest: SourceManifest | RfcSourceManifest
     payload: EgressPayload
 
 
@@ -204,7 +208,7 @@ class ReservationRequest(_FrozenModel):
     stage: EgressStage
     route: ProviderRouteBinding
     model_id: Identifier
-    source_manifest: SourceManifest
+    source_manifest: SourceManifest | RfcSourceManifest
     projected_payload: EgressPayload
     disclosures: tuple[DisclosureFact, ...]
 

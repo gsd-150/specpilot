@@ -28,7 +28,11 @@ from specpilot.contracts.egress import (
     TokenCounter,
     UsageSnapshot,
 )
-from specpilot.contracts.manifests import ProviderUse, SourceManifest
+from specpilot.contracts.manifests import (
+    ProviderUse,
+    RfcSourceManifest,
+    SourceManifest,
+)
 from specpilot.egress.policy import (
     EgressPolicy,
     MissingDocumentCap,
@@ -239,7 +243,9 @@ class EgressPolicyEnforcer:
             atomic_claim_id=claim_id,
         )
 
-    def _stored_source_manifest(self, request: EgressRequest) -> SourceManifest:
+    def _stored_source_manifest(
+        self, request: EgressRequest
+    ) -> SourceManifest | RfcSourceManifest:
         """Resolve the manifest from the store; never authorize on the request copy.
 
         A caller can build a self-consistent ``SourceManifest`` that says
