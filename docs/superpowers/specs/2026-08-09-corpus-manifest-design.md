@@ -1,7 +1,7 @@
 # Corpus Manifest Freeze and Verification Design
 
 **Date:** 2026-08-09
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved
 **Scope:** Complete W2 Task 6 for the existing RFC 9110/9112 corpus and its
 current Qdrant collection.
 
@@ -42,7 +42,8 @@ the ID field excluded, matching the source-manifest content-addressing model.
 The v1 contract binds:
 
 - schema version and optional predecessor corpus-manifest ID;
-- a sorted, unique tuple of source-manifest IDs;
+- a unique tuple of source-manifest IDs, canonically ordered by each referenced
+  manifest's `(document_id, document_version, manifest_id)`;
 - parser, chunker, index-text, BM25-tokenizer, and embedding-pipeline versions;
 - the embedding weights SHA-256 and dense vector width;
 - BM25 `k1`, `b`, tokenizer version, and built-index fingerprint;
@@ -84,6 +85,8 @@ version-specific response object. It binds:
 - one unnamed dense vector;
 - vector size 1024 and cosine distance;
 - vector datatype and quantization settings when present;
+- effective HNSW construction/full-scan settings and the dense query-parameter
+  contract;
 - sparse-vector configuration (empty for this corpus);
 - Qdrant payload-index schema;
 - the exact locator payload contract and nullable fields.
@@ -96,6 +99,12 @@ collection files, while the inventory root binds their logical corpus meaning.
 
 All units are ordered by `unit_id`. Duplicate local unit IDs, Qdrant point IDs,
 or Qdrant payload `unit_id` values are hard failures.
+
+Source documents are ordered by `(document_id, document_version, manifest_id)`
+before `LocalCorpus` and BM25 are built. This makes CLI pair order irrelevant
+while retaining RFC 9110 before RFC 9112 and therefore preserves the sealed
+pooling run's BM25 fingerprint
+`8506ccdede80489ab86f368208d97f4d62739bc5b72629a85a663c72d508c8d3`.
 
 `derived_corpus_sha256` preserves the algorithm used to name the current real
 collection:
