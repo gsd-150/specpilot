@@ -387,18 +387,59 @@ methods, §12 content negotiation, §13 conditional requests. The abstract parts
 are where the three existing L2 records went and are the reason this plan
 exists; §9's framing sections are not where a first pass should start.
 
-- [ ] **Step 1: Draft 20 L1 proposals across at least 8 distinct section
+- [x] **Step 1: Draft 20 L1 proposals across at least 8 distinct section
       families**, with the 60/40 clause-first / scenario-first mix §8.2.2
       requires and at least 3 deliberately unanswerable items.
 
-- [ ] **Step 2: Draft key points for each, marked as drafted**
+| | drafted | required |
+| --- | --- | --- |
+| proposals | 20 | 20 |
+| splits | dev 15, locked 5 | — |
+| clause-first share | 0.60 exactly (12 / 8) | §8.2.2 0.60 |
+| section families | 9 — §7, §8, §9, §10, §11, §12, §13, §14, §15 | ≥ 8 |
+| unanswerable | dev 3, locked 2 | ≥ 3; §8.1 floors dev 3, locked 5 |
+
+The locked floor of 5 unanswerable items is not met and cannot be by a 20-item
+pass that is mostly dev. Three more locked refusals are owed to a later pass.
+
+Gold is named in the drafting script by section number and paragraph ordinal and
+the clause ID is looked up from the frozen document. A hand-pasted 64-hex digest
+is one keystroke away from a proposal that points at the wrong clause and still
+validates against everything.
+
+**The five unanswerable items were each checked against both documents, not
+assumed.** An item labelled unanswerable that some clause does answer is corrupt
+gold, and it corrupts quietly — the system would be marked wrong for being
+right. Two are unanswerable because the subject is absent from HTTP semantics
+entirely (a status code for excessive request rates; a size limit on client-side
+stored state). Three are the harder shape, where a topically adjacent clause
+exists and still does not answer: the obligation to send a final status code
+after 100 (Continue) carries no deadline; §11 defines the authentication
+framework and not any scheme's cryptographic parameters; and §8.3.1 prints
+`text/html;charset=utf-8` as a spelling example, which retrieval finds instantly
+and which requires no encoding of anything.
+
+- [x] **Step 2: Draft key points for each, marked as drafted**
 
 Key points are the part the forced choice cannot check — there is nothing to
 compare a criterion against. They are drafted for speed and the review records
 whether they were edited, so "accepted verbatim" is a countable fact rather than
 an invisible one.
 
-- [ ] **Step 3: Verify every proposal validates and none holds clause prose**
+- [x] **Step 3: Verify every proposal validates and none holds clause prose**
+
+`tmp/verify_proposals.py` checks all six: the contract validates, the gold clause
+exists in the named frozen document, no drafted key point restates its clause,
+the structural selector can fill the candidate set, the direction mix and
+unanswerable floors hold, and the families spread. All 20 pass.
+
+Then every proposal was run through `annotation review` against the real RFC
+9110, answering "none" each time so nothing was written to the real store: 20
+sheets rendered, 0 annotations, 20 throwaway decisions, no refusals. All 45
+distractors came from `same_section` — the hardest tier, where every candidate
+is topically identical to the gold and only the specific requirement separates
+them. Question-to-gold literal overlap spans 0.06 to 0.43, so §8.2.2's
+stratification by overlap has both strata to work with.
 
 ---
 
