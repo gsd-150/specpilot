@@ -10,6 +10,7 @@ from qdrant_client import QdrantClient
 
 from specpilot.manifests.corpus_store import (
     CollectionFreezeLease,
+    CollectionFrozenError,
     CorpusManifestStore,
 )
 from specpilot.retrieval.dense import (
@@ -220,3 +221,20 @@ def test_second_create_does_not_delete_the_existing_collection(
         "u1",
         "u2",
     }
+
+
+def test_a_frozen_registry_entry_permanently_revokes_writer_leases(
+    index: DenseIndex,
+    manifest_store: CorpusManifestStore,
+) -> None:
+    """A sealed application collection cannot regain ingestion authority."""
+    from tests.helpers.corpus_manifest_factory import corpus_draft
+
+    with manifest_store.acquire_freeze_lease(index.name) as lease:
+        manifest_store.create(
+            corpus_draft(collection_name=index.name),
+            lease=lease,
+        )
+
+    with pytest.raises(CollectionFrozenError):
+        manifest_store.acquire_write_lease(index.name)

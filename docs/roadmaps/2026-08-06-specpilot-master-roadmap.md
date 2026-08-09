@@ -75,6 +75,14 @@ real provider, credential, or model, and its own output says so.
    - Build versioned Qdrant dense data plus independent BM25 and RRF.
    - Run pooling-only baseline before locking the main evaluation splits.
    - Freeze a read-only `corpus_manifest` and verify its inventory root.
+   - **Complete.** Manifest
+     `1abafff704358c2357ead5b837d212f130cadfa330dfa30d1df0a24f76d74295`
+     seals 1,922 points in `specpilot_ff4841e2d846388014efa06870fbbdb7`;
+     snapshot checksum
+     `a84fb3ac7352c0f73a56978cb4945ea6ec54bae5528504d6581d005cb72ea1c0`
+     and inventory root
+     `70bed824fc70871c49a1d350afa6d7e1fabc37c5a17f170d5db66c0b0cdfb19c`
+     replay and verify without creating another snapshot.
 
 5. **W3 — MCP, L1 agent, API, and real-ledger integration**
    - Expose the five read-only capabilities through Streamable HTTP MCP.

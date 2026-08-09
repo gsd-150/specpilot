@@ -329,7 +329,7 @@ versions, embedding weight hash, BM25 and RRF parameters, the versioned
 collection and snapshot IDs, the schema, the point count, the point and
 content-hash inventory root, and the derived corpus hash.
 
-- [ ] **Step 1: Write failing immutability and verification tests**
+- [x] **Step 1: Write failing immutability and verification tests**
 
 Assert the manifest is content addressed and create-only, like the source
 manifests; that changing any bound field yields a new ID rather than mutating
@@ -337,9 +337,20 @@ one; that ingestion loses write access to the collection after freezing; and
 that a load-time mismatch in schema, point count, or inventory root refuses
 rather than warns.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and freeze the real corpus**
+- [x] **Step 3: Implement and freeze the real corpus**
+
+The real RFC 9110/9112 corpus is sealed by corpus manifest
+`1abafff704358c2357ead5b837d212f130cadfa330dfa30d1df0a24f76d74295`.
+It binds collection `specpilot_ff4841e2d846388014efa06870fbbdb7`, all 1,922
+points, inventory root
+`70bed824fc70871c49a1d350afa6d7e1fabc37c5a17f170d5db66c0b0cdfb19c`,
+and snapshot checksum
+`a84fb3ac7352c0f73a56978cb4945ea6ec54bae5528504d6581d005cb72ea1c0`.
+An exact replay retained one snapshot, load-time verification passed, and the
+frozen registry permanently refused a new writer lease. The nonrestricted
+completion evidence is in `../../reports/2026-08-09-corpus-manifest-freeze.md`.
 
 ---
 
