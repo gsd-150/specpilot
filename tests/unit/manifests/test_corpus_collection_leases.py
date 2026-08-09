@@ -742,6 +742,37 @@ def test_lease_validates_owner_collection_and_mode(tmp_path: Path) -> None:
             )
 
 
+def test_public_operation_contexts_bind_owner_collection_and_mode(
+    tmp_path: Path,
+) -> None:
+    first = CorpusManifestStore(tmp_path / "first")
+    second = CorpusManifestStore(tmp_path / "second")
+    collection = corpus_intent().collection_name
+
+    with first.acquire_write_lease(collection) as writer:
+        with first.write_operation(writer, collection):
+            pass
+        with pytest.raises(CollectionLeaseError), second.write_operation(
+            writer, collection
+        ):
+            pass
+        with pytest.raises(CollectionLeaseError), first.freeze_operation(
+            writer, collection  # type: ignore[arg-type]
+        ):
+            pass
+    with first.acquire_freeze_lease(collection) as freezer:
+        with first.freeze_operation(freezer, collection):
+            pass
+        with pytest.raises(CollectionLeaseError), second.freeze_operation(
+            freezer, collection
+        ):
+            pass
+        with pytest.raises(CollectionLeaseError), first.write_operation(
+            freezer, collection  # type: ignore[arg-type]
+        ):
+            pass
+
+
 def test_root_fd_is_read_only(tmp_path: Path) -> None:
     store = CorpusManifestStore(tmp_path / "corpus")
     collection = corpus_intent().collection_name

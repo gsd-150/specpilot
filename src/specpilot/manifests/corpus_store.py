@@ -568,6 +568,40 @@ class CorpusManifestStore:
             self._acquire(collection_name, exclusive=True, blocking=blocking),
         )
 
+    @contextmanager
+    def write_operation(
+        self,
+        lease: CollectionWriteLease,
+        collection_name: str,
+    ) -> Iterator[None]:
+        """Keep an owned shared lease live for one complete write operation."""
+        if type(lease) is not CollectionWriteLease:
+            raise CollectionLeaseError("an owned write lease is required")
+        with CorpusManifestStore._owned_operation(
+            self,
+            lease,
+            collection_name=collection_name,
+            exclusive=False,
+        ):
+            yield
+
+    @contextmanager
+    def freeze_operation(
+        self,
+        lease: CollectionFreezeLease,
+        collection_name: str,
+    ) -> Iterator[None]:
+        """Keep an owned exclusive lease live for one complete admin operation."""
+        if type(lease) is not CollectionFreezeLease:
+            raise CollectionLeaseError("an owned freeze lease is required")
+        with CorpusManifestStore._owned_operation(
+            self,
+            lease,
+            collection_name=collection_name,
+            exclusive=True,
+        ):
+            yield
+
     def _acquire(
         self,
         collection_name: str,

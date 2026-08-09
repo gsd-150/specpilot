@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from qdrant_client import QdrantClient
@@ -56,35 +57,31 @@ def index(
     qdrant_url: str,
     manifest_store: CorpusManifestStore,
 ) -> Iterator[DenseIndex]:
-    collection_name = "specpilot_test_collection"
-    raw = QdrantClient(url=qdrant_url, trust_env=False)
+    collection_name = f"specpilot_test_{uuid4().hex}"
+    created = False
     try:
-        if raw.collection_exists(collection_name):
-            raw.delete_collection(collection_name)
-    finally:
-        raw.close()
+        with manifest_store.acquire_write_lease(
+            collection_name
+        ) as write_lease, DenseIndexWriter.create(
+            qdrant_url,
+            collection_name,
+            manifest_store,
+            write_lease,
+        ) as writer:
+            created = True
+            writer.upsert(
+                [
+                    DensePoint("u1", unit_vector(1), payload("u1", "5.6.1")),
+                    DensePoint("u2", unit_vector(2), payload("u2", "5.6.2")),
+                ]
+            )
 
-    with manifest_store.acquire_write_lease(
-        collection_name
-    ) as write_lease, DenseIndexWriter.create(
-        qdrant_url,
-        collection_name,
-        write_lease,
-    ) as writer:
-        writer.upsert(
-            [
-                DensePoint("u1", unit_vector(1), payload("u1", "5.6.1")),
-                DensePoint("u2", unit_vector(2), payload("u2", "5.6.2")),
-            ]
-        )
-
-    try:
         with DenseIndex.open(qdrant_url, collection_name) as reader:
             yield reader
     finally:
         cleanup = QdrantClient(url=qdrant_url, trust_env=False)
         try:
-            if cleanup.collection_exists(collection_name):
+            if created and cleanup.collection_exists(collection_name):
                 cleanup.delete_collection(collection_name)
         finally:
             cleanup.close()
@@ -154,7 +151,12 @@ def test_upserting_the_same_point_twice_does_not_duplicate_it(
 
     with manifest_store.acquire_write_lease(
         index.name
-    ) as lease, DenseIndexWriter.open(qdrant_url, index.name, lease) as writer:
+    ) as lease, DenseIndexWriter.open(
+        qdrant_url,
+        index.name,
+        manifest_store,
+        lease,
+    ) as writer:
         writer.upsert([point])
         writer.upsert([point])
 
@@ -188,8 +190,14 @@ def test_real_snapshot_has_a_checksum(
     qdrant_url: str,
     index: DenseIndex,
     freeze_lease: CollectionFreezeLease,
+    manifest_store: CorpusManifestStore,
 ) -> None:
-    with DenseSnapshotAdmin.open(qdrant_url, index.name, freeze_lease) as admin:
+    with DenseSnapshotAdmin.open(
+        qdrant_url,
+        index.name,
+        manifest_store,
+        freeze_lease,
+    ) as admin:
         created = admin.create_snapshot()
 
     assert created in index.snapshots()
@@ -205,7 +213,7 @@ def test_second_create_does_not_delete_the_existing_collection(
     with manifest_store.acquire_write_lease(
         index.name
     ) as lease, pytest.raises(FileExistsError):
-        DenseIndexWriter.create(qdrant_url, index.name, lease)
+        DenseIndexWriter.create(qdrant_url, index.name, manifest_store, lease)
 
     assert index.point_count() == 2
     assert {record.payload["unit_id"] for record in index.iter_records()} == {

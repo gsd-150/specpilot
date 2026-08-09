@@ -25,11 +25,11 @@ import json
 import math
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Any, Literal, Never, Self, final
 
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
@@ -54,6 +54,7 @@ from specpilot.manifests.corpus_store import (
     CollectionFreezeLease,
     CollectionLeaseError,
     CollectionWriteLease,
+    CorpusManifestStore,
 )
 
 # BGE-M3's dense width. A vector of any other size is a bug upstream, and
@@ -63,6 +64,15 @@ VECTOR_SIZE = 1024
 _NAME_PREFIX = "specpilot"
 _NAME_DIGEST_CHARS = 32
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
+_LOCATOR_KEYS = (
+    "unit_id",
+    "kind",
+    "document_id",
+    "document_version",
+    "section_number",
+    "section_path",
+)
 
 BASELINE_DENSE_QUERY = DenseQueryParameters(
     hnsw_ef=None,
@@ -94,8 +104,23 @@ def _new_client(url: str) -> Any:
 
 def _close_after_failure(client: Any) -> None:
     """Best-effort cleanup that never replaces the factory's primary error."""
-    with suppress(DenseBackendUnavailable):
+    with suppress(Exception):
         _qdrant_call(client.close)
+
+
+def _close_on_exit(client: Any, exc_type: type[BaseException] | None) -> None:
+    if exc_type is None:
+        _qdrant_call(client.close)
+    else:
+        _close_after_failure(client)
+
+
+def _optional_bool(value: object, *, field_name: str) -> bool:
+    if value is None:
+        return False
+    if type(value) is not bool:
+        raise ValueError(f"Qdrant returned an invalid {field_name}")
+    return value
 
 
 def _canonical_config_sha256(value: object | None) -> str | None:
@@ -144,6 +169,8 @@ def normalize_collection_schema(info: Any) -> QdrantCollectionSchema:
         raise ValueError("corpus-manifest/v1 requires one unnamed dense vector")
     if vectors.multivector_config is not None:
         raise ValueError("corpus-manifest/v1 does not support multivectors")
+    if sparse_vectors is not None and not isinstance(sparse_vectors, Mapping):
+        raise ValueError("Qdrant returned an invalid sparse vector schema")
     if sparse_vectors:
         raise ValueError("corpus-manifest/v1 does not support sparse vectors")
 
@@ -173,11 +200,21 @@ def normalize_collection_schema(info: Any) -> QdrantCollectionSchema:
     except AttributeError as error:
         raise ValueError("Qdrant returned an incomplete HNSW schema") from error
     if vectors.hnsw_config is not None:
-        for field_name in hnsw_fields:
-            override = getattr(vectors.hnsw_config, field_name)
-            if override is not None:
-                effective_hnsw[field_name] = override
-    effective_hnsw["on_disk"] = bool(effective_hnsw["on_disk"] or False)
+        try:
+            for field_name in hnsw_fields:
+                override = getattr(vectors.hnsw_config, field_name)
+                if override is not None:
+                    effective_hnsw[field_name] = override
+        except AttributeError as error:
+            raise ValueError("Qdrant returned an incomplete HNSW override") from error
+    effective_hnsw["on_disk"] = _optional_bool(
+        effective_hnsw["on_disk"],
+        field_name="HNSW on_disk value",
+    )
+    vector_on_disk = _optional_bool(
+        vectors.on_disk,
+        field_name="vector on_disk value",
+    )
 
     if not isinstance(payload_schema, Mapping):
         raise ValueError("Qdrant returned an invalid payload schema")
@@ -219,7 +256,7 @@ def normalize_collection_schema(info: Any) -> QdrantCollectionSchema:
             size=vectors.size,
             distance="cosine",
             datatype="float32",
-            on_disk=bool(vectors.on_disk or False),
+            on_disk=vector_on_disk,
             vector_quantization_sha256=_canonical_config_sha256(
                 vectors.quantization_config
             ),
@@ -275,6 +312,30 @@ def point_payload(unit: Any) -> dict[str, Any]:
     }
 
 
+def _locator_payload(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(_LOCATOR_KEYS):
+        raise ValueError("dense point payload is not locator-payload/v1")
+    payload = dict(value)
+    for field_name in (
+        "unit_id",
+        "document_id",
+        "document_version",
+        "section_path",
+    ):
+        item = payload[field_name]
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("dense point payload is not locator-payload/v1")
+    kind = payload["kind"]
+    if not isinstance(kind, str) or kind not in {"clause", "table"}:
+        raise ValueError("dense point payload is not locator-payload/v1")
+    section_number = payload["section_number"]
+    if section_number is not None and (
+        not isinstance(section_number, str) or not section_number.strip()
+    ):
+        raise ValueError("dense point payload is not locator-payload/v1")
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class DensePoint:
     unit_id: str
@@ -282,6 +343,9 @@ class DensePoint:
     payload: dict[str, Any]
 
     def __post_init__(self) -> None:
+        payload = _locator_payload(self.payload)
+        if payload["unit_id"] != self.unit_id:
+            raise ValueError("dense point unit_id does not match its payload")
         if (
             len(self.vector) != VECTOR_SIZE
             or any(
@@ -294,6 +358,7 @@ class DensePoint:
             raise ValueError(
                 f"vector dimension {len(self.vector)} is not {VECTOR_SIZE}"
             )
+        object.__setattr__(self, "payload", payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +382,10 @@ class DenseSnapshot:
     size_bytes: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if (
+            not isinstance(self.name, str)
+            or _SNAPSHOT_NAME.fullmatch(self.name) is None
+        ):
             raise ValueError("Qdrant returned incomplete snapshot metadata")
         if (
             not isinstance(self.checksum, str)
@@ -357,19 +425,6 @@ def _validate_query(vector: Sequence[float], k: int) -> None:
         for value in vector
     ):
         raise ValueError("query vector is invalid")
-
-
-def _payload_dict(value: object) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("dense point payload is invalid")
-    return dict(value)
-
-
-def _unit_id(payload: Mapping[str, Any]) -> str:
-    unit_id = payload.get("unit_id")
-    if not isinstance(unit_id, str) or not unit_id.strip():
-        raise ValueError("dense point has no unit_id payload")
-    return unit_id
 
 
 def _record_vector(value: object) -> tuple[float, ...]:
@@ -425,7 +480,8 @@ class DenseIndex:
                 with_vectors=False,
             )
             for point in points:
-                found.add(_unit_id(_payload_dict(point.payload or {})))
+                payload = _locator_payload(point.payload or {})
+                found.add(payload["unit_id"])
             if offset is None:
                 return frozenset(found)
 
@@ -452,8 +508,8 @@ class DenseIndex:
                 point_id = point.id
                 if type(point_id) not in (int, str):
                     raise ValueError("dense point id is invalid")
-                payload = _payload_dict(point.payload or {})
-                unit_id = _unit_id(payload)
+                payload = _locator_payload(point.payload or {})
+                unit_id = payload["unit_id"]
                 if point_id in point_ids or unit_id in unit_ids:
                     raise ValueError("dense collection has a duplicate identity")
                 vector = _record_vector(point.vector)
@@ -493,10 +549,10 @@ class DenseIndex:
         )
         result: list[DenseHit] = []
         for point in response.points:
-            payload = _payload_dict(point.payload or {})
+            payload = _locator_payload(point.payload or {})
             result.append(
                 DenseHit(
-                    unit_id=_unit_id(payload),
+                    unit_id=payload["unit_id"],
                     score=float(point.score),
                     payload=payload,
                 )
@@ -515,8 +571,8 @@ class DenseIndex:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
-        self.close()
+        del exc_value, traceback
+        _close_on_exit(self._client, exc_type)
 
 
 def _require_write_lease(lease: object) -> CollectionWriteLease:
@@ -531,30 +587,67 @@ def _require_freeze_lease(lease: object) -> CollectionFreezeLease:
     return lease
 
 
-@dataclass(slots=True)
+def _require_store(store: object) -> CorpusManifestStore:
+    if type(store) is not CorpusManifestStore:
+        raise CollectionLeaseError("dense capability requires its issuing store")
+    return store
+
+
+@contextmanager
+def _write_operation(
+    store: object,
+    lease: object,
+    name: str,
+) -> Iterator[None]:
+    owner = _require_store(store)
+    writer = _require_write_lease(lease)
+    with CorpusManifestStore.write_operation(owner, writer, name):
+        yield
+
+
+@contextmanager
+def _freeze_operation(
+    store: object,
+    lease: object,
+    name: str,
+) -> Iterator[None]:
+    owner = _require_store(store)
+    freezer = _require_freeze_lease(lease)
+    with CorpusManifestStore.freeze_operation(owner, freezer, name):
+        yield
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class DenseIndexWriter:
     """Lease-bound mutation access to one Qdrant collection."""
 
     name: str
     _client: Any = field(repr=False)
+    _store: CorpusManifestStore = field(repr=False)
     _lease: CollectionWriteLease = field(repr=False)
 
     def __post_init__(self) -> None:
-        live_lease = _require_write_lease(self._lease)
-        with live_lease.active_operation(self.name):
+        with _write_operation(self._store, self._lease, self.name):
             pass
+
+    def __init_subclass__(cls, **kwargs: object) -> Never:
+        del cls, kwargs
+        raise TypeError("DenseIndexWriter cannot be subclassed")
 
     @classmethod
     def create(
         cls,
         url: str,
         name: str,
+        store: CorpusManifestStore,
         lease: CollectionWriteLease,
     ) -> DenseIndexWriter:
+        owner = _require_store(store)
         live_lease = _require_write_lease(lease)
-        client = _new_client(url)
-        try:
-            with live_lease.active_operation(name):
+        with _write_operation(owner, live_lease, name):
+            client = _new_client(url)
+            try:
                 if _qdrant_call(client.collection_exists, name):
                     raise FileExistsError(name)
                 _qdrant_call(
@@ -565,49 +658,56 @@ class DenseIndexWriter:
                         distance=Distance.COSINE,
                     ),
                 )
-            return cls(name, client, live_lease)
-        except BaseException:
-            _close_after_failure(client)
-            raise
+                return cls(name, client, owner, live_lease)
+            except BaseException:
+                _close_after_failure(client)
+                raise
 
     @classmethod
     def open(
         cls,
         url: str,
         name: str,
+        store: CorpusManifestStore,
         lease: CollectionWriteLease,
     ) -> DenseIndexWriter:
+        owner = _require_store(store)
         live_lease = _require_write_lease(lease)
-        client = _new_client(url)
-        try:
-            with live_lease.active_operation(name):
+        with _write_operation(owner, live_lease, name):
+            client = _new_client(url)
+            try:
                 if not _qdrant_call(client.collection_exists, name):
                     raise FileNotFoundError(name)
-            return cls(name, client, live_lease)
-        except BaseException:
-            _close_after_failure(client)
-            raise
+                return cls(name, client, owner, live_lease)
+            except BaseException:
+                _close_after_failure(client)
+                raise
 
     def upsert(self, points: Sequence[DensePoint]) -> None:
-        with self._lease.active_operation(self.name):
+        with _write_operation(self._store, self._lease, self.name):
             if not points:
                 return
-            _qdrant_call(
-                self._client.upsert,
-                collection_name=self.name,
-                points=[
+            structs: list[PointStruct] = []
+            for point in points:
+                payload = _locator_payload(point.payload)
+                if payload["unit_id"] != point.unit_id:
+                    raise ValueError("dense point unit_id does not match its payload")
+                structs.append(
                     PointStruct(
                         id=point_id_for_unit(point.unit_id),
                         vector=list(point.vector),
-                        payload=point.payload,
+                        payload=payload,
                     )
-                    for point in points
-                ],
+                )
+            _qdrant_call(
+                self._client.upsert,
+                collection_name=self.name,
+                points=structs,
                 wait=True,
             )
 
     def drop(self) -> None:
-        with self._lease.active_operation(self.name):
+        with _write_operation(self._store, self._lease, self.name):
             _qdrant_call(self._client.delete_collection, self.name)
 
     def close(self) -> None:
@@ -622,37 +722,48 @@ class DenseIndexWriter:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
-        self.close()
+        del exc_value, traceback
+        _close_on_exit(self._client, exc_type)
 
 
-@dataclass(slots=True)
+@final
+@dataclass(frozen=True, slots=True)
 class DenseSnapshotAdmin:
     """Exclusive-lease capability for collection snapshot creation."""
 
     name: str
     _client: Any = field(repr=False)
+    _store: CorpusManifestStore = field(repr=False)
     _lease: CollectionFreezeLease = field(repr=False)
 
     def __post_init__(self) -> None:
-        live_lease = _require_freeze_lease(self._lease)
-        with live_lease.active_operation(self.name):
+        with _freeze_operation(self._store, self._lease, self.name):
             pass
+
+    def __init_subclass__(cls, **kwargs: object) -> Never:
+        del cls, kwargs
+        raise TypeError("DenseSnapshotAdmin cannot be subclassed")
 
     @classmethod
     def open(
         cls,
         url: str,
         name: str,
+        store: CorpusManifestStore,
         lease: CollectionFreezeLease,
     ) -> DenseSnapshotAdmin:
+        owner = _require_store(store)
         live_lease = _require_freeze_lease(lease)
-        with live_lease.active_operation(name):
+        with _freeze_operation(owner, live_lease, name):
             client = _new_client(url)
-            return cls(name, client, live_lease)
+            try:
+                return cls(name, client, owner, live_lease)
+            except BaseException:
+                _close_after_failure(client)
+                raise
 
     def create_snapshot(self) -> DenseSnapshot:
-        with self._lease.active_operation(self.name):
+        with _freeze_operation(self._store, self._lease, self.name):
             value = _qdrant_call(
                 self._client.create_snapshot,
                 self.name,
@@ -678,5 +789,5 @@ class DenseSnapshotAdmin:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
-        self.close()
+        del exc_value, traceback
+        _close_on_exit(self._client, exc_type)

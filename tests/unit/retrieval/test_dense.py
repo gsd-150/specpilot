@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Callable
+from contextlib import nullcontext
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -143,7 +145,11 @@ def test_a_point_payload_holds_locators_and_never_clause_text(
 
 
 def test_a_point_carries_a_vector_of_the_models_width() -> None:
-    point = DensePoint(unit_id="u1", vector=(0.0,) * VECTOR_SIZE, payload={})
+    point = DensePoint(
+        unit_id="u1",
+        vector=(0.0,) * VECTOR_SIZE,
+        payload=_payload(),
+    )
 
     assert len(point.vector) == VECTOR_SIZE
 
@@ -151,7 +157,7 @@ def test_a_point_carries_a_vector_of_the_models_width() -> None:
 def test_a_vector_of_the_wrong_width_is_refused() -> None:
     """A silently reshaped vector would index a document nothing can match."""
     with pytest.raises(ValueError, match="dimension"):
-        DensePoint(unit_id="u1", vector=(0.0, 1.0), payload={})
+        DensePoint(unit_id="u1", vector=(0.0, 1.0), payload=_payload())
 
 
 def _collection_info(
@@ -189,6 +195,19 @@ def _collection_info(
 _DEFAULT_VECTOR = object()
 
 
+def _payload(unit_id: object = "u1", **changes: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "unit_id": unit_id,
+        "kind": "clause",
+        "document_id": "ietf-rfc-9110",
+        "document_version": "2022-06",
+        "section_number": "5.6.1",
+        "section_path": "Fields",
+    }
+    value.update(changes)
+    return value
+
+
 def _record(
     *,
     point_id: object = 1,
@@ -199,20 +218,47 @@ def _record(
         vector = [0.0] * VECTOR_SIZE
     return SimpleNamespace(
         id=point_id,
-        payload={"unit_id": unit_id},
+        payload=_payload(unit_id),
         vector=vector,
     )
 
 
+@pytest.mark.parametrize(
+    ("unit_id", "payload"),
+    [
+        ("u1", {**_payload(), "text": "restricted prose"}),
+        ("u1", {key: value for key, value in _payload().items() if key != "kind"}),
+        ("u1", _payload(kind="other")),
+        ("u1", _payload(document_version=1)),
+        ("u1", _payload(section_number="")),
+        ("u1", _payload(unit_id="u2")),
+    ],
+    ids=("extra", "missing", "kind", "wrong-type", "blank", "unit-mismatch"),
+)
+def test_dense_point_refuses_non_locator_or_mismatched_payloads(
+    unit_id: str,
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        DensePoint(unit_id, (0.0,) * VECTOR_SIZE, payload)
+
+
 class StubClient:
-    def __init__(self, *, exists: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        exists: bool = False,
+        close_error: BaseException | None = None,
+    ) -> None:
         self.exists = exists
         self.closed = 0
         self.created = 0
         self.deleted = 0
         self.upserts = 0
+        self.snapshot_creates = 0
         self.query_kwargs: dict[str, object] | None = None
         self.scroll_responses: list[tuple[list[object], object | None]] = []
+        self.close_error = close_error
 
     def collection_exists(self, name: str) -> bool:
         del name
@@ -260,10 +306,13 @@ class StubClient:
     def create_snapshot(self, name: str, *, wait: bool) -> object:
         del name
         assert wait is True
+        self.snapshot_creates += 1
         return SimpleNamespace(name="snapshot", checksum="a" * 64, size=1)
 
     def close(self) -> None:
         self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 def test_read_only_index_has_no_mutation_surface() -> None:
@@ -438,6 +487,43 @@ def test_nonempty_sparse_schema_is_refused() -> None:
         )
 
 
+@pytest.mark.parametrize("sparse", [[], False, 0], ids=("list", "false", "zero"))
+def test_unknown_empty_sparse_shapes_are_refused(sparse: object) -> None:
+    with pytest.raises(ValueError):
+        normalize_collection_schema(_collection_info(sparse_vectors=sparse))
+
+
+@pytest.mark.parametrize("on_disk", ["false", 1], ids=("string", "integer"))
+def test_non_boolean_vector_and_collection_hnsw_on_disk_are_refused(
+    on_disk: object,
+) -> None:
+    vectors = VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+    object.__setattr__(vectors, "on_disk", on_disk)
+    with pytest.raises(ValueError):
+        normalize_collection_schema(_collection_info(vectors=vectors))
+
+    hnsw = SimpleNamespace(
+        m=16,
+        ef_construct=100,
+        full_scan_threshold=10000,
+        max_indexing_threads=0,
+        on_disk=on_disk,
+        payload_m=None,
+    )
+    with pytest.raises(ValueError):
+        normalize_collection_schema(_collection_info(hnsw_config=hnsw))
+
+
+def test_incomplete_vector_hnsw_override_is_a_schema_value_error() -> None:
+    vectors = VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+    object.__setattr__(vectors, "hnsw_config", SimpleNamespace(m=32))
+
+    with pytest.raises(ValueError) as captured:
+        normalize_collection_schema(_collection_info(vectors=vectors))
+
+    assert type(captured.value) is ValueError
+
+
 def test_baseline_search_parameters_are_sent_explicitly() -> None:
     client = StubClient()
     index = DenseIndex("collection", client)
@@ -522,6 +608,48 @@ def test_invalid_dense_records_are_refused(point: object) -> None:
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {**_payload(), "text": "restricted prose"},
+        {key: value for key, value in _payload().items() if key != "kind"},
+        _payload(kind="other"),
+        _payload(document_id=1),
+        _payload(section_number=1),
+        _payload(section_path=" "),
+    ],
+    ids=("extra", "missing", "kind", "document-id", "section-number", "blank"),
+)
+def test_iter_records_refuses_non_locator_payloads(payload: dict[str, object]) -> None:
+    client = StubClient()
+    point = _record()
+    point.payload = payload
+    client.scroll_responses = [([point], None)]
+
+    with pytest.raises(ValueError):
+        tuple(DenseIndex("collection", client).iter_records())
+
+
+def test_unit_ids_and_search_apply_the_same_exact_payload_validation() -> None:
+    invalid = {**_payload(), "text": "restricted prose"}
+    point = _record()
+    point.payload = invalid
+    scroll_client = StubClient()
+    scroll_client.scroll_responses = [([point], None)]
+    with pytest.raises(ValueError):
+        DenseIndex("collection", scroll_client).unit_ids()
+
+    search_client = StubClient()
+    search_client.query_points = lambda **kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        points=[SimpleNamespace(payload=invalid, score=1.0)]
+    )
+    with pytest.raises(ValueError):
+        DenseIndex("collection", search_client).search(
+            [0.0] * VECTOR_SIZE,
+            1,
+        )
+
+
+@pytest.mark.parametrize(
     "points",
     [
         [_record(point_id=1, unit_id="u1"), _record(point_id=1, unit_id="u2")],
@@ -558,6 +686,10 @@ def test_snapshot_metadata_is_validated_and_sorted() -> None:
     "snapshot",
     [
         SimpleNamespace(name="", checksum="a" * 64, size=1),
+        SimpleNamespace(name="bad/name", checksum="a" * 64, size=1),
+        SimpleNamespace(name="bad name", checksum="a" * 64, size=1),
+        SimpleNamespace(name=" snapshot", checksum="a" * 64, size=1),
+        SimpleNamespace(name="snapshot ", checksum="a" * 64, size=1),
         SimpleNamespace(name="snapshot", checksum="A" * 64, size=1),
         SimpleNamespace(name="snapshot", checksum="a" * 63, size=1),
         SimpleNamespace(name="snapshot", checksum="a" * 64, size=0),
@@ -610,13 +742,51 @@ def test_os_errors_from_backend_calls_use_the_same_stable_error() -> None:
 def _install_client(
     monkeypatch: pytest.MonkeyPatch,
     client: StubClient,
-) -> None:
+) -> list[tuple[str, bool]]:
+    constructions: list[tuple[str, bool]] = []
+
     def construct(*, url: str, trust_env: bool) -> StubClient:
         assert url == "http://127.0.0.1:6333"
         assert trust_env is False
+        constructions.append((url, trust_env))
         return client
 
     monkeypatch.setattr("specpilot.retrieval.dense.QdrantClient", construct)
+    return constructions
+
+
+def test_dense_capabilities_reject_foreign_store_lease_domains_before_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "specpilot_collection"
+    first = CorpusManifestStore(tmp_path / "first")
+    second = CorpusManifestStore(tmp_path / "second")
+    client = StubClient()
+    constructions = _install_client(monkeypatch, client)
+
+    with first.acquire_freeze_lease(name), second.acquire_write_lease(
+        name
+    ) as foreign_writer, pytest.raises(CollectionLeaseError):
+        DenseIndexWriter.create(
+            "http://127.0.0.1:6333",
+            name,
+            first,
+            foreign_writer,
+        )
+    with first.acquire_write_lease(name), second.acquire_freeze_lease(
+        name
+    ) as foreign_freezer, pytest.raises(CollectionLeaseError):
+        DenseSnapshotAdmin.open(
+            "http://127.0.0.1:6333",
+            name,
+            first,
+            foreign_freezer,
+        )
+
+    assert constructions == []
+    assert client.created == 0
+    assert client.snapshot_creates == 0
 
 
 def test_writer_create_requires_an_exact_live_matching_write_lease(
@@ -631,7 +801,7 @@ def test_writer_create_requires_an_exact_live_matching_write_lease(
     foreign = store.acquire_write_lease("another_collection")
     try:
         with pytest.raises(CollectionLeaseError):
-            DenseIndexWriter.create("http://127.0.0.1:6333", name, foreign)
+            DenseIndexWriter.create("http://127.0.0.1:6333", name, store, foreign)
     finally:
         foreign.close()
 
@@ -639,7 +809,7 @@ def test_writer_create_requires_an_exact_live_matching_write_lease(
     try:
         with pytest.raises(CollectionLeaseError):
             DenseIndexWriter.create(  # type: ignore[arg-type]
-                "http://127.0.0.1:6333", name, freeze
+                "http://127.0.0.1:6333", name, store, freeze
             )
     finally:
         freeze.close()
@@ -647,7 +817,7 @@ def test_writer_create_requires_an_exact_live_matching_write_lease(
     closed = store.acquire_write_lease(name)
     closed.close()
     with pytest.raises(CollectionLeaseError):
-        DenseIndexWriter.create("http://127.0.0.1:6333", name, closed)
+        DenseIndexWriter.create("http://127.0.0.1:6333", name, store, closed)
 
     assert client.created == 0
 
@@ -662,11 +832,76 @@ def test_direct_capability_construction_cannot_bypass_exact_lease_types(
     with store.acquire_freeze_lease(name) as freeze, pytest.raises(
         CollectionLeaseError
     ):
-        DenseIndexWriter(name, client, freeze)  # type: ignore[arg-type]
+        DenseIndexWriter(name, client, store, freeze)  # type: ignore[arg-type]
     with store.acquire_write_lease(name) as writer, pytest.raises(
         CollectionLeaseError
     ):
-        DenseSnapshotAdmin(name, client, writer)  # type: ignore[arg-type]
+        DenseSnapshotAdmin(name, client, store, writer)  # type: ignore[arg-type]
+
+
+def test_mutation_capabilities_are_frozen_final_and_revalidate_private_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "specpilot_collection"
+    store = CorpusManifestStore(tmp_path / "manifests")
+    writer_client = StubClient()
+    _install_client(monkeypatch, writer_client)
+
+    with store.acquire_write_lease(name) as lease:
+        writer = DenseIndexWriter.create(
+            "http://127.0.0.1:6333",
+            name,
+            store,
+            lease,
+        )
+        with pytest.raises(FrozenInstanceError):
+            writer.name = "other"  # type: ignore[misc]
+        with pytest.raises(FrozenInstanceError):
+            writer._lease = object()  # type: ignore[assignment]  # noqa: SLF001
+
+        original_lease = writer._lease  # noqa: SLF001
+        object.__setattr__(
+            writer,
+            "_lease",
+            SimpleNamespace(active_operation=nullcontext),
+        )
+        with pytest.raises(CollectionLeaseError):
+            writer.upsert([])
+        object.__setattr__(writer, "_lease", original_lease)
+        object.__setattr__(writer, "name", "other")
+        with pytest.raises(CollectionLeaseError):
+            writer.drop()
+        writer.close()
+
+    with pytest.raises(TypeError):
+
+        class WriterSubclass(DenseIndexWriter):
+            def __post_init__(self) -> None:
+                pass
+
+    admin_client = StubClient()
+    with store.acquire_freeze_lease(name) as lease:
+        admin = DenseSnapshotAdmin(name, admin_client, store, lease)
+        with pytest.raises(FrozenInstanceError):
+            admin._store = object()  # type: ignore[assignment]  # noqa: SLF001
+        object.__setattr__(
+            admin,
+            "_lease",
+            SimpleNamespace(active_operation=nullcontext),
+        )
+        with pytest.raises(CollectionLeaseError):
+            admin.create_snapshot()
+        admin.close()
+    assert writer_client.upserts == 0
+    assert writer_client.deleted == 0
+    assert admin_client.snapshot_creates == 0
+
+    with pytest.raises(TypeError):
+
+        class AdminSubclass(DenseSnapshotAdmin):
+            def __post_init__(self) -> None:
+                pass
 
 
 def test_existing_collection_is_never_deleted_by_writer_create(
@@ -679,10 +914,101 @@ def test_existing_collection_is_never_deleted_by_writer_create(
     _install_client(monkeypatch, client)
 
     with store.acquire_write_lease(name) as lease, pytest.raises(FileExistsError):
-        DenseIndexWriter.create("http://127.0.0.1:6333", name, lease)
+        DenseIndexWriter.create("http://127.0.0.1:6333", name, store, lease)
 
     assert client.deleted == 0
     assert client.created == 0
+    assert client.closed == 1
+
+
+def test_factory_cleanup_does_not_replace_the_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "specpilot_collection"
+    store = CorpusManifestStore(tmp_path / "manifests")
+    client = StubClient(
+        exists=True,
+        close_error=RuntimeError("secondary close failure"),
+    )
+    _install_client(monkeypatch, client)
+
+    with store.acquire_write_lease(name) as lease, pytest.raises(FileExistsError):
+        DenseIndexWriter.create(
+            "http://127.0.0.1:6333",
+            name,
+            store,
+            lease,
+        )
+
+    assert client.closed == 1
+
+
+@pytest.mark.parametrize(
+    "close_error",
+    [
+        OSError("secondary close failure"),
+        UnexpectedResponse(503, "secondary", b"secret", httpx.Headers()),
+    ],
+    ids=("os-error", "qdrant-api-error"),
+)
+def test_context_cleanup_preserves_body_errors_but_reports_close_only_errors(
+    tmp_path: Path,
+    close_error: BaseException,
+) -> None:
+    reader_client = StubClient(close_error=close_error)
+    with pytest.raises(
+        ValueError,
+        match="primary body failure",
+    ), DenseIndex("collection", reader_client):
+        raise ValueError("primary body failure")
+    assert reader_client.closed == 1
+
+    close_only = StubClient(close_error=OSError("secret socket"))
+    with pytest.raises(
+        DenseBackendUnavailable,
+        match="dense backend unavailable",
+    ), DenseIndex("collection", close_only):
+        pass
+
+    name = "specpilot_collection"
+    store = CorpusManifestStore(tmp_path / "manifests")
+    writer_client = StubClient(close_error=RuntimeError("secondary writer close"))
+    with store.acquire_write_lease(name) as lease:
+        writer = DenseIndexWriter(name, writer_client, store, lease)
+        with pytest.raises(ValueError, match="primary writer body"), writer:
+            raise ValueError("primary writer body")
+    admin_client = StubClient(close_error=RuntimeError("secondary admin close"))
+    with store.acquire_freeze_lease(name) as lease:
+        admin = DenseSnapshotAdmin(name, admin_client, store, lease)
+        with pytest.raises(ValueError, match="primary admin body"), admin:
+            raise ValueError("primary admin body")
+
+
+def test_snapshot_admin_open_cleans_client_when_construction_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "specpilot_collection"
+    store = CorpusManifestStore(tmp_path / "manifests")
+    client = StubClient(close_error=RuntimeError("secondary close failure"))
+    _install_client(monkeypatch, client)
+
+    def fail_init(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise ValueError("primary construction failure")
+
+    monkeypatch.setattr(DenseSnapshotAdmin, "__init__", fail_init)
+    with store.acquire_freeze_lease(name) as lease, pytest.raises(
+        ValueError,
+        match="primary construction failure",
+    ):
+        DenseSnapshotAdmin.open(
+            "http://127.0.0.1:6333",
+            name,
+            store,
+            lease,
+        )
     assert client.closed == 1
 
 
@@ -695,7 +1021,9 @@ def test_escaped_writer_rejects_every_mutation_after_lease_close(
     client = StubClient()
     _install_client(monkeypatch, client)
     lease = store.acquire_write_lease(name)
-    writer = DenseIndexWriter.create("http://127.0.0.1:6333", name, lease)
+    writer = DenseIndexWriter.create(
+        "http://127.0.0.1:6333", name, store, lease
+    )
     lease.close()
 
     with pytest.raises(CollectionLeaseError):
@@ -708,6 +1036,24 @@ def test_escaped_writer_rejects_every_mutation_after_lease_close(
     writer.close()
 
 
+def test_upsert_revalidates_payload_after_point_construction(
+    tmp_path: Path,
+) -> None:
+    name = "specpilot_collection"
+    store = CorpusManifestStore(tmp_path / "manifests")
+    client = StubClient(exists=True)
+    point = DensePoint("u1", (0.0,) * VECTOR_SIZE, _payload())
+    point.payload["text"] = "restricted prose"
+
+    with store.acquire_write_lease(name) as lease:
+        writer = DenseIndexWriter(name, client, store, lease)
+        with pytest.raises(ValueError):
+            writer.upsert([point])
+        writer.close()
+
+    assert client.upserts == 0
+
+
 def test_writer_and_reader_contexts_close_clients(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -717,7 +1063,7 @@ def test_writer_and_reader_contexts_close_clients(
     writer_client = StubClient()
     _install_client(monkeypatch, writer_client)
     with store.acquire_write_lease(name) as lease, DenseIndexWriter.create(
-        "http://127.0.0.1:6333", name, lease
+        "http://127.0.0.1:6333", name, store, lease
     ) as writer:
         assert writer.name == name
     assert writer_client.closed == 1
@@ -800,10 +1146,11 @@ def test_upsert_holds_the_write_lease_until_the_backend_call_finishes(
     tmp_path: Path,
 ) -> None:
     name = "specpilot_collection"
-    lease = CorpusManifestStore(tmp_path / "manifests").acquire_write_lease(name)
+    store = CorpusManifestStore(tmp_path / "manifests")
+    lease = store.acquire_write_lease(name)
     client = BlockingClient()
-    writer = DenseIndexWriter(name, client, lease)
-    point = DensePoint("u1", (0.0,) * VECTOR_SIZE, {"unit_id": "u1"})
+    writer = DenseIndexWriter(name, client, store, lease)
+    point = DensePoint("u1", (0.0,) * VECTOR_SIZE, _payload())
 
     _assert_close_waits_for_operation(
         lease,
@@ -821,9 +1168,10 @@ def test_snapshot_holds_the_freeze_lease_until_the_backend_call_finishes(
     tmp_path: Path,
 ) -> None:
     name = "specpilot_collection"
-    lease = CorpusManifestStore(tmp_path / "manifests").acquire_freeze_lease(name)
+    store = CorpusManifestStore(tmp_path / "manifests")
+    lease = store.acquire_freeze_lease(name)
     client = BlockingClient()
-    admin = DenseSnapshotAdmin(name, client, lease)
+    admin = DenseSnapshotAdmin(name, client, store, lease)
 
     _assert_close_waits_for_operation(
         lease,
