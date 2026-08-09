@@ -7,10 +7,11 @@ import json
 import os
 import re
 import stat
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Never, Self, SupportsIndex, cast
+from typing import Never, Self, SupportsIndex, cast, final
 
 from pydantic import ValidationError
 
@@ -22,6 +23,7 @@ from specpilot.contracts.corpus_manifest import (
 from specpilot.ingestion._secure_fs import (
     directory_open_flags,
     open_directory_path,
+    revalidate_directory_path,
 )
 from specpilot.manifests._secure_records import SecureRecordDirectory
 from specpilot.manifests.canonical import canonical_json
@@ -67,16 +69,30 @@ def _raise_first(errors: list[BaseException]) -> None:
         raise errors[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _LeaseNamespace:
+    directory: Path
+    collection_name: str
+    lock_name: str
+    locks_identity: _FileIdentity
+    lock_identity: _FileIdentity
+
+
+@dataclass(slots=True)
+class _LeaseState:
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    closed: bool = False
+
+
 @dataclass(slots=True, init=False)
 class _CollectionLease:
-    _collection_name: str = field(repr=False)
+    _namespace: _LeaseNamespace = field(repr=False)
     _issue_token: object = field(repr=False)
     _owner_token: object = field(repr=False)
     _root_fd: int = field(repr=False)
     _lock_fd: int = field(repr=False)
-    _locks_identity: _FileIdentity = field(repr=False)
     _exclusive: bool
-    _closed: bool = False
+    _state: _LeaseState = field(repr=False)
 
     def __init__(self) -> None:
         raise TypeError("collection leases are issued by CorpusManifestStore")
@@ -86,28 +102,36 @@ class _CollectionLease:
         cls,
         *,
         issue_token: object,
+        directory: Path,
         collection_name: str,
         owner_token: object,
         root_fd: int,
         lock_fd: int,
+        lock_name: str,
         locks_identity: _FileIdentity,
+        lock_identity: _FileIdentity,
         exclusive: bool,
     ) -> Self:
         if issue_token is not _LEASE_ISSUER:
             raise CollectionLeaseError("collection lease issuer is invalid")
         lease = object.__new__(cls)
-        lease._collection_name = collection_name
+        lease._namespace = _LeaseNamespace(
+            directory=directory,
+            collection_name=collection_name,
+            lock_name=lock_name,
+            locks_identity=locks_identity,
+            lock_identity=lock_identity,
+        )
         lease._issue_token = issue_token
         lease._owner_token = owner_token
         lease._root_fd = root_fd
         lease._lock_fd = lock_fd
-        lease._locks_identity = locks_identity
         lease._exclusive = exclusive
-        lease._closed = False
+        lease._state = _LeaseState()
         return lease
 
     def __enter__(self) -> Self:
-        self.require_active_for(self._collection_name)
+        self.require_active_for(self._namespace.collection_name)
         return self
 
     def __copy__(self) -> Never:
@@ -135,24 +159,107 @@ class _CollectionLease:
 
     @property
     def collection_name(self) -> str:
-        self.require_active_for(self._collection_name)
-        return self._collection_name
+        self.require_active_for(self._namespace.collection_name)
+        return self._namespace.collection_name
 
     @property
     def root_fd(self) -> int:
-        self.require_active_for(self._collection_name)
+        self.require_active_for(self._namespace.collection_name)
         return self._root_fd
 
     def require_active_for(self, collection_name: str) -> None:
+        _CollectionLease._require_active_state(self, collection_name)
+
+    def _require_active_state(
+        self,
+        collection_name: str,
+        *,
+        owner_token: object | None = None,
+        validate_owner: bool = False,
+        exclusive: bool | None = None,
+    ) -> None:
         try:
-            valid = self._issue_token is _LEASE_ISSUER and not self._closed
-            bound_collection = self._collection_name
+            state = self._state
+            bound_collection = self._namespace.collection_name
         except AttributeError as error:
             raise CollectionLeaseError("collection lease is closed") from error
-        if not valid:
-            raise CollectionLeaseError("collection lease is closed")
-        if bound_collection != collection_name:
-            raise CollectionLeaseError("collection lease names another collection")
+        with state.lock:
+            if self._issue_token is not _LEASE_ISSUER or state.closed:
+                raise CollectionLeaseError("collection lease is closed")
+            if bound_collection != collection_name:
+                raise CollectionLeaseError("collection lease names another collection")
+            if validate_owner and self._owner_token is not owner_token:
+                raise CollectionLeaseError(
+                    "collection lease is not active for this store"
+                )
+            if exclusive is not None and self._exclusive is not exclusive:
+                raise CollectionLeaseError("collection lease has the wrong mode")
+            _CollectionLease._validate_namespace(self)
+
+    def _validate_namespace(self) -> None:
+        namespace = self._namespace
+        locks_fd: int | None = None
+        failure: BaseException | None = None
+        try:
+            root_status = os.fstat(self._root_fd)
+            if (
+                not stat.S_ISDIR(root_status.st_mode)
+                or stat.S_IMODE(root_status.st_mode) != 0o700
+            ):
+                raise FileExistsError(namespace.directory)
+            revalidate_directory_path(namespace.directory, self._root_fd)
+            locks_fd = os.open(
+                _LOCKS_DIRECTORY,
+                directory_open_flags(),
+                dir_fd=self._root_fd,
+            )
+            locks_status = os.fstat(locks_fd)
+            named_locks = os.stat(
+                _LOCKS_DIRECTORY,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(locks_status.st_mode)
+                or stat.S_IMODE(locks_status.st_mode) != 0o700
+                or _file_identity(locks_status) != namespace.locks_identity
+                or not stat.S_ISDIR(named_locks.st_mode)
+                or stat.S_IMODE(named_locks.st_mode) != 0o700
+                or _file_identity(named_locks) != namespace.locks_identity
+            ):
+                raise FileExistsError(namespace.directory / _LOCKS_DIRECTORY)
+
+            lock_status = os.fstat(self._lock_fd)
+            named_lock = os.stat(
+                namespace.lock_name,
+                dir_fd=locks_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(lock_status.st_mode)
+                or lock_status.st_nlink != 1
+                or stat.S_IMODE(lock_status.st_mode) != 0o600
+                or _file_identity(lock_status) != namespace.lock_identity
+                or not stat.S_ISREG(named_lock.st_mode)
+                or named_lock.st_nlink != 1
+                or stat.S_IMODE(named_lock.st_mode) != 0o600
+                or _file_identity(named_lock) != namespace.lock_identity
+            ):
+                path = namespace.directory / _LOCKS_DIRECTORY / namespace.lock_name
+                raise FileExistsError(path)
+        except BaseException as error:
+            failure = error
+        finally:
+            if locks_fd is not None:
+                try:
+                    os.close(locks_fd)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise CollectionLeaseError(
+                "collection lease namespace changed"
+            ) from failure
 
     def require_owned(
         self,
@@ -161,26 +268,29 @@ class _CollectionLease:
         collection_name: str,
         exclusive: bool | None = None,
     ) -> None:
-        self.require_active_for(collection_name)
-        if self._owner_token is not owner_token:
-            raise CollectionLeaseError("collection lease is not active for this store")
-        if exclusive is not None and self._exclusive is not exclusive:
-            raise CollectionLeaseError("collection lease has the wrong mode")
+        _CollectionLease._require_active_state(
+            self,
+            collection_name,
+            owner_token=owner_token,
+            validate_owner=True,
+            exclusive=exclusive,
+        )
 
     def close(self) -> None:
         try:
             if self._issue_token is not _LEASE_ISSUER:
                 raise CollectionLeaseError("collection lease is closed")
-            if self._closed:
-                return
-            lock_fd = self._lock_fd
-            root_fd = self._root_fd
+            state = self._state
         except AttributeError as error:
             raise CollectionLeaseError("collection lease is closed") from error
-
-        self._closed = True
-        self._lock_fd = -1
-        self._root_fd = -1
+        with state.lock:
+            if state.closed:
+                return
+            state.closed = True
+            lock_fd = self._lock_fd
+            root_fd = self._root_fd
+            self._lock_fd = -1
+            self._root_fd = -1
         errors: list[BaseException] = []
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -197,24 +307,38 @@ class _CollectionLease:
         _raise_first(errors)
 
 
+@final
 @dataclass(slots=True, init=False)
 class CollectionWriteLease(_CollectionLease):
     """A live shared lease authorizing one collection writer lifetime."""
 
     def require_active_for(self, collection_name: str) -> None:
-        super().require_active_for(collection_name)
-        if self._exclusive:
-            raise CollectionLeaseError("collection lease has the wrong mode")
+        _CollectionLease._require_active_state(
+            self,
+            collection_name,
+            exclusive=False,
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> Never:
+        del cls, kwargs
+        raise TypeError("CollectionWriteLease cannot be subclassed")
 
 
+@final
 @dataclass(slots=True, init=False)
 class CollectionFreezeLease(_CollectionLease):
     """A live exclusive lease authorizing collection freeze publication."""
 
     def require_active_for(self, collection_name: str) -> None:
-        super().require_active_for(collection_name)
-        if not self._exclusive:
-            raise CollectionLeaseError("collection lease has the wrong mode")
+        _CollectionLease._require_active_state(
+            self,
+            collection_name,
+            exclusive=True,
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> Never:
+        del cls, kwargs
+        raise TypeError("CollectionFreezeLease cannot be subclassed")
 
 
 def _reject_nonstandard_json_constant(value: str) -> None:
@@ -349,6 +473,7 @@ class CorpusManifestStore:
                 raise
             lock_held = True
             self._validate_lock_file(locks_fd, lock_name, lock_fd)
+            lock_identity = _file_identity(os.fstat(lock_fd))
             self._validate_named_locks_directory(
                 root_fd,
                 locks_fd,
@@ -360,11 +485,14 @@ class CorpusManifestStore:
             lease_type = CollectionFreezeLease if exclusive else CollectionWriteLease
             lease = lease_type._issue(
                 issue_token=_LEASE_ISSUER,
+                directory=self._directory,
                 collection_name=collection_name,
                 owner_token=self._owner_token,
                 root_fd=root_fd,
                 lock_fd=lock_fd,
+                lock_name=lock_name,
                 locks_identity=locks_identity,
+                lock_identity=lock_identity,
                 exclusive=exclusive,
             )
             root_fd = None
@@ -401,12 +529,12 @@ class CorpusManifestStore:
         self._require_owned_lease(lease)
         with SecureRecordDirectory.from_fd(
             self._directory,
-            lease.root_fd,
+            lease._root_fd,
             close_fd=False,
         ) as records:
             return self._decode_all(
                 records,
-                expected_locks_identity=lease._locks_identity,
+                expected_locks_identity=lease._namespace.locks_identity,
             )
 
     def _publish_under(
@@ -422,12 +550,12 @@ class CorpusManifestStore:
         destination_name = f"{manifest.manifest_id}.json"
         with SecureRecordDirectory.from_fd(
             self._directory,
-            lease.root_fd,
+            lease._root_fd,
             close_fd=False,
         ) as records:
             manifests = self._decode_all(
                 records,
-                expected_locks_identity=lease._locks_identity,
+                expected_locks_identity=lease._namespace.locks_identity,
             )
             matching_intent = tuple(
                 item for item in manifests if item.intent == manifest.intent
@@ -446,7 +574,7 @@ class CorpusManifestStore:
             )
             stored_manifests = self._decode_all(
                 records,
-                expected_locks_identity=lease._locks_identity,
+                expected_locks_identity=lease._namespace.locks_identity,
             )
             os.fsync(records.fd)
 
@@ -635,13 +763,14 @@ class CorpusManifestStore:
         self,
         lease: CollectionWriteLease | CollectionFreezeLease,
     ) -> None:
-        if not isinstance(lease, (CollectionWriteLease, CollectionFreezeLease)):
+        if type(lease) not in {CollectionWriteLease, CollectionFreezeLease}:
             raise CollectionLeaseError("collection lease is invalid")
         try:
-            collection_name = lease.collection_name
+            collection_name = lease._namespace.collection_name
         except AttributeError as error:
             raise CollectionLeaseError("collection lease is closed") from error
-        lease.require_owned(
+        _CollectionLease.require_owned(
+            lease,
             owner_token=self._owner_token,
             collection_name=collection_name,
         )
@@ -651,9 +780,10 @@ class CorpusManifestStore:
         lease: CollectionFreezeLease,
         collection_name: str,
     ) -> None:
-        if not isinstance(lease, CollectionFreezeLease):
+        if type(lease) is not CollectionFreezeLease:
             raise CollectionLeaseError("an exclusive freeze lease is required")
-        lease.require_owned(
+        _CollectionLease.require_owned(
+            lease,
             owner_token=self._owner_token,
             collection_name=collection_name,
             exclusive=True,
