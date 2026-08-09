@@ -20,12 +20,16 @@ other angle.
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Final
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, build_clauses, iter_clause_texts
+from specpilot.corpus.dense_inventory import canonical_mapping_bytes
 from specpilot.corpus.tables import iter_table_rows
 from specpilot.corpus.walk import (
     element_text,
@@ -39,6 +43,15 @@ from specpilot.ingestion.rfc import RfcInput
 # `pn` reads "section-<number>-<ordinal>", with the ordinal sometimes carrying
 # sub-positions for list items: section-5.6.2-3.1.
 _PN = re.compile(r"^section-(.+?)-\d+(?:\.\d+)*$")
+PARSE_QA_EVIDENCE_VERSION: Final = "parse-qa-evidence/v1"
+_QA_EVIDENCE_LINE_NAMES = (
+    "section_numbering",
+    "cross_references",
+    "table_fidelity",
+    "coverage",
+    "orphan_normatives",
+    "excerpt_fit",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +89,45 @@ class QaReport:
     document_id: str
     passed: bool
     lines: tuple[QaLine, ...] = field(default_factory=tuple)
+
+
+def qa_evidence_sha256(source_manifest_id: str, report: QaReport) -> str:
+    """Bind one complete, passing parse-QA report to its source manifest."""
+    if re.fullmatch(r"[0-9a-f]{64}", source_manifest_id) is None:
+        raise ValueError("parse QA source manifest ID is invalid")
+    if (
+        not report.passed
+        or tuple(line.name for line in report.lines) != _QA_EVIDENCE_LINE_NAMES
+    ):
+        raise ValueError("parse QA is incomplete or failed")
+    if any(not line.passed for line in report.lines):
+        raise ValueError("parse QA contains an unmeasured or failed line")
+    if report.lines[-1].denominator <= 0:
+        raise ValueError("parse QA excerpt_fit line is unmeasured")
+    if any(
+        not isinstance(value, float) or not math.isfinite(value)
+        for line in report.lines
+        for value in (line.measured, line.threshold)
+    ):
+        raise ValueError("parse QA contains a non-finite measurement")
+    value = {
+        "version": PARSE_QA_EVIDENCE_VERSION,
+        "source_manifest_id": source_manifest_id,
+        "document_id": report.document_id,
+        "passed": report.passed,
+        "lines": [
+            {
+                "name": line.name,
+                "numerator": line.numerator,
+                "denominator": line.denominator,
+                "measured": line.measured.hex(),
+                "threshold": line.threshold.hex(),
+                "passed": line.passed,
+            }
+            for line in report.lines
+        ],
+    }
+    return hashlib.sha256(canonical_mapping_bytes(value)).hexdigest()
 
 
 def _declared_section(pn: str) -> str | None:
