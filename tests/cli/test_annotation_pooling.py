@@ -48,6 +48,7 @@ class FakeVectors:
 class FakeDenseIndex:
     candidate_id = ""
     count = 0
+    ids: set[str] = set()
     searches = 0
 
     @classmethod
@@ -62,6 +63,9 @@ class FakeDenseIndex:
 
     def point_count(self) -> int:
         return self.count
+
+    def unit_ids(self) -> frozenset[str]:
+        return frozenset(self.ids)
 
     def search(self, vector: list[float], k: int) -> list[DenseHit]:
         assert len(vector) == 1024
@@ -93,6 +97,7 @@ def pooling_workspace(
     obligation, fields, _ = clauses
     FakeDenseIndex.candidate_id = obligation.clause_id
     FakeDenseIndex.count = len(clauses)
+    FakeDenseIndex.ids = {clause.clause_id for clause in clauses}
     FakeDenseIndex.searches = 0
     monkeypatch.setattr(
         "specpilot.cli.DenseIndex",
@@ -214,6 +219,10 @@ def test_registration_freezes_two_independent_candidate_routes(
     run = PoolingStore(Path(pooling_workspace["pool_dir"])).read_run(
         str(result["run_id"])
     )
+    expected_inventory = hashlib.sha256(
+        "\n".join(sorted(FakeDenseIndex.ids)).encode()
+    ).hexdigest()
+    assert run.dense_inventory_sha256 == expected_inventory
     routes = {
         route
         for item in run.items
@@ -223,6 +232,20 @@ def test_registration_freezes_two_independent_candidate_routes(
     assert routes == {"bm25", "dense"}
     assert "Which header" not in captured.out
     assert "Content-Location" not in captured.out
+
+
+def test_registration_refuses_a_same_size_dense_inventory_from_an_old_corpus(
+    pooling_workspace: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    current = set(FakeDenseIndex.ids)
+    FakeDenseIndex.ids = {"f" * 64, *tuple(sorted(current))[1:]}
+
+    code = main(registration_args(pooling_workspace))
+    captured = capsys.readouterr()
+
+    assert code != 0
+    assert captured.err.strip() == "dense_point_inventory_mismatch"
+    assert not Path(pooling_workspace["pool_dir"]).exists()
 
 
 def test_review_extends_multi_paragraph_gold_and_seals_all_items(

@@ -66,6 +66,11 @@ class PoolingOutcome(StrEnum):
     AUDIT_BLOCKED = "audit_blocked"
 
 
+def inventory_sha256(unit_ids: Sequence[str]) -> str:
+    """Bind a route to the exact sorted set of units it can retrieve."""
+    return hashlib.sha256("\n".join(sorted(unit_ids)).encode("utf-8")).hexdigest()
+
+
 class PoolingUnitFact(_FrozenModel):
     unit_id: Sha256
     document_id: Identifier
@@ -103,6 +108,7 @@ class PoolingRun(_FrozenModel):
     source_manifest_ids: tuple[Sha256, ...]
     bm25_fingerprint: Sha256
     dense_collection: Identifier
+    dense_inventory_sha256: Sha256
     embedding_weights_sha256: Sha256
     vector_size: Annotated[int, Field(gt=0)]
     point_count: Annotated[int, Field(gt=0)]

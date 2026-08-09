@@ -148,6 +148,26 @@ class DenseIndex:
     def point_count(self) -> int:
         return int(self._client.count(self.name, exact=True).count)
 
+    def unit_ids(self) -> frozenset[str]:
+        """Read the complete payload inventory without retrieving vectors."""
+        found: set[str] = set()
+        offset: Any = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=self.name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                unit_id = str((point.payload or {}).get("unit_id", ""))
+                if not unit_id:
+                    raise ValueError("dense point has no unit_id payload")
+                found.add(unit_id)
+            if offset is None:
+                return frozenset(found)
+
     def upsert(self, points: Sequence[DensePoint]) -> None:
         from qdrant_client.models import PointStruct
 

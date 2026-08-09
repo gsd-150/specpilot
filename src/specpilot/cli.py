@@ -113,6 +113,7 @@ from specpilot.retrieval.pooling import (
     PoolingUnitFact,
     apply_decision,
     build_pool,
+    inventory_sha256,
     seal_run,
 )
 from specpilot.rfc.structure import extract_structure
@@ -1326,6 +1327,9 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
             return _refuse("dense_vector_size_mismatch")
         if dense.point_count() != corpus.unit_count():
             return _refuse("dense_point_count_mismatch")
+        dense_unit_ids = dense.unit_ids()
+        if dense_unit_ids != frozenset(corpus.unit_ids()):
+            return _refuse("dense_point_inventory_mismatch")
     except EmbeddingRuntimeUnavailable:
         return _refuse("embedding_runtime_unavailable")
     except Exception:
@@ -1376,6 +1380,7 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
                 ),
                 bm25_fingerprint=sparse.fingerprint,
                 dense_collection=arguments.collection,
+                dense_inventory_sha256=inventory_sha256(tuple(dense_unit_ids)),
                 embedding_weights_sha256=actual_weights,
                 vector_size=dense.vector_size(),
                 point_count=dense.point_count(),
