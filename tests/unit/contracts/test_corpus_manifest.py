@@ -76,6 +76,21 @@ def test_models_forbid_extra_fields() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_manifest_ids", list(SOURCE_IDS)),
+        ("collection_name", b"specpilot_0123456789abcdef0123456789abcdef"),
+    ],
+)
+def test_manifest_intent_rejects_coercible_input(field: str, value: object) -> None:
+    values = corpus_intent().model_dump()
+    values[field] = value
+
+    with pytest.raises(ValidationError):
+        CorpusManifestIntent(**values)
+
+
+@pytest.mark.parametrize(
     ("created_at", "expected"),
     [
         ("2026-08-09T19:00:00+08:00", datetime(2026, 8, 9, 11, tzinfo=UTC)),

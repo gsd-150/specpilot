@@ -23,7 +23,7 @@ _RFC3339_TIMESTAMP = re.compile(
 
 
 class _FrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
 
 def _utc_timestamp(value: object) -> datetime:
