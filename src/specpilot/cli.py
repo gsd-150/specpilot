@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 from collections.abc import Sequence
@@ -13,10 +14,16 @@ from typing import Any
 from pydantic import ValidationError
 
 from specpilot.annotation.progress import read_progress
+from specpilot.annotation.review import ReviewStore, deep_review_required
 from specpilot.annotation.store import AnnotationStore
 from specpilot.contracts.annotation import (
+    AnnotationOrigin,
+    GoldOrigin,
+    GoldOriginEvent,
     L1Annotation,
     L2Annotation,
+    ReviewDecision,
+    ReviewOutcome,
     UnsupportedAnnotationSchemaError,
     annotation_model_for_schema,
 )
@@ -43,15 +50,22 @@ from specpilot.contracts.manifests import (
     SourceManifest,
     SourceManifestDraft,
 )
+from specpilot.contracts.proposal import (
+    Proposal,
+    UnsupportedProposalSchemaError,
+    proposal_for_schema,
+)
 from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
 from specpilot.corpus.clauses import (
     EXCLUDED_SECTIONS,
+    Clause,
     ClauseLimits,
     OversizedClauseError,
     build_clauses,
     build_normative_index,
     iter_clause_texts,
 )
+from specpilot.corpus.distractors import select_distractors
 from specpilot.corpus.overlap import question_gold_jaccard, restates
 from specpilot.corpus.qa import QaThresholds, run_parse_qa
 from specpilot.corpus.walk import (
@@ -685,6 +699,313 @@ def _annotation_add(arguments: argparse.Namespace) -> int:
             "item_id": stored.item_id,
             "split": stored.split.value,
         }
+    )
+
+
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_REJECT = "none"
+_CONFIRM = "confirm"
+
+
+def _presentation_order(seed: str, item_id: str, size: int) -> tuple[int, ...]:
+    """Where each candidate goes on the sheet.
+
+    Shuffled, because a reviewer who learns that the proposal is always first
+    is back to approving. Derived from the seed rather than drawn at random, so
+    the sheet can be rebuilt from the record — which is also why a mistyped
+    answer costs nothing: the same seed prints the same sheet again.
+    """
+    keyed = sorted(
+        range(size),
+        key=lambda index: hashlib.sha256(
+            f"{seed}\x1f{item_id}\x1forder\x1f{index}".encode()
+        ).digest(),
+    )
+    return tuple(keyed)
+
+
+def _print_sheet(
+    proposal: Proposal,
+    candidates: tuple[tuple[Clause, str], ...],
+    deep: bool,
+) -> None:
+    """Write the choice a human has to read, to a terminal and nowhere else.
+
+    This is the one command that prints clause text. It has to — nobody can
+    choose between four clauses without reading them. Nothing about which one
+    was proposed appears here: a marked proposal is not a forced choice, it is
+    a confirmation dialog.
+    """
+    print(f"item {proposal.item_id} · {proposal.split.value} · {proposal.document_id}")
+    if deep:
+        print("DEEP REVIEW — read the whole section, not only what is below.")
+    print()
+    print(f"Q. {proposal.question}")
+    print()
+    for letter, (clause, text) in zip(_LETTERS, candidates, strict=False):
+        print(f"  [{letter}] §{clause.section_number} ¶{clause.ordinal}")
+        print(f"      {text}")
+        print()
+    for point in proposal.key_points:
+        print(f"  · {point.criterion}")
+    if proposal.key_points:
+        print()
+    if candidates:
+        offered = _LETTERS[: len(candidates)]
+        print(f'Choose one of {offered}, or "{_REJECT}" to reject this item.')
+    else:
+        print(
+            f'Type "{_CONFIRM}" if no clause in this document answers the '
+            f'question, or "{_REJECT}" to reject the item.'
+        )
+
+
+def _read_choice(count: int) -> int | None | str:
+    """Return the chosen index, None for a rejection, or a refusal code.
+
+    One read, not a retry loop. The sheet is a pure function of the seed, so a
+    reviewer who mistypes runs the command again and sees exactly the same
+    thing — there is nothing to recover.
+    """
+    line = sys.stdin.readline().strip()
+    if line.lower() == _REJECT:
+        return None
+    if count == 0:
+        return 0 if line.lower() == _CONFIRM else "invalid_choice"
+    if len(line) == 1 and line.upper() in _LETTERS[:count]:
+        return _LETTERS.index(line.upper())
+    return "invalid_choice"
+
+
+def _annotation_review(arguments: argparse.Namespace) -> int:
+    """Turn one drafted proposal into gold, or into a recorded rejection.
+
+    The gap this closes: provenance v2 already records that a human reviewed a
+    model proposal, and says nothing about what the review found. A reviewer
+    who approves everything and one who catches real errors leave identical
+    records, so "the author reviewed it" sits unverifiable underneath every
+    downstream number — and gold is the ruler.
+
+    A forced choice fixes that by construction. Someone who is not reading
+    cannot score above chance, and disagreement becomes a number.
+
+    Everything `annotation add` checks is still checked here. The chosen clause
+    must exist in the named frozen document, a key point still may not restate
+    its clause, and the overlap figure is computed rather than supplied.
+    """
+    try:
+        data = json.loads(arguments.proposal.read_text(encoding="utf-8"))
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    except ValueError:
+        return _refuse("invalid_proposal")
+    if not isinstance(data, dict):
+        return _refuse("invalid_proposal")
+    try:
+        proposal = proposal_for_schema(data.get("schema_version")).model_validate(data)
+    except UnsupportedProposalSchemaError:
+        return _refuse("unsupported_proposal_schema")
+    except ValidationError:
+        return _refuse("invalid_proposal")
+
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
+    # Checked for every proposal, answerable or not. Confirming that nothing
+    # answers a question is a claim about one specific document.
+    if manifest.document_id != proposal.document_id:
+        return _refuse("document_id_mismatch")
+    if manifest.document_version != proposal.document_version:
+        return _refuse("document_version_mismatch")
+
+    try:
+        texts = dict(
+            iter_clause_texts(source.document, RfcLimits(), _clause_limits(manifest))
+        )
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    clauses = tuple(texts)
+
+    candidates: tuple[tuple[Clause, str], ...] = ()
+    tiers: dict[str, int] = {}
+    if proposal.proposed_gold_clause_id is not None:
+        gold = next(
+            (
+                clause
+                for clause in clauses
+                if clause.clause_id == proposal.proposed_gold_clause_id
+            ),
+            None,
+        )
+        if gold is None:
+            return _refuse("unknown_gold_clause")
+        try:
+            distractors = select_distractors(
+                clauses,
+                gold.clause_id,
+                count=arguments.distractors,
+                seed=arguments.seed,
+            )
+        except ValueError:
+            return _refuse("invalid_distractor_count", EXIT_USAGE)
+        for item in distractors:
+            tiers[item.tier.value] = tiers.get(item.tier.value, 0) + 1
+        pool = [gold, *(item.clause for item in distractors)]
+        if len(pool) < 2:
+            # The contract refuses this too. Refusing here means the reviewer is
+            # not shown a choice that was never one.
+            return _refuse("too_few_candidates")
+        order = _presentation_order(arguments.seed, proposal.item_id, len(pool))
+        candidates = tuple((pool[index], texts[pool[index]]) for index in order)
+
+    deep = deep_review_required(
+        proposal.item_id,
+        rate=arguments.deep_review_rate,
+        salt=arguments.deep_review_salt,
+    )
+    _print_sheet(proposal, candidates, deep)
+
+    chosen = _read_choice(len(candidates))
+    if isinstance(chosen, str):
+        return _refuse(chosen)
+
+    record: L1Annotation | None = None
+    if chosen is not None and candidates:
+        picked = candidates[chosen][0]
+        record = _reviewed_record(proposal, picked, texts[picked])
+    elif chosen is not None:
+        record = _refusal_record(proposal)
+
+    if record is not None:
+        refusal = _check_gold_against_source(arguments, record)
+        if refusal is not None:
+            return _refuse_source(refusal)
+
+    stored_id: str | None = None
+    if record is not None:
+        try:
+            stored_id = AnnotationStore(arguments.annotation_dir).create(
+                record
+            ).annotation_id
+        except UnsupportedAnnotationSchemaError:
+            return _refuse("unsupported_annotation_schema")
+        except ValueError:
+            return _refuse("item_id_already_annotated")
+        except (OSError, RuntimeError):
+            return _refuse("annotation_not_written", EXIT_IO)
+
+    outcome = _outcome(proposal, chosen, candidates)
+    decision = ReviewDecision(
+        reviewed_annotation_id=stored_id,
+        item_id=proposal.item_id,
+        outcome=outcome,
+        candidates_shown=len(candidates),
+        chose_proposal=outcome is ReviewOutcome.ACCEPTED_AS_PROPOSED,
+        reviewer_id=arguments.reviewer,
+        proposal_producer=proposal.proposal_producer,
+        key_points_edited=proposal.key_points_edited,
+        deep_reviewed=deep,
+        unanswerable=proposal.expected_refusal,
+    )
+    try:
+        review = ReviewStore(arguments.review_dir).create(decision)
+    except (OSError, RuntimeError, ValueError):
+        # The annotation is already stored. Task 5's progress report counts
+        # records against reviews, so an annotation with no decision beside it
+        # is visible rather than silently uncounted.
+        return _refuse("review_not_written", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "stored" if stored_id else "rejected",
+            "item_id": proposal.item_id,
+            "outcome": decision.outcome.value,
+            "annotation_id": stored_id,
+            "review_id": review.review_id,
+            "candidates_shown": decision.candidates_shown,
+            "chose_proposal": decision.chose_proposal,
+            "key_points_edited": decision.key_points_edited,
+            "deep_reviewed": decision.deep_reviewed,
+            "unanswerable": decision.unanswerable,
+            "distractor_tiers": tiers,
+            "seed": arguments.seed,
+            "deep_review_rate": arguments.deep_review_rate,
+            "deep_review_salt": arguments.deep_review_salt,
+        }
+    )
+
+
+def _outcome(
+    proposal: Proposal,
+    chosen: int | None,
+    candidates: tuple[tuple[Clause, str], ...],
+) -> ReviewOutcome:
+    if chosen is None:
+        return ReviewOutcome.ITEM_REJECTED
+    if not candidates:
+        return ReviewOutcome.ACCEPTED_AS_PROPOSED
+    picked = candidates[chosen][0].clause_id
+    if picked == proposal.proposed_gold_clause_id:
+        return ReviewOutcome.ACCEPTED_AS_PROPOSED
+    return ReviewOutcome.GOLD_CHANGED
+
+
+def _reviewed_record(
+    proposal: Proposal, clause: Clause, text: str
+) -> L1Annotation:
+    """Build the record the review just decided on.
+
+    `content_origin` is `model`, not `mixed`: the question is the drafter's
+    wording throughout and the reviewer never edits it, only accepts or rejects
+    the item that carries it. `label_origin` is `mixed`, because the gold and
+    the key points are where the human's judgement actually lands. Overstating
+    the human's share of the text would be the easiest thing to get wrong here
+    and the hardest to notice later.
+    """
+    return L1Annotation(
+        item_id=proposal.item_id,
+        split=proposal.split,
+        question=proposal.question,
+        direction=proposal.direction,
+        content_origin=AnnotationOrigin.MODEL,
+        label_origin=AnnotationOrigin.MIXED,
+        document_id=proposal.document_id,
+        document_version=proposal.document_version,
+        gold_clause_ids=(clause.clause_id,),
+        gold_section_paths=(clause.section_path,),
+        key_points=proposal.key_points,
+        expected_refusal=False,
+        question_gold_jaccard=round(
+            question_gold_jaccard(proposal.question, [text]), 4
+        ),
+        gold_origins=(
+            GoldOriginEvent(
+                origin=GoldOrigin.MODEL_PROPOSAL,
+                producer=proposal.proposal_producer,
+            ),
+            GoldOriginEvent(origin=GoldOrigin.HUMAN_SOURCE_REVIEW),
+        ),
+    )
+
+
+def _refusal_record(proposal: Proposal) -> L1Annotation:
+    """An item the reviewer confirmed no clause in the document answers."""
+    return L1Annotation(
+        item_id=proposal.item_id,
+        split=proposal.split,
+        question=proposal.question,
+        direction=proposal.direction,
+        content_origin=AnnotationOrigin.MODEL,
+        label_origin=AnnotationOrigin.MIXED,
+        document_id=proposal.document_id,
+        document_version=proposal.document_version,
+        key_points=proposal.key_points,
+        expected_refusal=True,
     )
 
 
@@ -1429,6 +1750,25 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--manifest-dir", type=Path, default=None)
     add.add_argument("--xml", type=Path, default=None)
     add.set_defaults(handler=_annotation_add)
+
+    review = annotation.add_parser("review")
+    review.add_argument("--proposal", type=Path, required=True)
+    review.add_argument("--annotation-dir", type=Path, required=True)
+    review.add_argument("--review-dir", type=Path, required=True)
+    review.add_argument("--reviewer", required=True)
+    # Required, unlike `annotation add`: confirming that no clause answers a
+    # question is still a claim about one specific frozen document.
+    review.add_argument("--manifest", required=True)
+    review.add_argument("--manifest-dir", type=Path, required=True)
+    review.add_argument("--xml", type=Path, required=True)
+    review.add_argument("--seed", required=True)
+    review.add_argument("--distractors", type=int, default=3)
+    # No defaults. A deep-review sample that silently ran at some rate nobody
+    # chose, under a salt nobody recorded, cannot be checked afterwards — which
+    # is the entire reason the sample exists.
+    review.add_argument("--deep-review-rate", type=float, required=True)
+    review.add_argument("--deep-review-salt", required=True)
+    review.set_defaults(handler=_annotation_review)
 
     embedding = commands.add_parser("embedding").add_subparsers(
         dest="command", required=True

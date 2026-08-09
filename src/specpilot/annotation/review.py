@@ -14,6 +14,7 @@ instead of overwriting the first.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -25,6 +26,42 @@ from specpilot.contracts.annotation import ReviewDecision
 from specpilot.manifests.canonical import canonical_json, canonical_sha256
 
 _MAX_RECORD_BYTES = 16 * 1024
+
+# Separates the salt from the item id before hashing, so salt "r1" with item
+# "0-001" and salt "r1-0" with item "001" cannot draw the same number. A unit
+# separator appears in neither.
+_SEPARATOR = "\x1f"
+
+# The draw is uniform over 64 bits. Comparing it against the rate is the whole
+# sampler: no generator state, nothing to seed at start-up, nothing that gives a
+# different answer on a second run.
+_DRAW_WIDTH = 8
+_DRAW_SPACE = float(1 << (_DRAW_WIDTH * 8))
+
+
+def deep_review_required(item_id: str, *, rate: float, salt: str) -> bool:
+    """Whether this item is in the sample that gets read against full source.
+
+    Deterministic in the item id and the salt, so the sample is fixed before
+    the first item is opened. A reviewer choosing which items to check deeply
+    picks the ones that look easy, and the error rate that comes back then
+    describes the easy items rather than the set.
+
+    Being a pure function of the id is also what makes it checkable afterwards:
+    anyone with the salt can recompute which items should have been read deeply
+    and compare that against which ones were. That is why the salt belongs in
+    the evaluation set's own record — an unrecorded salt is one that can be
+    chosen after the results are in.
+    """
+    if not 0.0 <= rate <= 1.0:
+        raise ValueError("the deep-review rate must be between zero and one")
+    if not salt:
+        # Indistinguishable from having forgotten to configure one, and a
+        # forgotten salt makes the sample a constant nobody chose.
+        raise ValueError("the deep-review salt may not be empty")
+    digest = hashlib.sha256(f"{salt}{_SEPARATOR}{item_id}".encode()).digest()
+    draw = int.from_bytes(digest[:_DRAW_WIDTH], "big") / _DRAW_SPACE
+    return draw < rate
 
 
 class ReviewStore:
@@ -96,4 +133,4 @@ class ReviewStore:
             os.close(descriptor)
 
 
-__all__ = ["ReviewStore"]
+__all__ = ["ReviewStore", "deep_review_required"]

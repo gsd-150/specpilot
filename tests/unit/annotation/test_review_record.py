@@ -65,10 +65,39 @@ def test_choosing_the_proposal_and_the_outcome_cannot_disagree() -> None:
 
 def test_a_changed_gold_and_a_rejection_both_record_cleanly() -> None:
     changed = decision(outcome="gold_changed", chose_proposal=False)
-    rejected = decision(outcome="item_rejected", chose_proposal=False)
+    rejected = decision(
+        outcome="item_rejected",
+        chose_proposal=False,
+        reviewed_annotation_id=None,
+    )
 
     assert changed.outcome is ReviewOutcome.GOLD_CHANGED
     assert rejected.outcome is ReviewOutcome.ITEM_REJECTED
+
+
+def test_a_rejection_has_no_annotation_to_point_at() -> None:
+    """A rejected proposal never became gold, so no record was written.
+
+    The decision is still stored — a store holding only accepted proposals
+    reports 100% acceptance by construction — but it points at nothing, because
+    there is nothing.
+    """
+    with pytest.raises(ValidationError):
+        decision(outcome="item_rejected", chose_proposal=False)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "chose"),
+    [("accepted_as_proposed", True), ("gold_changed", False)],
+)
+def test_a_review_that_produced_gold_must_name_it(outcome: str, chose: bool) -> None:
+    """Otherwise a decision floats free of the record it is evidence about."""
+    with pytest.raises(ValidationError):
+        decision(
+            outcome=outcome,
+            chose_proposal=chose,
+            reviewed_annotation_id=None,
+        )
 
 
 def test_a_review_needs_at_least_two_candidates_to_be_a_choice() -> None:

@@ -98,11 +98,14 @@ Two limits go in the same paragraph, not in a footnote:
 
 ## File map
 
-- `src/specpilot/contracts/annotation.py` — `ReviewDecision`, and the review
-  fields on L1/L2.
+- `src/specpilot/contracts/annotation.py` — `ReviewDecision`. Not fields on
+  L1/L2: see Task 1's correction.
+- `src/specpilot/contracts/proposal.py` — the drafted item, which is a file and
+  not a record. Not in the original file map; a validated input format needs a
+  contract like any other.
 - `src/specpilot/corpus/distractors.py` — structural distractor selection.
-- `src/specpilot/annotation/review.py` — the pre-registered deep-review sample
-  and the acceptance statistics.
+- `src/specpilot/annotation/review.py` — the review store, the pre-registered
+  deep-review sample, and the acceptance statistics.
 - `src/specpilot/annotation/progress.py` — the new counts.
 - `src/specpilot/cli.py` — `annotation review`.
 - `tests/unit/annotation/`, `tests/unit/corpus/test_distractors.py`,
@@ -224,7 +227,7 @@ every case — which is the point, and was not guaranteed before it was measured
 - Produces: `deep_review_required(item_id, rate, salt) -> bool` and
   `ReviewStatistics`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Assert the decision is a deterministic function of `item_id` and the salt, so it
 is fixed before the item is seen and cannot be recomputed to a convenient
@@ -234,7 +237,20 @@ the evaluation set.
 
 - [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, with the rate and salt recorded, not hard-coded**
+- [x] **Step 3: Implement, with the rate and salt recorded, not hard-coded**
+
+`deep_review_required` only. **`ReviewStatistics` is still open** and moves to
+Task 5, which is where the counting actually happens — a statistics type with
+no reporter to consume it would have been written against a guess at what the
+report needs.
+
+Brought forward out of order because Task 4 could not meet its own acceptance
+criterion without it: an item cannot be labelled for deep review before the
+choice is taken if nothing can say which items are sampled. `--deep-review-rate`
+and `--deep-review-salt` are required arguments with no defaults, and both are
+echoed in the command's output — a sample that ran at a rate nobody chose, under
+a salt nobody recorded, cannot be checked afterwards, which is the entire reason
+the sample exists.
 
 ---
 
@@ -255,7 +271,7 @@ a chosen clause still has to exist in the named frozen document, key points
 still cannot restate their clause, and the overlap figure is still computed
 rather than supplied.
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Assert candidates are presented in a seeded order so the proposal is not always
 first — a reviewer who learns that position A is always the proposal is back to
@@ -267,7 +283,49 @@ record.
 
 - [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [x] **Step 3: Implement and verify GREEN**
+
+Four decisions the plan left open, settled by writing it:
+
+**A rejection points at nothing.** `ReviewDecision.reviewed_annotation_id` is
+now null exactly when the outcome is `item_rejected`, enforced both ways by a
+validator. The plan proposed storing a rejected item as a record "the same shape
+an unanswerable L1 item already has", which would have been wrong: an
+`expected_refusal` record asserts the *system* should refuse the question, and a
+rejected draft asserts nothing of the kind. Filing one as the other would have
+put discarded drafts into the evaluation set as unanswerable items. The
+rejection lives in the review store, which is where the acceptance-rate
+denominator is read from anyway.
+
+**The drafter does not supply the distractors.** The proposal file names one
+clause; the wrong answers are selected at review time from a seed given on the
+command line. A drafter who supplied them could supply obviously wrong ones and
+the forced choice would measure nothing.
+
+**Edited key points are computed, not asked about.** The proposal carries
+`drafted_key_points` and `key_points`, identical when written. The reviewer edits
+the second. Whether they still match is a fact about two lists — asking "did you
+edit them?" would be exactly the self-report this plan exists to remove.
+
+**`content_origin` is `model`, not `mixed`.** The three existing records use
+`mixed` because a human was in the question loop. Here the question is the
+drafter's wording start to finish and the reviewer only accepts or rejects the
+item carrying it. `label_origin` stays `mixed`, which is where the human's
+judgement actually lands. Overstating the human's share of the text is the
+easiest thing to get wrong here and the hardest to notice at W6.
+
+Two properties worth recording. The command prints clause text — the only one
+that does, because nobody can choose between four clauses without reading them —
+and a test asserts the stored annotation and the stored decision both still hold
+locators only. And the sheet is a pure function of the seed, so a mistyped answer
+costs nothing: the reviewer runs the command again and sees the identical sheet.
+That is why the choice is read once rather than in a retry loop.
+
+**End-to-end against RFC 9110 §15.5.6** (405 Method Not Allowed), three
+distractors, seed `r1-2026-08`: the selector offered §15.5.2 ¶1 (401, the other
+status in that section carrying a MUST-send-this-header rule), §15.5.6 ¶2 (right
+section, wrong aspect — cacheability), and §15.5.20 ¶1 (421). The gold was
+presented third of four, not first.
 
 ---
 

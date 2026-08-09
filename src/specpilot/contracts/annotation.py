@@ -184,7 +184,11 @@ class ReviewDecision(_FrozenModel):
     # Not `annotation_id`: `canonical_json` strips that name as a record's own
     # content ID, so a foreign key spelled that way is silently dropped from
     # the bytes it is hashed over and from the file written.
-    reviewed_annotation_id: Sha256
+    #
+    # Null exactly when the item was rejected, because a rejected proposal never
+    # became an annotation. The decision is still stored — see the class
+    # docstring — but it points at nothing, since there is nothing.
+    reviewed_annotation_id: Sha256 | None = None
     item_id: Identifier
     outcome: ReviewOutcome
     candidates_shown: Annotated[int, Field(ge=0)]
@@ -218,6 +222,23 @@ class ReviewDecision(_FrozenModel):
                 "chose_proposal must be true exactly when the outcome is "
                 "accepted_as_proposed"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _a_rejection_points_at_nothing_and_everything_else_points_somewhere(
+        self,
+    ) -> Self:
+        """A rejected proposal produced no record; every other outcome did.
+
+        Rejections have to be stored or the acceptance rate is 100% by
+        construction, which is the exact shape of a number that reassures and
+        measures nothing. They just have no annotation to name.
+        """
+        rejected = self.outcome is ReviewOutcome.ITEM_REJECTED
+        if rejected and self.reviewed_annotation_id is not None:
+            raise ValueError("a rejected proposal never became an annotation")
+        if not rejected and self.reviewed_annotation_id is None:
+            raise ValueError("a review that produced gold must name the record")
         return self
 
     @model_validator(mode="after")
