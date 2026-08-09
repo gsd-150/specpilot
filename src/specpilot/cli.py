@@ -113,7 +113,7 @@ from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_s
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
-from specpilot.retrieval.dense import DenseBackendUnavailable, DenseIndex
+from specpilot.retrieval.dense import DenseIndex
 from specpilot.retrieval.hybrid import RouteRanking
 from specpilot.retrieval.local import LocalCorpus
 from specpilot.retrieval.pooling import (
@@ -208,7 +208,7 @@ def _corpus_freeze(arguments: argparse.Namespace) -> int:
         )
     except CorpusManifestRefusal as error:
         return _refuse(error.code)
-    except (OSError, DenseBackendUnavailable, EmbeddingRuntimeUnavailable):
+    except (OSError, ValueError, RuntimeError):
         return _refuse("corpus_manifest_unavailable", EXIT_IO)
     return _emit(
         _corpus_manifest_payload(
@@ -239,7 +239,7 @@ def _corpus_verify(arguments: argparse.Namespace) -> int:
             verified.close()
     except CorpusManifestRefusal as error:
         return _refuse(error.code)
-    except (OSError, DenseBackendUnavailable, EmbeddingRuntimeUnavailable):
+    except (OSError, ValueError, RuntimeError):
         return _refuse("corpus_manifest_unavailable", EXIT_IO)
     return _emit(payload)
 
@@ -2507,20 +2507,30 @@ def _parser() -> argparse.ArgumentParser:
     freeze = corpus.add_parser("freeze")
     freeze.add_argument("--source-manifest-dir", type=Path, required=True)
     freeze.add_argument("--corpus-manifest-dir", type=Path, required=True)
-    freeze.add_argument("--manifest", action="append", required=True)
+    freeze.add_argument(
+        "--manifest",
+        action="append",
+        type=_sha256_argument,
+        required=True,
+    )
     freeze.add_argument("--xml", action="append", type=Path, required=True)
     freeze.add_argument("--model-dir", type=Path, required=True)
     freeze.add_argument("--qdrant-url", required=True)
-    freeze.add_argument("--collection", required=True)
-    freeze.add_argument("--predecessor", default=None)
+    freeze.add_argument("--collection", type=_collection_name_argument, required=True)
+    freeze.add_argument("--predecessor", type=_sha256_argument, default=None)
     freeze.add_argument("--created-at", type=_aware_timestamp, required=True)
     freeze.set_defaults(handler=_corpus_freeze)
 
     verify = corpus.add_parser("verify")
     verify.add_argument("--source-manifest-dir", type=Path, required=True)
     verify.add_argument("--corpus-manifest-dir", type=Path, required=True)
-    verify.add_argument("--corpus-manifest", required=True)
-    verify.add_argument("--manifest", action="append", required=True)
+    verify.add_argument("--corpus-manifest", type=_sha256_argument, required=True)
+    verify.add_argument(
+        "--manifest",
+        action="append",
+        type=_sha256_argument,
+        required=True,
+    )
     verify.add_argument("--xml", action="append", type=Path, required=True)
     verify.add_argument("--model-dir", type=Path, required=True)
     verify.add_argument("--qdrant-url", required=True)
@@ -2658,6 +2668,20 @@ _RFC3339_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
 )
+_SHA256_ARGUMENT = re.compile(r"^[0-9a-f]{64}$")
+_COLLECTION_NAME_ARGUMENT = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
+
+
+def _sha256_argument(value: str) -> str:
+    if _SHA256_ARGUMENT.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("invalid SHA-256 identifier")
+    return value
+
+
+def _collection_name_argument(value: str) -> str:
+    if _COLLECTION_NAME_ARGUMENT.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("invalid collection name")
+    return value
 
 
 def _aware_timestamp(value: str) -> datetime:

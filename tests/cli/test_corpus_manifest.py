@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from specpilot.cli import EXIT_IO, EXIT_REFUSED, EXIT_USAGE, main
 from specpilot.contracts.corpus_manifest import CorpusManifest
@@ -18,7 +20,11 @@ from specpilot.corpus.freezing import (
     VerifyCorpusRequest,
 )
 from specpilot.embedding.local_encoder import EmbeddingRuntimeUnavailable
-from specpilot.manifests.corpus_store import CorpusManifestStore
+from specpilot.manifests.corpus_store import (
+    CollectionLeaseError,
+    CorpusManifestIntentConflictError,
+    CorpusManifestStore,
+)
 from specpilot.manifests.store import ManifestStore
 from specpilot.retrieval.dense import DenseBackendUnavailable
 from tests.helpers.corpus_manifest_factory import SOURCE_IDS, corpus_draft
@@ -484,3 +490,151 @@ def test_verify_close_failure_is_unavailable_and_emits_no_success_payload(
     assert captured.out == ""
     assert captured.err == "corpus_manifest_unavailable\n"
     assert SOURCE_MARKER not in captured.out + captured.err
+
+
+def _replace_option(arguments: list[str], option: str, value: str) -> list[str]:
+    changed = list(arguments)
+    changed[changed.index(option) + 1] = value
+    return changed
+
+
+@pytest.mark.parametrize(
+    ("arguments", "option", "invalid_value"),
+    [
+        (_freeze_args(), "--manifest", SOURCE_MARKER),
+        (_freeze_args(), "--manifest", "A" * 64),
+        (_freeze_args(), "--manifest", "a" * 63),
+        (
+            [*_freeze_args(), "--predecessor", SOURCE_MARKER],
+            "--predecessor",
+            SOURCE_MARKER,
+        ),
+        (_verify_args(), "--manifest", SOURCE_MARKER),
+        (_verify_args(), "--corpus-manifest", SOURCE_MARKER),
+    ],
+)
+def test_corpus_manifest_commands_reject_invalid_ids_at_the_parser_boundary(
+    arguments: list[str],
+    option: str,
+    invalid_value: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called = False
+
+    def service_trap(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    command = arguments[1]
+    monkeypatch.setattr(f"specpilot.cli.{command}_corpus", service_trap)
+
+    code = main(_replace_option(arguments, option, invalid_value))
+    captured = capsys.readouterr()
+
+    assert code == EXIT_USAGE
+    assert called is False
+    assert captured.out == ""
+    assert captured.err == "invalid_corpus_manifest_arguments\n"
+    assert invalid_value not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "invalid_collection",
+    [
+        SOURCE_MARKER,
+        " leading-space",
+        "trailing-space ",
+        "a" * 256,
+        "specpilot/other",
+    ],
+)
+def test_freeze_rejects_invalid_collection_names_at_the_parser_boundary(
+    invalid_collection: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called = False
+
+    def service_trap(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("specpilot.cli.freeze_corpus", service_trap)
+
+    code = main(
+        _replace_option(_freeze_args(), "--collection", invalid_collection)
+    )
+    captured = capsys.readouterr()
+
+    assert code == EXIT_USAGE
+    assert called is False
+    assert captured.out == ""
+    assert captured.err == "invalid_corpus_manifest_arguments\n"
+    assert invalid_collection not in captured.out + captured.err
+
+
+def _contract_validation_error() -> ValidationError:
+    with pytest.raises(ValidationError) as caught:
+        CorpusManifest.model_validate({})
+    return caught.value
+
+
+@pytest.mark.parametrize("command", ["freeze", "verify"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError(f"{SOURCE_MARKER} /private/restricted/manifest.json"),
+        _contract_validation_error(),
+        CorpusManifestIntentConflictError(f"{SOURCE_MARKER} intent"),
+        CollectionLeaseError(f"{SOURCE_MARKER} lease namespace"),
+        RuntimeError(f"{SOURCE_MARKER} storage runtime"),
+    ],
+)
+def test_storage_contract_and_lease_failures_are_unavailable_without_text(
+    command: str,
+    failure: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(f"specpilot.cli.{command}_corpus", fail)
+
+    code = main(_freeze_args() if command == "freeze" else _verify_args())
+    captured = capsys.readouterr()
+
+    assert code == EXIT_IO
+    assert captured.out == ""
+    assert captured.err == "corpus_manifest_unavailable\n"
+    assert SOURCE_MARKER not in captured.out + captured.err
+    assert "/private/restricted" not in captured.out + captured.err
+
+
+def test_verify_maps_a_real_malformed_corpus_store_to_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    corpus_root = tmp_path / SOURCE_MARKER
+    corpus_root.mkdir(mode=0o700)
+    (corpus_root / ".locks").mkdir(mode=0o700)
+    record = corpus_root / f"{MANIFEST.manifest_id}.json"
+    record.write_text(
+        '{"schema_version":"corpus-manifest/v1","secret":"source marker"}',
+        encoding="utf-8",
+    )
+    os.chmod(record, 0o600)
+    with pytest.raises(ValueError, match="stored corpus manifest is invalid"):
+        CorpusManifestStore(corpus_root).read(MANIFEST.manifest_id)
+    arguments = _verify_args()
+    arguments[arguments.index("--corpus-manifest-dir") + 1] = str(corpus_root)
+
+    code = main(arguments)
+    captured = capsys.readouterr()
+
+    assert code == EXIT_IO
+    assert captured.out == ""
+    assert captured.err == "corpus_manifest_unavailable\n"
+    assert SOURCE_MARKER not in captured.out + captured.err
+    assert str(corpus_root) not in captured.out + captured.err
