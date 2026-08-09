@@ -447,6 +447,21 @@ stratification by overlap has both strata to work with.
 
 **Deliberately left unchecked, like W0 Task 8 Step 4 and W1 Task 6.**
 
+#### The sample, registered before the pass
+
+Chosen by the author on 2026-08-09, before any proposal was opened. Committed
+here rather than noted afterwards, because that is what makes "pre-registered"
+checkable — the timestamp on this commit precedes the first review record.
+
+- **Rate:** 0.25 · **Salt:** `r1-2026-08` · **Seed:** `r1-2026-08`
+- **Sampled, 5 of 20:** `l1-dev-007`, `l1-dev-008`, `l1-locked-001`,
+  `l1-locked-002`, `l1-locked-004`
+
+Recomputable by anyone with the salt, which is why `annotation progress` takes
+the rate and salt rather than trusting what a run happened to record. Three of
+the five are `locked` items, which is where a wrong gold is most expensive: the
+locked split is not looked at again.
+
 - [ ] **Step 1: Review the 20 proposals and record the wall-clock time**
 
 The timings matter as much as the records. Product plan §11 now says completion
