@@ -18,6 +18,9 @@ from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionE
 from tests.unit.manifests.test_source_manifest import initial_fields
 
 store_module = importlib.import_module("specpilot.manifests.store")
+secure_records_module = importlib.import_module(
+    "specpilot.manifests._secure_records"
+)
 
 
 def create_initial(store_dir: Path) -> tuple[ManifestStore, SourceManifest]:
@@ -182,7 +185,7 @@ def test_store_publishes_with_atomic_no_replace_link(
             follow_symlinks=follow_symlinks,
         )
 
-    monkeypatch.setattr(store_module.os, "link", recording_link)
+    monkeypatch.setattr(secure_records_module.os, "link", recording_link)
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {recording_link})
     monkeypatch.setattr(
         os,
@@ -223,7 +226,7 @@ def test_store_directory_swap_cannot_redirect_publication(
             follow_symlinks=follow_symlinks,
         )
 
-    monkeypatch.setattr(store_module.os, "link", swapping_link)
+    monkeypatch.setattr(secure_records_module.os, "link", swapping_link)
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {swapping_link})
     monkeypatch.setattr(
         os,
@@ -242,7 +245,7 @@ def test_store_closes_the_pinned_directory_after_publication_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened_descriptors: list[int] = []
-    original_open_directory = store_module.open_directory_path
+    original_open_directory = secure_records_module.open_directory_path
 
     def recording_open_directory(path: Path, *, create: bool) -> int:
         descriptor = original_open_directory(path, create=create)
@@ -254,12 +257,12 @@ def test_store_closes_the_pinned_directory_after_publication_failure(
         raise FileExistsError(path)
 
     monkeypatch.setattr(
-        store_module,
+        secure_records_module,
         "open_directory_path",
         recording_open_directory,
     )
     monkeypatch.setattr(
-        store_module,
+        secure_records_module,
         "revalidate_directory_path",
         reject_revalidation,
     )

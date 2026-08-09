@@ -1,0 +1,507 @@
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from specpilot.manifests._secure_records import SecureRecordDirectory
+
+MAX_BYTES = 256 * 1024
+RECORD_ID = "a" * 64
+RECORD_NAME = f"{RECORD_ID}.json"
+ENUMERATE_PROBE = """
+import sys
+from pathlib import Path
+
+from specpilot.manifests._secure_records import SecureRecordDirectory
+
+try:
+    with SecureRecordDirectory.open(Path(sys.argv[1]), create=False) as records:
+        records.content_ids()
+except BaseException:
+    raise SystemExit(73)
+raise SystemExit(0)
+"""
+
+
+def _private_file(path: Path, data: bytes = b"record") -> None:
+    path.write_bytes(data)
+    path.chmod(0o600)
+
+
+def _secure_root(tmp_path: Path) -> Path:
+    root = tmp_path / "records"
+    root.mkdir(mode=0o700)
+    return root
+
+
+def _assert_enumeration_probe_rejects(root: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", ENUMERATE_PROBE, str(root)],
+        check=False,
+        timeout=1,
+    )
+
+    assert completed.returncode == 73
+
+
+def test_open_creates_an_exactly_private_root_and_closes_it(tmp_path: Path) -> None:
+    root = tmp_path / "records"
+
+    with SecureRecordDirectory.open(root, create=True) as records:
+        descriptor = records.fd
+        assert stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o700
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
+def test_open_repairs_an_existing_root_only_for_create(tmp_path: Path) -> None:
+    root = _secure_root(tmp_path)
+    root.chmod(0o755)
+
+    with pytest.raises(PermissionError):
+        SecureRecordDirectory.open(root, create=False)
+
+    with SecureRecordDirectory.open(root, create=True):
+        pass
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+def test_from_fd_closes_only_owned_descriptors_and_only_once(tmp_path: Path) -> None:
+    root = _secure_root(tmp_path)
+    borrowed = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    owned = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    try:
+        borrowed_records = SecureRecordDirectory.from_fd(root, borrowed)
+        with borrowed_records:
+            pass
+        os.fstat(borrowed)
+
+        owned_records = SecureRecordDirectory.from_fd(root, owned, close_fd=True)
+        with owned_records:
+            pass
+        with owned_records:
+            pass
+        with pytest.raises(OSError):
+            os.fstat(owned)
+    finally:
+        os.close(borrowed)
+
+
+def test_from_fd_rejects_a_nonprivate_root_without_closing_borrowed_fd(
+    tmp_path: Path,
+) -> None:
+    root = _secure_root(tmp_path)
+    root.chmod(0o750)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    try:
+        with pytest.raises(PermissionError):
+            SecureRecordDirectory.from_fd(root, descriptor)
+        os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_content_ids_returns_sorted_validated_record_ids(tmp_path: Path) -> None:
+    root = _secure_root(tmp_path)
+    _private_file(root / f"{'b' * 64}.json", b"second")
+    _private_file(root / RECORD_NAME, b"first")
+    _private_file(root / ".manifest-recoverable", b"temporary")
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        identifiers = records.content_ids()
+
+    assert identifiers == (RECORD_ID, "b" * 64)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["symlink", "directory", "hardlink", "bad-mode", "oversize"],
+)
+def test_enumeration_rejects_attacker_shaped_records(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    root = _secure_root(tmp_path)
+    record = root / RECORD_NAME
+    if attack == "symlink":
+        victim = tmp_path / "victim"
+        _private_file(victim)
+        record.symlink_to(victim)
+    elif attack == "directory":
+        record.mkdir(mode=0o600)
+    elif attack == "hardlink":
+        victim = tmp_path / "victim"
+        _private_file(victim)
+        os.link(victim, record)
+    elif attack == "bad-mode":
+        _private_file(record)
+        record.chmod(0o640)
+    else:
+        _private_file(record, b"x" * (MAX_BYTES + 1))
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError) as raised,
+    ):
+        records.content_ids()
+
+    assert raised.value.args == (record,)
+
+
+def test_enumeration_rejects_a_fifo_without_blocking(tmp_path: Path) -> None:
+    root = _secure_root(tmp_path)
+    os.mkfifo(root / RECORD_NAME, mode=0o600)
+
+    _assert_enumeration_probe_rejects(root)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["symlink", "directory", "hardlink", "bad-mode", "oversize"],
+)
+def test_enumeration_rejects_attacker_shaped_manifest_temporaries(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    root = _secure_root(tmp_path)
+    temporary = root / ".manifest-attacker"
+    if attack == "symlink":
+        victim = tmp_path / "victim"
+        _private_file(victim)
+        temporary.symlink_to(victim)
+    elif attack == "directory":
+        temporary.mkdir(mode=0o600)
+    elif attack == "hardlink":
+        victim = tmp_path / "victim"
+        _private_file(victim)
+        os.link(victim, temporary)
+    elif attack == "bad-mode":
+        _private_file(temporary)
+        temporary.chmod(0o640)
+    else:
+        _private_file(temporary, b"x" * (MAX_BYTES + 1))
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError) as raised,
+    ):
+        records.content_ids()
+
+    assert raised.value.args == (temporary,)
+
+
+def test_enumeration_rejects_a_manifest_temporary_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    root = _secure_root(tmp_path)
+    os.mkfifo(root / ".manifest-attacker", mode=0o600)
+
+    _assert_enumeration_probe_rejects(root)
+
+
+def test_enumeration_rejects_unrelated_entries_unless_explicitly_allowed(
+    tmp_path: Path,
+) -> None:
+    root = _secure_root(tmp_path)
+    locks = root / ".locks"
+    locks.mkdir(mode=0o700)
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        with pytest.raises(FileExistsError) as raised:
+            records.content_ids()
+        assert records.content_ids(
+            allowed_non_records=frozenset({".locks"})
+        ) == ()
+
+    assert raised.value.args == (locks,)
+
+
+def test_read_rejects_path_traversal(tmp_path: Path) -> None:
+    root = _secure_root(tmp_path)
+    outside = tmp_path / RECORD_NAME
+    _private_file(outside, b"outside")
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(ValueError, match="record name"),
+    ):
+        records.read(f"../{RECORD_NAME}", max_bytes=MAX_BYTES)
+
+
+def test_publish_creates_a_private_record_and_leaves_no_temporary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "records"
+
+    with SecureRecordDirectory.open(root, create=True) as records:
+        stored = records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+        identifiers = records.content_ids()
+
+    record = root / RECORD_NAME
+    assert stored == b"canonical"
+    assert record.read_bytes() == b"canonical"
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600
+    assert record.stat().st_nlink == 1
+    assert identifiers == (RECORD_ID,)
+    assert tuple(root.iterdir()) == (record,)
+
+
+def test_publish_uses_atomic_no_replace_hard_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    observed_source: list[tuple[int, int, bool]] = []
+    original_link = os.link
+
+    def recording_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        source_status = os.stat(source, dir_fd=src_dir_fd, follow_symlinks=False)
+        observed_source.append(
+            (source_status.st_ino, stat.S_IMODE(source_status.st_mode), follow_symlinks)
+        )
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "link", recording_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {recording_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {recording_link},
+    )
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert observed_source == [
+        ((root / RECORD_NAME).stat().st_ino, 0o600, False)
+    ]
+
+
+def test_publish_fsyncs_the_file_and_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    fsynced_types: list[int] = []
+    original_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        fsynced_types.append(stat.S_IFMT(os.fstat(descriptor).st_mode))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(secure_records_module.os, "fsync", recording_fsync)
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        stored = records.publish(RECORD_NAME, b"durable", max_bytes=MAX_BYTES)
+
+    assert stored == b"durable"
+    assert fsynced_types[0] == stat.S_IFREG
+    assert stat.S_IFDIR in fsynced_types[1:]
+
+
+def test_byte_identical_replay_returns_existing_without_replacing_it(
+    tmp_path: Path,
+) -> None:
+    root = _secure_root(tmp_path)
+    record = root / RECORD_NAME
+    _private_file(record, b"canonical")
+    fixed_timestamp_ns = 1_700_000_000_000_000_000
+    os.utime(record, ns=(fixed_timestamp_ns, fixed_timestamp_ns))
+    original_inode = record.stat().st_ino
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        stored = records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert stored == b"canonical"
+    assert record.stat().st_ino == original_inode
+    assert record.stat().st_mtime_ns == fixed_timestamp_ns
+    assert tuple(root.iterdir()) == (record,)
+
+
+def test_conflicting_replay_fails_without_overwriting_existing_bytes(
+    tmp_path: Path,
+) -> None:
+    root = _secure_root(tmp_path)
+    record = root / RECORD_NAME
+    _private_file(record, b"existing")
+    original_inode = record.stat().st_ino
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError) as raised,
+    ):
+        records.publish(RECORD_NAME, b"different", max_bytes=MAX_BYTES)
+
+    assert raised.value.args == (record,)
+    assert record.read_bytes() == b"existing"
+    assert record.stat().st_ino == original_inode
+    assert tuple(root.iterdir()) == (record,)
+
+
+@pytest.mark.parametrize(
+    ("name", "data", "max_bytes"),
+    [
+        ("not-a-record.json", b"data", MAX_BYTES),
+        ("../" + RECORD_NAME, b"data", MAX_BYTES),
+        (RECORD_NAME, b"too-large", 4),
+    ],
+)
+def test_publish_rejects_invalid_publications_before_creating_files(
+    tmp_path: Path,
+    name: str,
+    data: bytes,
+    max_bytes: int,
+) -> None:
+    root = _secure_root(tmp_path)
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(ValueError, match="publication"),
+    ):
+        records.publish(name, data, max_bytes=max_bytes)
+
+    assert tuple(root.iterdir()) == ()
+
+
+def test_root_swap_cannot_redirect_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    moved_root = tmp_path / "validated-records"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    original_link = os.link
+
+    def swapping_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        root.rename(moved_root)
+        root.symlink_to(outside, target_is_directory=True)
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "link", swapping_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {swapping_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {swapping_link},
+    )
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError),
+    ):
+        records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert tuple(outside.iterdir()) == ()
+    assert tuple(moved_root.iterdir()) == ()
+
+
+def test_open_closes_the_pinned_descriptor_on_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    root.chmod(0o750)
+    opened: list[int] = []
+    original_open_directory = secure_records_module.open_directory_path
+
+    def recording_open_directory(path: Path, *, create: bool) -> int:
+        descriptor = original_open_directory(path, create=create)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(
+        secure_records_module,
+        "open_directory_path",
+        recording_open_directory,
+    )
+
+    with pytest.raises(PermissionError):
+        SecureRecordDirectory.open(root, create=False)
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_read_closes_the_file_descriptor_on_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    record = root / RECORD_NAME
+    _private_file(record)
+    record.chmod(0o640)
+    opened: list[int] = []
+    original_open = os.open
+
+    def recording_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == RECORD_NAME:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(secure_records_module.os, "open", recording_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {recording_open})
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError),
+    ):
+        records.read(RECORD_NAME, max_bytes=MAX_BYTES)
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
