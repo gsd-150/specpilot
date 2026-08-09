@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import subprocess
@@ -67,6 +68,12 @@ def _assert_enumeration_probe_rejects(root: Path) -> None:
     )
 
     assert completed.returncode == 73
+
+
+def _assert_descriptor_closed(descriptor: int) -> None:
+    with pytest.raises(OSError) as raised:
+        os.fstat(descriptor)
+    assert raised.value.errno == errno.EBADF
 
 
 def test_open_creates_an_exactly_private_root_and_closes_it(tmp_path: Path) -> None:
@@ -547,6 +554,145 @@ def test_temp_replacement_on_link_error_is_preserved_by_exception_cleanup(
     assert not (root / RECORD_NAME).exists()
 
 
+def test_cleanup_stat_error_cannot_skip_closing_the_owned_temp_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    captured: list[tuple[int, str]] = []
+    link_failed = False
+    original_create = secure_records_module.create_private_file
+    original_stat = os.stat
+
+    def recording_create(
+        directory_descriptor: int,
+        *,
+        prefix: str,
+    ) -> tuple[int, str]:
+        created = original_create(directory_descriptor, prefix=prefix)
+        captured.append(created)
+        return created
+
+    def failing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal link_failed
+        del source, destination, src_dir_fd, dst_dir_fd, follow_symlinks
+        link_failed = True
+        raise OSError("forced link failure")
+
+    def failing_cleanup_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if link_failed and captured and path == captured[0][1]:
+            raise PermissionError(root / captured[0][1])
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        monkeypatch.setattr(
+            secure_records_module,
+            "create_private_file",
+            recording_create,
+        )
+        monkeypatch.setattr(secure_records_module.os, "link", failing_link)
+        monkeypatch.setattr(secure_records_module.os, "stat", failing_cleanup_stat)
+        monkeypatch.setattr(
+            os,
+            "supports_dir_fd",
+            os.supports_dir_fd | {failing_link, failing_cleanup_stat},
+        )
+        monkeypatch.setattr(
+            os,
+            "supports_follow_symlinks",
+            os.supports_follow_symlinks | {failing_link, failing_cleanup_stat},
+        )
+
+        with pytest.raises(PermissionError):
+            records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert len(captured) == 1
+    _assert_descriptor_closed(captured[0][0])
+    assert (root / captured[0][1]).exists()
+
+
+def test_cleanup_directory_fsync_error_cannot_skip_closing_owned_temp_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    captured: list[tuple[int, str]] = []
+    link_failed = False
+    original_create = secure_records_module.create_private_file
+    original_fsync = os.fsync
+
+    def recording_create(
+        directory_descriptor: int,
+        *,
+        prefix: str,
+    ) -> tuple[int, str]:
+        created = original_create(directory_descriptor, prefix=prefix)
+        captured.append(created)
+        return created
+
+    def failing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal link_failed
+        del source, destination, src_dir_fd, dst_dir_fd, follow_symlinks
+        link_failed = True
+        raise OSError("forced link failure")
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        root_descriptor = records.fd
+
+        def failing_cleanup_fsync(descriptor: int) -> None:
+            if link_failed and descriptor == root_descriptor:
+                raise OSError("forced cleanup fsync failure")
+            original_fsync(descriptor)
+
+        monkeypatch.setattr(
+            secure_records_module,
+            "create_private_file",
+            recording_create,
+        )
+        monkeypatch.setattr(secure_records_module.os, "link", failing_link)
+        monkeypatch.setattr(secure_records_module.os, "fsync", failing_cleanup_fsync)
+        monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {failing_link})
+        monkeypatch.setattr(
+            os,
+            "supports_follow_symlinks",
+            os.supports_follow_symlinks | {failing_link},
+        )
+
+        with pytest.raises(OSError, match="forced cleanup fsync failure"):
+            records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert len(captured) == 1
+    _assert_descriptor_closed(captured[0][0])
+    assert not (root / captured[0][1]).exists()
+
+
 def test_publish_revalidates_each_required_publication_boundary_in_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -595,40 +741,46 @@ def test_publish_revalidates_each_required_publication_boundary_in_order(
         *,
         max_bytes: int,
     ) -> bytes:
+        events.append("read-entry")
         data = original_read(self, name, max_bytes=max_bytes)
         events.append("read-return")
         return data
 
-    monkeypatch.setattr(
-        secure_records_module,
-        "revalidate_directory_path",
-        recording_revalidate,
-    )
-    monkeypatch.setattr(secure_records_module.os, "link", recording_link)
-    monkeypatch.setattr(secure_records_module.os, "unlink", recording_unlink)
-    monkeypatch.setattr(SecureRecordDirectory, "read", recording_read)
-    monkeypatch.setattr(
-        os,
-        "supports_dir_fd",
-        os.supports_dir_fd | {recording_link, recording_unlink},
-    )
-    monkeypatch.setattr(
-        os,
-        "supports_follow_symlinks",
-        os.supports_follow_symlinks | {recording_link},
-    )
-
     with SecureRecordDirectory.open(root, create=False) as records:
+        monkeypatch.setattr(
+            secure_records_module,
+            "revalidate_directory_path",
+            recording_revalidate,
+        )
+        monkeypatch.setattr(secure_records_module.os, "link", recording_link)
+        monkeypatch.setattr(secure_records_module.os, "unlink", recording_unlink)
+        monkeypatch.setattr(SecureRecordDirectory, "read", recording_read)
+        monkeypatch.setattr(
+            os,
+            "supports_dir_fd",
+            os.supports_dir_fd | {recording_link, recording_unlink},
+        )
+        monkeypatch.setattr(
+            os,
+            "supports_follow_symlinks",
+            os.supports_follow_symlinks | {recording_link},
+        )
         stored = records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
 
-    link_index = events.index("link")
-    temporary_unlink_index = events.index("unlink-temp")
-    read_return_index = events.index("read-return")
     assert stored == b"canonical"
-    assert events[link_index - 1] == "revalidate"
-    assert events[link_index + 1] == "revalidate"
-    assert events[temporary_unlink_index + 1] == "revalidate"
-    assert events[read_return_index + 1 :] == ["revalidate"]
+    assert events == [
+        "revalidate",  # publish entry
+        "revalidate",  # immediately before link
+        "link",
+        "revalidate",  # after link, before temp unlink
+        "unlink-temp",
+        "revalidate",  # after temp unlink
+        "read-entry",
+        "revalidate",  # read entry
+        "revalidate",  # read final path/fd check
+        "read-return",
+        "revalidate",  # publish final path/fd check
+    ]
 
 
 @pytest.mark.parametrize(

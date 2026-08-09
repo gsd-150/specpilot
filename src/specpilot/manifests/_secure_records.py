@@ -255,10 +255,12 @@ class SecureRecordDirectory:
                 self._unlink_if_identity(name, temporary_identity)
             raise
         finally:
-            if temporary_name is not None and temporary_identity is not None:
-                self._unlink_if_identity(temporary_name, temporary_identity)
-            if temporary_descriptor is not None:
-                os.close(temporary_descriptor)
+            try:
+                if temporary_name is not None and temporary_identity is not None:
+                    self._unlink_if_identity(temporary_name, temporary_identity)
+            finally:
+                if temporary_descriptor is not None:
+                    os.close(temporary_descriptor)
 
     @staticmethod
     def _validate_root(path: Path, fd: int) -> None:
