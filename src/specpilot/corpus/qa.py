@@ -96,13 +96,26 @@ def qa_evidence_sha256(source_manifest_id: str, report: QaReport) -> str:
     if re.fullmatch(r"[0-9a-f]{64}", source_manifest_id) is None:
         raise ValueError("parse QA source manifest ID is invalid")
     if (
-        not report.passed
+        type(report.passed) is not bool
+        or report.passed is not True
         or tuple(line.name for line in report.lines) != _QA_EVIDENCE_LINE_NAMES
     ):
         raise ValueError("parse QA is incomplete or failed")
-    if any(not line.passed for line in report.lines):
+    if any(
+        type(line.passed) is not bool or line.passed is not True
+        for line in report.lines
+    ):
         raise ValueError("parse QA contains an unmeasured or failed line")
-    if report.lines[-1].denominator <= 0:
+    if any(
+        type(line.numerator) is not int
+        or type(line.denominator) is not int
+        or line.numerator < 0
+        or line.denominator < 0
+        or line.numerator > line.denominator
+        for line in report.lines
+    ):
+        raise ValueError("parse QA contains invalid counts")
+    if report.lines[-1].denominator == 0:
         raise ValueError("parse QA excerpt_fit line is unmeasured")
     if any(
         not isinstance(value, float) or not math.isfinite(value)

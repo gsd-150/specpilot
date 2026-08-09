@@ -65,7 +65,11 @@ def _qa_report(
         QaLine("excerpt_fit", 1.0, 1.0, True, 10, 10),
     )
     if numerator_delta:
-        lines = (replace(lines[0], numerator=10 + numerator_delta), *lines[1:])
+        lines = (
+            *lines[:3],
+            replace(lines[3], numerator=1 + numerator_delta),
+            *lines[4:],
+        )
     if threshold_delta:
         lines = (
             lines[0],
@@ -95,6 +99,13 @@ def test_vector_hash_uses_little_endian_float32() -> None:
         "a69bf4f8284250b0063e51eed4244ccb40a428c75672dde1d103bf0b8995dc87"
     )
     assert vector_sha256(vector) == expected
+
+
+def test_vector_hash_treats_integer_values_as_the_same_float32_value() -> None:
+    integer = (0.0,) * 1023 + (1,)
+    floating = (0.0,) * 1023 + (1.0,)
+
+    assert vector_sha256(integer) == vector_sha256(floating)
 
 
 def test_inventory_has_a_fixed_golden_and_ignores_input_order() -> None:
@@ -289,6 +300,42 @@ def test_qa_evidence_requires_finite_float_measurements(value: object) -> None:
             "a" * 64,
             replace(report, lines=(changed, *report.lines[1:])),
         )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "malformed"),
+    [
+        ("report", "passed", 1),
+        ("line", "passed", "yes"),
+        ("line", "numerator", True),
+        ("line", "denominator", "10"),
+        ("line", "numerator", -1),
+        ("line", "numerator", 11),
+    ],
+)
+def test_qa_evidence_rejects_malformed_verdicts_and_counts(
+    target: str,
+    field: str,
+    malformed: object,
+) -> None:
+    report = _qa_report()
+    if target == "report":
+        changed_report = replace(report, **{field: malformed})  # type: ignore[arg-type]
+    else:
+        line_index = -1 if field == "denominator" else 0
+        changed_line = replace(  # type: ignore[arg-type]
+            report.lines[line_index],
+            **{field: malformed},
+        )
+        changed_lines = list(report.lines)
+        changed_lines[line_index] = changed_line
+        changed_report = replace(
+            report,
+            lines=tuple(changed_lines),
+        )
+
+    with pytest.raises(ValueError, match="parse QA"):
+        qa_evidence_sha256("a" * 64, changed_report)
 
 
 def test_restricted_rfc_corpus_preserves_all_three_compatibility_constants() -> None:
