@@ -144,5 +144,57 @@ gold and all prior origin events, appends the new events and adjudication, and
 refuses an addition of gold without at least one new origin. Never run another
 pooling amendment after locking the set or tune a system on locked results.
 
+### One-time L1 completeness audit
+
+Start Qdrant and verify that the W2 dense collection still has 1,922 points and
+1024-dimensional vectors. Registration opens it read-only; it never creates,
+deletes, or rebuilds a collection. Then register all current L1 heads exactly
+once:
+
+```bash
+.venv/bin/python -m specpilot.cli annotation pool-register \
+  --annotation-dir artifacts/restricted/annotations \
+  --pool-dir artifacts/restricted/pooling \
+  --manifest-dir manifests/local/r0/source \
+  --manifest af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691 \
+  --xml artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml \
+  --manifest 3a752dd99f78398815252baa322e1ad0e9963ade5eb66dfe66e2861d8c2bede2 \
+  --xml artifacts/restricted/sources/ietf/rfc9112/rfc9112.xml \
+  --model-dir data/cache/models/bge-m3 \
+  --model-id BAAI/bge-m3 --device mps \
+  --qdrant-url http://127.0.0.1:6333 \
+  --collection "$SP_POOL_COLLECTION" \
+  --weights-sha256 1c8e4c9b024d81ce9c563c93962bbd26c6c6eb8661b4ce62ca340057ca532a1d \
+  --author-id chunxue --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+Record the returned run ID, then review or resume it:
+
+```bash
+.venv/bin/python -m specpilot.cli annotation pool-review \
+  --annotation-dir artifacts/restricted/annotations \
+  --pool-dir artifacts/restricted/pooling --run-id "$SP_POOL_RUN" \
+  --manifest-dir manifests/local/r0/source \
+  --manifest af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691 \
+  --xml artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml \
+  --manifest 3a752dd99f78398815252baa322e1ad0e9963ade5eb66dfe66e2861d8c2bede2 \
+  --xml artifacts/restricted/sources/ietf/rfc9112/rfc9112.xml \
+  --reviewer chunxue
+```
+
+For each item, `complete` records that the existing Gold is exhaustive;
+comma-separated letters add those registered candidates; `blocked` records an
+honest inability to adjudicate and prevents sealing. EOF pauses safely. Resume
+uses the registered candidates and never reruns retrieval.
+
+After sealing, this single aggregate command must report L1
+`awaiting_adjudication: 0` and a sealed 20/20 `pooling_audit` block:
+
+```bash
+.venv/bin/python -m specpilot.cli annotation progress \
+  --annotation-dir artifacts/restricted/annotations \
+  --pool-dir artifacts/restricted/pooling
+```
+
 `artifacts/restricted/` is `0700` and git-ignored. Do not commit source text,
 full clause indexes, or real annotation records.

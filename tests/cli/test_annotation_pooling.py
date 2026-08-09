@@ -318,3 +318,57 @@ def test_pool_status_is_aggregate_only(
     assert status["sealed"] is False
     assert "Which header" not in captured.out
     assert "Content-Location" not in captured.out
+
+
+def test_annotation_progress_includes_the_sealed_pooling_audit(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+    run = PoolingStore(Path(pooling_workspace["pool_dir"])).read_run(
+        str(registered["run_id"])
+    )
+    target = next(item for item in run.items if item.item_id == "l1-dev-010")
+    selected = next(
+        index
+        for index, candidate in enumerate(target.candidates)
+        if candidate.unit_id == pooling_workspace["obligation_id"]
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(f"complete\n{chr(ord('A') + selected)}\n"),
+    )
+    assert main(review_args(pooling_workspace, str(registered["run_id"]))) == 0
+    capsys.readouterr()
+
+    code = main(
+        [
+            "annotation",
+            "progress",
+            "--annotation-dir",
+            str(pooling_workspace["annotation_dir"]),
+            "--pool-dir",
+            str(pooling_workspace["pool_dir"]),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    progress = last_json(captured.out)
+    assert progress["l1"]["awaiting_adjudication"] == 0
+    assert progress["pooling_audit"] == {
+        "registered_items": 2,
+        "adjudicated_items": 2,
+        "gold_complete": 1,
+        "gold_extended": 1,
+        "blocked": 0,
+        "added_gold_clauses": 1,
+        "sealed": True,
+        "run_id": registered["run_id"],
+    }
+    lowered = captured.out.lower()
+    assert "recall" not in lowered
+    assert "mrr" not in lowered
+    assert "accuracy" not in lowered

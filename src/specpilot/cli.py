@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
-from specpilot.annotation.progress import read_progress
+from specpilot.annotation.progress import PoolingAuditProgress, read_progress
 from specpilot.annotation.review import (
     DeepReviewStore,
     ReviewStore,
@@ -1707,8 +1707,45 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
         except OSError:
             return _refuse("io_error", EXIT_IO)
 
+    pooling_audit = None
+    pool_dir: Path | None = arguments.pool_dir
+    if pool_dir is not None:
+        store = PoolingStore(pool_dir)
+        try:
+            runs = store.read_runs()
+            if len(runs) != 1:
+                return _refuse("pooling_run_count_invalid")
+            run = runs[0]
+            decisions = store.read_decisions(cast(str, run.run_id))
+            applications = store.read_applications(cast(str, run.run_id))
+            seals = store.read_seals(cast(str, run.run_id))
+        except (OSError, ValueError):
+            return _refuse("invalid_pooling_record")
+        outcome_counts = {
+            outcome: sum(decision.outcome.value == outcome for decision in decisions)
+            for outcome in (
+                PoolingOutcome.GOLD_COMPLETE.value,
+                PoolingOutcome.GOLD_EXTENDED.value,
+                PoolingOutcome.AUDIT_BLOCKED.value,
+            )
+        }
+        pooling_audit = PoolingAuditProgress(
+            registered_items=len(run.items),
+            adjudicated_items=len(applications),
+            gold_complete=outcome_counts[PoolingOutcome.GOLD_COMPLETE.value],
+            gold_extended=outcome_counts[PoolingOutcome.GOLD_EXTENDED.value],
+            blocked=outcome_counts[PoolingOutcome.AUDIT_BLOCKED.value],
+            added_gold_clauses=sum(
+                len(decision.selected_unit_ids)
+                for decision in decisions
+                if decision.outcome is PoolingOutcome.GOLD_EXTENDED
+            ),
+            sealed=bool(seals),
+            run_id=cast(str, run.run_id),
+        )
+
     try:
-        report = read_progress(directory, gold_review)
+        report = read_progress(directory, gold_review, pooling_audit)
     except UnsupportedAnnotationSchemaError:
         return _refuse("unsupported_annotation_schema")
     except ValueError:
@@ -2373,6 +2410,7 @@ def _parser() -> argparse.ArgumentParser:
     progress.add_argument("--deep-review-dir", type=Path, default=None)
     progress.add_argument("--deep-review-rate", type=float, default=None)
     progress.add_argument("--deep-review-salt", default=None)
+    progress.add_argument("--pool-dir", type=Path, default=None)
     progress.set_defaults(handler=_annotation_progress)
 
     template = annotation.add_parser("template")

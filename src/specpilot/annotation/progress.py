@@ -159,12 +159,37 @@ class SetProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class PoolingAuditProgress:
+    registered_items: int
+    adjudicated_items: int
+    gold_complete: int
+    gold_extended: int
+    blocked: int
+    added_gold_clauses: int
+    sealed: bool
+    run_id: str
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "registered_items": self.registered_items,
+            "adjudicated_items": self.adjudicated_items,
+            "gold_complete": self.gold_complete,
+            "gold_extended": self.gold_extended,
+            "blocked": self.blocked,
+            "added_gold_clauses": self.added_gold_clauses,
+            "sealed": self.sealed,
+            "run_id": self.run_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProgressReport:
     l1: SetProgress
     l2: SetProgress
     annotated_items: int
     superseded_count: int
     gold_review: ReviewStatistics | None = None
+    pooling_audit: PoolingAuditProgress | None = None
 
     def payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -182,6 +207,8 @@ class ProgressReport:
             # when reviews were not asked for: an empty block reads as "no
             # reviews", which is a different claim.
             payload["gold_review"] = self.gold_review.payload()
+        if self.pooling_audit is not None:
+            payload["pooling_audit"] = self.pooling_audit.payload()
         return payload
 
 
@@ -298,6 +325,7 @@ def _set_progress(
 def build_progress(
     records: Iterable[Annotation],
     gold_review: ReviewStatistics | None = None,
+    pooling_audit: PoolingAuditProgress | None = None,
 ) -> ProgressReport:
     """Report progress over annotation records, counting items not files.
 
@@ -334,11 +362,18 @@ def build_progress(
         annotated_items=len(items),
         superseded_count=len(superseded),
         gold_review=gold_review,
+        pooling_audit=pooling_audit,
     )
 
 
 def read_progress(
-    directory: Path, gold_review: ReviewStatistics | None = None
+    directory: Path,
+    gold_review: ReviewStatistics | None = None,
+    pooling_audit: PoolingAuditProgress | None = None,
 ) -> ProgressReport:
     """Report progress over a stored annotation set, verifying every record."""
-    return build_progress(AnnotationStore(directory).iter_records(), gold_review)
+    return build_progress(
+        AnnotationStore(directory).iter_records(),
+        gold_review,
+        pooling_audit,
+    )

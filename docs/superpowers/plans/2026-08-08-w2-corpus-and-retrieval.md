@@ -353,7 +353,7 @@ rather than warns.
 The machinery is built and tested here; the run happens once, when the author's
 annotation is done, and every adjudication in it is theirs.
 
-- [ ] **Step 1: Write failing pooling-protocol tests**
+- [x] **Step 1: Write failing pooling-protocol tests**
 
 Assert the pool is the union of BM25-only and dense-only top-5 and never
 includes a hybrid ranking; that the run is refused if it would execute twice;
@@ -361,9 +361,9 @@ that every candidate is recorded with its origin route and content hash; and
 that the sealed log contains the query order, the baseline configuration, and
 the candidate hashes §8.2.4 requires.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement, with adjudication left to `AnnotationStore.amend`**
+- [x] **Step 3: Implement, with adjudication left to `AnnotationStore.amend`**
 
 The store already refuses gold removal and already writes a successor rather
 than mutating. Pooling proposes into that, and no further.

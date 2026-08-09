@@ -292,6 +292,15 @@ class PoolingStore:
             "pooling run",
         )
 
+    def read_runs(self) -> tuple[PoolingRun, ...]:
+        directory = self._directory / "runs"
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            self.read_run(path.stem)
+            for path in sorted(directory.glob("*.json"))
+        )
+
     def create_decision(self, decision: PoolingDecision) -> PoolingDecision:
         directory = self._scoped_directory("decisions", decision.run_id)
         for path in sorted(directory.glob("*.json")):
