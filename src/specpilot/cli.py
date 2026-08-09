@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import io
 import json
+import re
 import sys
 import time
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import redirect_stderr, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +40,7 @@ from specpilot.contracts.annotation import (
     annotation_model_for_schema,
 )
 from specpilot.contracts.archive import ArchivePolicy, UnsafeArchiveError
+from specpilot.contracts.corpus_manifest import CorpusManifest
 from specpilot.contracts.egress import (
     EgressRequest,
     EgressStage,
@@ -76,6 +79,14 @@ from specpilot.corpus.clauses import (
     iter_clause_texts,
 )
 from specpilot.corpus.distractors import select_distractors
+from specpilot.corpus.freezing import (
+    CorpusManifestRefusal,
+    CorpusSourceInput,
+    FreezeCorpusRequest,
+    VerifyCorpusRequest,
+    freeze_corpus,
+    verify_corpus,
+)
 from specpilot.corpus.overlap import question_gold_jaccard, restates
 from specpilot.corpus.qa import QaThresholds, run_parse_qa
 from specpilot.corpus.walk import (
@@ -99,9 +110,10 @@ from specpilot.embedding.throughput import (
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
+from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
-from specpilot.retrieval.dense import DenseIndex
+from specpilot.retrieval.dense import DenseBackendUnavailable, DenseIndex
 from specpilot.retrieval.hybrid import RouteRanking
 from specpilot.retrieval.local import LocalCorpus
 from specpilot.retrieval.pooling import (
@@ -139,6 +151,97 @@ def _refuse(code: str, exit_code: int = EXIT_REFUSED) -> int:
     """Print one machine-readable code. Never a path, message, or payload."""
     print(code, file=sys.stderr)
     return exit_code
+
+
+def _source_inputs(
+    arguments: argparse.Namespace,
+) -> tuple[CorpusSourceInput, ...] | str:
+    if len(arguments.manifest) != len(arguments.xml):
+        return "source_pair_count_mismatch"
+    pairs = tuple(
+        CorpusSourceInput(manifest_id, xml_path)
+        for manifest_id, xml_path in zip(
+            arguments.manifest,
+            arguments.xml,
+            strict=True,
+        )
+    )
+    if len({item.manifest_id for item in pairs}) != len(pairs):
+        return "duplicate_source_manifest"
+    return pairs
+
+
+def _corpus_manifest_payload(
+    status: str,
+    manifest: CorpusManifest,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "corpus_manifest_id": manifest.manifest_id,
+        "source_manifest_ids": manifest.source_manifest_ids,
+        "collection": manifest.collection_name,
+        "point_count": manifest.point_count,
+        "derived_corpus_sha256": manifest.derived_corpus_sha256,
+        "inventory_root_sha256": manifest.inventory_root_sha256,
+        "snapshot_name": manifest.snapshot.name,
+        "snapshot_checksum": manifest.snapshot.checksum,
+        "snapshot_size_bytes": manifest.snapshot.size_bytes,
+    }
+
+
+def _corpus_freeze(arguments: argparse.Namespace) -> int:
+    sources = _source_inputs(arguments)
+    if isinstance(sources, str):
+        return _refuse(sources, EXIT_USAGE)
+    try:
+        result = freeze_corpus(
+            FreezeCorpusRequest(
+                sources=sources,
+                model_dir=arguments.model_dir,
+                qdrant_url=arguments.qdrant_url,
+                collection_name=arguments.collection,
+                predecessor_manifest_id=arguments.predecessor,
+                created_at=arguments.created_at,
+            ),
+            source_store=ManifestStore(arguments.source_manifest_dir),
+            corpus_store=CorpusManifestStore(arguments.corpus_manifest_dir),
+        )
+    except CorpusManifestRefusal as error:
+        return _refuse(error.code)
+    except (OSError, DenseBackendUnavailable, EmbeddingRuntimeUnavailable):
+        return _refuse("corpus_manifest_unavailable", EXIT_IO)
+    return _emit(
+        _corpus_manifest_payload(
+            "replayed" if result.replayed else "frozen",
+            result.manifest,
+        )
+    )
+
+
+def _corpus_verify(arguments: argparse.Namespace) -> int:
+    sources = _source_inputs(arguments)
+    if isinstance(sources, str):
+        return _refuse(sources, EXIT_USAGE)
+    try:
+        verified = verify_corpus(
+            VerifyCorpusRequest(
+                manifest_id=arguments.corpus_manifest,
+                sources=sources,
+                model_dir=arguments.model_dir,
+                qdrant_url=arguments.qdrant_url,
+            ),
+            source_store=ManifestStore(arguments.source_manifest_dir),
+            corpus_store=CorpusManifestStore(arguments.corpus_manifest_dir),
+        )
+        try:
+            payload = _corpus_manifest_payload("verified", verified.manifest)
+        finally:
+            verified.close()
+    except CorpusManifestRefusal as error:
+        return _refuse(error.code)
+    except (OSError, DenseBackendUnavailable, EmbeddingRuntimeUnavailable):
+        return _refuse("corpus_manifest_unavailable", EXIT_IO)
+    return _emit(payload)
 
 
 def _archive_inspect(arguments: argparse.Namespace) -> int:
@@ -2401,6 +2504,28 @@ def _parser() -> argparse.ArgumentParser:
     overlap.add_argument("--question", required=True)
     overlap.set_defaults(handler=_corpus_overlap)
 
+    freeze = corpus.add_parser("freeze")
+    freeze.add_argument("--source-manifest-dir", type=Path, required=True)
+    freeze.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    freeze.add_argument("--manifest", action="append", required=True)
+    freeze.add_argument("--xml", action="append", type=Path, required=True)
+    freeze.add_argument("--model-dir", type=Path, required=True)
+    freeze.add_argument("--qdrant-url", required=True)
+    freeze.add_argument("--collection", required=True)
+    freeze.add_argument("--predecessor", default=None)
+    freeze.add_argument("--created-at", type=_aware_timestamp, required=True)
+    freeze.set_defaults(handler=_corpus_freeze)
+
+    verify = corpus.add_parser("verify")
+    verify.add_argument("--source-manifest-dir", type=Path, required=True)
+    verify.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    verify.add_argument("--corpus-manifest", required=True)
+    verify.add_argument("--manifest", action="append", required=True)
+    verify.add_argument("--xml", action="append", type=Path, required=True)
+    verify.add_argument("--model-dir", type=Path, required=True)
+    verify.add_argument("--qdrant-url", required=True)
+    verify.set_defaults(handler=_corpus_verify)
+
     retrieval = commands.add_parser("retrieval").add_subparsers(
         dest="command", required=True
     )
@@ -2529,15 +2654,44 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+_RFC3339_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
 def _aware_timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise argparse.ArgumentTypeError("timestamp must carry an offset")
+    if _RFC3339_TIMESTAMP.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("invalid RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("invalid RFC3339 timestamp") from None
     return parsed.astimezone(UTC)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    is_corpus_manifest_command = raw_arguments[:2] in (
+        ["corpus", "freeze"],
+        ["corpus", "verify"],
+    )
+    if is_corpus_manifest_command:
+        # These commands may receive restricted local paths. Argparse's default
+        # diagnostics interpolate the rejected value, so consume them and emit
+        # the same stable, aggregate-only usage code as the handlers.
+        parse_failed = False
+        with redirect_stderr(io.StringIO()):
+            try:
+                arguments = _parser().parse_args(raw_arguments)
+            except SystemExit as error:
+                if error.code == 0:
+                    raise
+                parse_failed = True
+        if parse_failed:
+            return _refuse("invalid_corpus_manifest_arguments", EXIT_USAGE)
+    else:
+        arguments = _parser().parse_args(raw_arguments)
     handler: Any = arguments.handler
     result = handler(arguments)
     assert isinstance(result, int)
