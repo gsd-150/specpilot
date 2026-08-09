@@ -1,6 +1,6 @@
 # RFC corpus manifest freeze report
 
-**Seal timestamp:** `2026-08-09T18:30:16Z`  
+**Seal timestamp:** `2026-08-09T18:30:16Z`
 **Status:** frozen, replayed without a second snapshot, and verified
 
 ## Bound state
@@ -56,8 +56,8 @@ record.
 - Ruff: all checks passed.
 - mypy: no issues in 63 source files.
 - Unit plus CLI: 1,152 passed.
-- Full suite with live Qdrant: 1,177 passed, 25 skipped.
-- Mandatory Qdrant integration: 15 passed, 0 skipped.
+- Full suite with live Qdrant: 1,179 passed, 25 skipped.
+- Mandatory Qdrant integration: 17 passed, 0 skipped.
 
 The 25 full-suite skips are the documented PostgreSQL integration cases whose
 `SPECPILOT_TEST_DSN` was absent. Qdrant 1.12.4 was already healthy on
