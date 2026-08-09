@@ -21,9 +21,40 @@ while leaving its hash unchanged.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Collection, Sequence
+import json
+import math
+import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any
+from enum import Enum
+from types import TracebackType
+from typing import Any, Literal, Self
+
+from pydantic import BaseModel
+from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ApiException
+from qdrant_client.models import (
+    Datatype,
+    Distance,
+    PointStruct,
+    SearchParams,
+    VectorParams,
+)
+
+from specpilot.contracts.corpus_manifest import (
+    DenseQueryParameters,
+    DenseVectorSchema,
+    HnswSchema,
+    LocatorFieldSchema,
+    PayloadIndexSchema,
+    QdrantCollectionSchema,
+)
+from specpilot.manifests.corpus_store import (
+    CollectionFreezeLease,
+    CollectionLeaseError,
+    CollectionWriteLease,
+)
 
 # BGE-M3's dense width. A vector of any other size is a bug upstream, and
 # reshaping it here would index a document nothing can ever match.
@@ -31,10 +62,191 @@ VECTOR_SIZE = 1024
 
 _NAME_PREFIX = "specpilot"
 _NAME_DIGEST_CHARS = 32
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+BASELINE_DENSE_QUERY = DenseQueryParameters(
+    hnsw_ef=None,
+    exact=False,
+    indexed_only=False,
+)
+
+class DenseBackendUnavailable(RuntimeError):
+    """The local Qdrant transport or API did not complete an operation."""
 
 
-class CollectionFrozenError(RuntimeError):
-    """A write was attempted against a collection the manifest has sealed."""
+def _qdrant_call[T](
+    operation: Callable[..., T],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    try:
+        return operation(*args, **kwargs)
+    except (ApiException, OSError):
+        raise DenseBackendUnavailable("dense backend unavailable") from None
+
+
+def _new_client(url: str) -> Any:
+    # Qdrant is a local/private service. Host proxy settings must never
+    # redirect corpus inventory or vectors through an egress proxy.
+    return _qdrant_call(QdrantClient, url=url, trust_env=False)
+
+
+def _close_after_failure(client: Any) -> None:
+    """Best-effort cleanup that never replaces the factory's primary error."""
+    with suppress(DenseBackendUnavailable):
+        _qdrant_call(client.close)
+
+
+def _canonical_config_sha256(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, BaseModel):
+        normalized = value.model_dump(mode="json", exclude_none=True)
+    else:
+        model_dump = getattr(value, "model_dump", None)
+        if not callable(model_dump):
+            raise ValueError("Qdrant returned an unsupported configuration")
+        normalized = model_dump(mode="json", exclude_none=True)
+    try:
+        encoded = json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("Qdrant returned an invalid configuration") from error
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _enum_value(value: object, *, field_name: str) -> str:
+    if not isinstance(value, Enum) or not isinstance(value.value, str):
+        raise ValueError(f"Qdrant returned an invalid {field_name}")
+    return value.value
+
+
+def normalize_collection_schema(info: Any) -> QdrantCollectionSchema:
+    """Normalize the exact unnamed-vector schema bound by corpus-manifest/v1."""
+    try:
+        config = info.config
+        params = config.params
+        vectors = params.vectors
+        sparse_vectors = params.sparse_vectors
+        collection_hnsw = config.hnsw_config
+        collection_quantization = config.quantization_config
+        payload_schema = info.payload_schema
+    except AttributeError as error:
+        raise ValueError("Qdrant returned an incomplete collection schema") from error
+
+    if not isinstance(vectors, VectorParams):
+        raise ValueError("corpus-manifest/v1 requires one unnamed dense vector")
+    if vectors.multivector_config is not None:
+        raise ValueError("corpus-manifest/v1 does not support multivectors")
+    if sparse_vectors:
+        raise ValueError("corpus-manifest/v1 does not support sparse vectors")
+
+    distance = _enum_value(vectors.distance, field_name="vector distance").lower()
+    if distance != Distance.COSINE.value.lower():
+        raise ValueError("corpus-manifest/v1 requires cosine distance")
+    if vectors.datatype is None:
+        datatype = Datatype.FLOAT32.value
+    else:
+        datatype = _enum_value(vectors.datatype, field_name="vector datatype")
+    if datatype != Datatype.FLOAT32.value:
+        raise ValueError("corpus-manifest/v1 requires float32 vectors")
+
+    hnsw_fields = (
+        "m",
+        "ef_construct",
+        "full_scan_threshold",
+        "max_indexing_threads",
+        "on_disk",
+        "payload_m",
+    )
+    try:
+        effective_hnsw = {
+            field_name: getattr(collection_hnsw, field_name)
+            for field_name in hnsw_fields
+        }
+    except AttributeError as error:
+        raise ValueError("Qdrant returned an incomplete HNSW schema") from error
+    if vectors.hnsw_config is not None:
+        for field_name in hnsw_fields:
+            override = getattr(vectors.hnsw_config, field_name)
+            if override is not None:
+                effective_hnsw[field_name] = override
+    effective_hnsw["on_disk"] = bool(effective_hnsw["on_disk"] or False)
+
+    if not isinstance(payload_schema, Mapping):
+        raise ValueError("Qdrant returned an invalid payload schema")
+    if any(not isinstance(field_name, str) for field_name in payload_schema):
+        raise ValueError("Qdrant returned an invalid payload index name")
+    payload_indexes: list[PayloadIndexSchema] = []
+    for field_name in sorted(payload_schema):
+        descriptor = payload_schema[field_name]
+        try:
+            data_type = _enum_value(
+                descriptor.data_type,
+                field_name="payload index datatype",
+            )
+            params_sha256 = _canonical_config_sha256(descriptor.params)
+        except AttributeError as error:
+            raise ValueError("Qdrant returned an invalid payload index") from error
+        payload_indexes.append(
+            PayloadIndexSchema(
+                field_name=field_name,
+                data_type=data_type,
+                params_sha256=params_sha256,
+            )
+        )
+    indexed_fields = {descriptor.field_name for descriptor in payload_indexes}
+    locator_specs: tuple[
+        tuple[str, Literal["keyword", "integer"], bool], ...
+    ] = (
+        ("unit_id", "keyword", False),
+        ("kind", "keyword", False),
+        ("document_id", "keyword", False),
+        ("document_version", "keyword", False),
+        ("section_number", "keyword", True),
+        ("section_path", "keyword", False),
+    )
+
+    return QdrantCollectionSchema(
+        dense_vector=DenseVectorSchema(
+            name=None,
+            size=vectors.size,
+            distance="cosine",
+            datatype="float32",
+            on_disk=bool(vectors.on_disk or False),
+            vector_quantization_sha256=_canonical_config_sha256(
+                vectors.quantization_config
+            ),
+        ),
+        hnsw=HnswSchema(
+            m=effective_hnsw["m"],
+            ef_construct=effective_hnsw["ef_construct"],
+            full_scan_threshold=effective_hnsw["full_scan_threshold"],
+            max_indexing_threads=effective_hnsw["max_indexing_threads"],
+            on_disk=effective_hnsw["on_disk"],
+            payload_m=effective_hnsw["payload_m"],
+        ),
+        collection_quantization_sha256=_canonical_config_sha256(
+            collection_quantization
+        ),
+        sparse_vectors=(),
+        payload_indexes=tuple(payload_indexes),
+        locator_payload=tuple(
+            LocatorFieldSchema(
+                name=name,
+                value_type=value_type,
+                nullable=nullable,
+                payload_indexed=name in indexed_fields,
+            )
+            for name, value_type, nullable in locator_specs
+        ),
+    )
 
 
 def collection_name(
@@ -63,11 +275,6 @@ def point_payload(unit: Any) -> dict[str, Any]:
     }
 
 
-def guard_writable(name: str, frozen: Collection[str]) -> None:
-    if name in frozen:
-        raise CollectionFrozenError(f"collection {name!r} is frozen")
-
-
 @dataclass(frozen=True, slots=True)
 class DensePoint:
     unit_id: str
@@ -75,7 +282,15 @@ class DensePoint:
     payload: dict[str, Any]
 
     def __post_init__(self) -> None:
-        if len(self.vector) != VECTOR_SIZE:
+        if (
+            len(self.vector) != VECTOR_SIZE
+            or any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                for value in self.vector
+            )
+        ):
             raise ValueError(
                 f"vector dimension {len(self.vector)} is not {VECTOR_SIZE}"
             )
@@ -88,7 +303,36 @@ class DenseHit:
     payload: dict[str, Any]
 
 
-def _point_id(unit_id: str) -> str:
+@dataclass(frozen=True, slots=True)
+class DenseRecord:
+    point_id: int | str
+    payload: dict[str, Any]
+    vector: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DenseSnapshot:
+    name: str
+    checksum: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("Qdrant returned incomplete snapshot metadata")
+        if (
+            not isinstance(self.checksum, str)
+            or _SHA256.fullmatch(self.checksum) is None
+        ):
+            raise ValueError("Qdrant returned incomplete snapshot metadata")
+        if (
+            not isinstance(self.size_bytes, int)
+            or isinstance(self.size_bytes, bool)
+            or self.size_bytes <= 0
+        ):
+            raise ValueError("Qdrant returned incomplete snapshot metadata")
+
+
+def point_id_for_unit(unit_id: str) -> str:
     """A UUID derived from the unit id, since Qdrant ids are UUID or integer.
 
     Derived rather than random so that re-upserting the same unit overwrites
@@ -101,65 +345,79 @@ def _point_id(unit_id: str) -> str:
     )
 
 
-@dataclass
+def _validate_query(vector: Sequence[float], k: int) -> None:
+    if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+        raise ValueError("k must be positive")
+    if len(vector) != VECTOR_SIZE:
+        raise ValueError(f"vector dimension {len(vector)} is not {VECTOR_SIZE}")
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        for value in vector
+    ):
+        raise ValueError("query vector is invalid")
+
+
+def _payload_dict(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("dense point payload is invalid")
+    return dict(value)
+
+
+def _unit_id(payload: Mapping[str, Any]) -> str:
+    unit_id = payload.get("unit_id")
+    if not isinstance(unit_id, str) or not unit_id.strip():
+        raise ValueError("dense point has no unit_id payload")
+    return unit_id
+
+
+def _record_vector(value: object) -> tuple[float, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, (int, float)) or isinstance(item, bool)
+        for item in value
+    ):
+        raise ValueError("dense point does not hold one unnamed vector")
+    try:
+        numeric = tuple(float(item) for item in value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError("dense point vector is invalid") from error
+    if len(numeric) != VECTOR_SIZE or any(
+        not math.isfinite(item) for item in numeric
+    ):
+        raise ValueError("dense point vector is invalid")
+    return numeric
+
+
+@dataclass(slots=True)
 class DenseIndex:
-    """A handle on one collection. Freezing is local to this handle and to the
-    corpus manifest that records it; the manifest is the durable authority."""
+    """Read-only access to one Qdrant collection."""
 
     name: str
     _client: Any = field(repr=False)
-    _frozen: bool = False
 
     @classmethod
-    def create(cls, url: str, name: str) -> DenseIndex:
-        from qdrant_client import QdrantClient
-        from qdrant_client.models import Distance, VectorParams
+    def open(cls, url: str, name: str) -> DenseIndex:
+        return cls(name=name, _client=_new_client(url))
 
-        # Qdrant is a local/private service. Host proxy settings must never
-        # redirect corpus inventory or vectors through an egress proxy.
-        client = QdrantClient(url=url, trust_env=False)
-        if client.collection_exists(name):
-            client.delete_collection(name)
-        client.create_collection(
-            collection_name=name,
-            vectors_config=VectorParams(
-                size=VECTOR_SIZE,
-                # Cosine, because BGE-M3's dense vectors are L2-normalized and
-                # the model is trained against cosine similarity.
-                distance=Distance.COSINE,
-            ),
-        )
-        return cls(name=name, _client=client)
-
-    @classmethod
-    def open(cls, url: str, name: str, *, frozen: bool = False) -> DenseIndex:
-        from qdrant_client import QdrantClient
-
-        return cls(
-            name=name,
-            _client=QdrantClient(url=url, trust_env=False),
-            _frozen=frozen,
-        )
-
-    def freeze(self) -> None:
-        self._frozen = True
-
-    def drop(self) -> None:
-        self._client.delete_collection(self.name)
+    def collection_schema(self) -> QdrantCollectionSchema:
+        info = _qdrant_call(self._client.get_collection, self.name)
+        return normalize_collection_schema(info)
 
     def vector_size(self) -> int:
-        info = self._client.get_collection(self.name)
-        return int(info.config.params.vectors.size)
+        return self.collection_schema().dense_vector.size
 
     def point_count(self) -> int:
-        return int(self._client.count(self.name, exact=True).count)
+        value = _qdrant_call(self._client.count, self.name, exact=True)
+        return int(value.count)
 
     def unit_ids(self) -> frozenset[str]:
         """Read the complete payload inventory without retrieving vectors."""
         found: set[str] = set()
         offset: Any = None
         while True:
-            points, offset = self._client.scroll(
+            points, offset = _qdrant_call(
+                self._client.scroll,
                 collection_name=self.name,
                 limit=256,
                 offset=offset,
@@ -167,49 +425,258 @@ class DenseIndex:
                 with_vectors=False,
             )
             for point in points:
-                unit_id = str((point.payload or {}).get("unit_id", ""))
-                if not unit_id:
-                    raise ValueError("dense point has no unit_id payload")
-                found.add(unit_id)
+                found.add(_unit_id(_payload_dict(point.payload or {})))
             if offset is None:
                 return frozenset(found)
 
-    def upsert(self, points: Sequence[DensePoint]) -> None:
-        from qdrant_client.models import PointStruct
+    def iter_records(self, *, batch_size: int = 256) -> Iterator[DenseRecord]:
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or batch_size <= 0
+        ):
+            raise ValueError("record batch size must be positive")
+        point_ids: set[int | str] = set()
+        unit_ids: set[str] = set()
+        offset: Any = None
+        while True:
+            points, offset = _qdrant_call(
+                self._client.scroll,
+                collection_name=self.name,
+                limit=batch_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in points:
+                point_id = point.id
+                if type(point_id) not in (int, str):
+                    raise ValueError("dense point id is invalid")
+                payload = _payload_dict(point.payload or {})
+                unit_id = _unit_id(payload)
+                if point_id in point_ids or unit_id in unit_ids:
+                    raise ValueError("dense collection has a duplicate identity")
+                vector = _record_vector(point.vector)
+                point_ids.add(point_id)
+                unit_ids.add(unit_id)
+                yield DenseRecord(point_id, payload, vector)
+            if offset is None:
+                return
 
-        if self._frozen:
-            raise CollectionFrozenError(f"collection {self.name!r} is frozen")
-        if not points:
-            return
-        self._client.upsert(
-            collection_name=self.name,
-            points=[
-                PointStruct(
-                    id=_point_id(point.unit_id),
-                    vector=list(point.vector),
-                    payload=point.payload,
+    def snapshots(self) -> tuple[DenseSnapshot, ...]:
+        values = _qdrant_call(self._client.list_snapshots, self.name)
+        result: list[DenseSnapshot] = []
+        for value in values:
+            result.append(
+                DenseSnapshot(
+                    name=value.name,
+                    checksum=value.checksum,
+                    size_bytes=value.size,
                 )
-                for point in points
-            ],
-            wait=True,
-        )
+            )
+        result.sort(key=lambda item: item.name)
+        return tuple(result)
 
     def search(self, vector: Sequence[float], k: int) -> list[DenseHit]:
-        if k <= 0:
-            raise ValueError("k must be positive")
-        if len(vector) != VECTOR_SIZE:
-            raise ValueError(f"vector dimension {len(vector)} is not {VECTOR_SIZE}")
-        found = self._client.query_points(
+        _validate_query(vector, k)
+        response = _qdrant_call(
+            self._client.query_points,
             collection_name=self.name,
             query=list(vector),
             limit=k,
             with_payload=True,
-        ).points
-        return [
-            DenseHit(
-                unit_id=str((point.payload or {}).get("unit_id", "")),
-                score=float(point.score),
-                payload=dict(point.payload or {}),
+            search_params=SearchParams(
+                hnsw_ef=BASELINE_DENSE_QUERY.hnsw_ef,
+                exact=BASELINE_DENSE_QUERY.exact,
+                indexed_only=BASELINE_DENSE_QUERY.indexed_only,
+            ),
+        )
+        result: list[DenseHit] = []
+        for point in response.points:
+            payload = _payload_dict(point.payload or {})
+            result.append(
+                DenseHit(
+                    unit_id=_unit_id(payload),
+                    score=float(point.score),
+                    payload=payload,
+                )
             )
-            for point in found
-        ]
+        return result
+
+    def close(self) -> None:
+        _qdrant_call(self._client.close)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+
+def _require_write_lease(lease: object) -> CollectionWriteLease:
+    if type(lease) is not CollectionWriteLease:
+        raise CollectionLeaseError("dense writer requires a write lease")
+    return lease
+
+
+def _require_freeze_lease(lease: object) -> CollectionFreezeLease:
+    if type(lease) is not CollectionFreezeLease:
+        raise CollectionLeaseError("snapshot admin requires a freeze lease")
+    return lease
+
+
+@dataclass(slots=True)
+class DenseIndexWriter:
+    """Lease-bound mutation access to one Qdrant collection."""
+
+    name: str
+    _client: Any = field(repr=False)
+    _lease: CollectionWriteLease = field(repr=False)
+
+    def __post_init__(self) -> None:
+        live_lease = _require_write_lease(self._lease)
+        with live_lease.active_operation(self.name):
+            pass
+
+    @classmethod
+    def create(
+        cls,
+        url: str,
+        name: str,
+        lease: CollectionWriteLease,
+    ) -> DenseIndexWriter:
+        live_lease = _require_write_lease(lease)
+        client = _new_client(url)
+        try:
+            with live_lease.active_operation(name):
+                if _qdrant_call(client.collection_exists, name):
+                    raise FileExistsError(name)
+                _qdrant_call(
+                    client.create_collection,
+                    collection_name=name,
+                    vectors_config=VectorParams(
+                        size=VECTOR_SIZE,
+                        distance=Distance.COSINE,
+                    ),
+                )
+            return cls(name, client, live_lease)
+        except BaseException:
+            _close_after_failure(client)
+            raise
+
+    @classmethod
+    def open(
+        cls,
+        url: str,
+        name: str,
+        lease: CollectionWriteLease,
+    ) -> DenseIndexWriter:
+        live_lease = _require_write_lease(lease)
+        client = _new_client(url)
+        try:
+            with live_lease.active_operation(name):
+                if not _qdrant_call(client.collection_exists, name):
+                    raise FileNotFoundError(name)
+            return cls(name, client, live_lease)
+        except BaseException:
+            _close_after_failure(client)
+            raise
+
+    def upsert(self, points: Sequence[DensePoint]) -> None:
+        with self._lease.active_operation(self.name):
+            if not points:
+                return
+            _qdrant_call(
+                self._client.upsert,
+                collection_name=self.name,
+                points=[
+                    PointStruct(
+                        id=point_id_for_unit(point.unit_id),
+                        vector=list(point.vector),
+                        payload=point.payload,
+                    )
+                    for point in points
+                ],
+                wait=True,
+            )
+
+    def drop(self) -> None:
+        with self._lease.active_operation(self.name):
+            _qdrant_call(self._client.delete_collection, self.name)
+
+    def close(self) -> None:
+        _qdrant_call(self._client.close)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+
+@dataclass(slots=True)
+class DenseSnapshotAdmin:
+    """Exclusive-lease capability for collection snapshot creation."""
+
+    name: str
+    _client: Any = field(repr=False)
+    _lease: CollectionFreezeLease = field(repr=False)
+
+    def __post_init__(self) -> None:
+        live_lease = _require_freeze_lease(self._lease)
+        with live_lease.active_operation(self.name):
+            pass
+
+    @classmethod
+    def open(
+        cls,
+        url: str,
+        name: str,
+        lease: CollectionFreezeLease,
+    ) -> DenseSnapshotAdmin:
+        live_lease = _require_freeze_lease(lease)
+        with live_lease.active_operation(name):
+            client = _new_client(url)
+            return cls(name, client, live_lease)
+
+    def create_snapshot(self) -> DenseSnapshot:
+        with self._lease.active_operation(self.name):
+            value = _qdrant_call(
+                self._client.create_snapshot,
+                self.name,
+                wait=True,
+            )
+        if value is None:
+            raise ValueError("Qdrant returned incomplete snapshot metadata")
+        return DenseSnapshot(
+            name=value.name,
+            checksum=value.checksum,
+            size_bytes=value.size,
+        )
+
+    def close(self) -> None:
+        _qdrant_call(self._client.close)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self.close()

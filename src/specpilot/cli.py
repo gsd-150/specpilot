@@ -7,6 +7,7 @@ import json
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1318,90 +1319,101 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
         return _refuse("embedding_weights_mismatch")
     try:
         encoder = load_encoder(arguments.model_dir, arguments.device)
-        dense = DenseIndex.open(
-            arguments.qdrant_url,
-            arguments.collection,
-            frozen=True,
-        )
-        if dense.vector_size() != 1024:
-            return _refuse("dense_vector_size_mismatch")
-        if dense.point_count() != corpus.unit_count():
-            return _refuse("dense_point_count_mismatch")
-        dense_unit_ids = dense.unit_ids()
-        if dense_unit_ids != frozenset(corpus.unit_ids()):
-            return _refuse("dense_point_inventory_mismatch")
     except EmbeddingRuntimeUnavailable:
         return _refuse("embedding_runtime_unavailable")
-    except Exception:
-        return _refuse("dense_index_unavailable", EXIT_IO)
 
-    units = {
-        unit_id: corpus.get_clause(unit_id) for unit_id in corpus.unit_ids()
-    }
-    facts = {
-        unit_id: PoolingUnitFact(
-            unit_id=unit.unit_id,
-            document_id=unit.document_id,
-            document_version=unit.document_version,
-            section_number=unit.section_number,
-            section_path=unit.section_path,
-            content_sha256=hashlib.sha256(unit.text.encode("utf-8")).hexdigest(),
-        )
-        for unit_id, unit in units.items()
-    }
-    sparse = Bm25Index.build(corpus.indexable())
-    items: list[PoolingItem] = []
+    dense: DenseIndex | None = None
     try:
-        for record in heads:
-            encoded = encoder([record.question])
-            row = encoded[0]
-            vector: list[float] = row.tolist()
-            bm25 = RouteRanking(
-                route="bm25",
-                unit_ids=tuple(
-                    hit.unit_id for hit in sparse.search(record.question, 5)
-                ),
+        try:
+            dense = DenseIndex.open(
+                arguments.qdrant_url,
+                arguments.collection,
             )
-            dense_ranking = RouteRanking(
-                route="dense",
-                unit_ids=tuple(hit.unit_id for hit in dense.search(vector, 5)),
+            if dense.vector_size() != 1024:
+                return _refuse("dense_vector_size_mismatch")
+            if dense.point_count() != corpus.unit_count():
+                return _refuse("dense_point_count_mismatch")
+            dense_unit_ids = dense.unit_ids()
+            if dense_unit_ids != frozenset(corpus.unit_ids()):
+                return _refuse("dense_point_inventory_mismatch")
+        except Exception:
+            return _refuse("dense_index_unavailable", EXIT_IO)
+
+        units = {
+            unit_id: corpus.get_clause(unit_id) for unit_id in corpus.unit_ids()
+        }
+        facts = {
+            unit_id: PoolingUnitFact(
+                unit_id=unit.unit_id,
+                document_id=unit.document_id,
+                document_version=unit.document_version,
+                section_number=unit.section_number,
+                section_path=unit.section_path,
+                content_sha256=hashlib.sha256(
+                    unit.text.encode("utf-8")
+                ).hexdigest(),
             )
-            items.append(
-                PoolingItem(
-                    item_id=record.item_id,
-                    annotation_id=cast(str, record.annotation_id),
-                    candidates=build_pool(bm25, dense_ranking, units=facts),
+            for unit_id, unit in units.items()
+        }
+        sparse = Bm25Index.build(corpus.indexable())
+        items: list[PoolingItem] = []
+        try:
+            for record in heads:
+                encoded = encoder([record.question])
+                row = encoded[0]
+                vector: list[float] = row.tolist()
+                bm25 = RouteRanking(
+                    route="bm25",
+                    unit_ids=tuple(
+                        hit.unit_id for hit in sparse.search(record.question, 5)
+                    ),
+                )
+                dense_ranking = RouteRanking(
+                    route="dense",
+                    unit_ids=tuple(hit.unit_id for hit in dense.search(vector, 5)),
+                )
+                items.append(
+                    PoolingItem(
+                        item_id=record.item_id,
+                        annotation_id=cast(str, record.annotation_id),
+                        candidates=build_pool(bm25, dense_ranking, units=facts),
+                    )
+                )
+            run = PoolingStore(arguments.pool_dir).create_run(
+                PoolingRun(
+                    source_manifest_ids=tuple(
+                        manifest.manifest_id for manifest, _ in resolved
+                    ),
+                    bm25_fingerprint=sparse.fingerprint,
+                    dense_collection=arguments.collection,
+                    dense_inventory_sha256=inventory_sha256(
+                        tuple(dense_unit_ids)
+                    ),
+                    embedding_weights_sha256=actual_weights,
+                    vector_size=dense.vector_size(),
+                    point_count=dense.point_count(),
+                    items=tuple(items),
+                    author_id=arguments.author_id,
+                    created_at=arguments.created_at,
                 )
             )
-        run = PoolingStore(arguments.pool_dir).create_run(
-            PoolingRun(
-                source_manifest_ids=tuple(
-                    manifest.manifest_id for manifest, _ in resolved
-                ),
-                bm25_fingerprint=sparse.fingerprint,
-                dense_collection=arguments.collection,
-                dense_inventory_sha256=inventory_sha256(tuple(dense_unit_ids)),
-                embedding_weights_sha256=actual_weights,
-                vector_size=dense.vector_size(),
-                point_count=dense.point_count(),
-                items=tuple(items),
-                author_id=arguments.author_id,
-                created_at=arguments.created_at,
-            )
-        )
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return _refuse("pooling_run_not_registered", EXIT_IO)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return _refuse("pooling_run_not_registered", EXIT_IO)
 
-    return _emit(
-        {
-            "status": "registered",
-            "run_id": run.run_id,
-            "item_count": len(run.items),
-            "candidate_count": sum(len(item.candidates) for item in run.items),
-            "bm25_fingerprint": run.bm25_fingerprint,
-            "embedding_weights_sha256": run.embedding_weights_sha256,
-        }
-    )
+        return _emit(
+            {
+                "status": "registered",
+                "run_id": run.run_id,
+                "item_count": len(run.items),
+                "candidate_count": sum(len(item.candidates) for item in run.items),
+                "bm25_fingerprint": run.bm25_fingerprint,
+                "embedding_weights_sha256": run.embedding_weights_sha256,
+            }
+        )
+    finally:
+        if dense is not None:
+            with suppress(Exception):
+                dense.close()
 
 
 def _print_pool_sheet(

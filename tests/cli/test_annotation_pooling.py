@@ -50,12 +50,12 @@ class FakeDenseIndex:
     count = 0
     ids: set[str] = set()
     searches = 0
+    closes = 0
 
     @classmethod
-    def open(cls, url: str, name: str, *, frozen: bool = False) -> FakeDenseIndex:
+    def open(cls, url: str, name: str) -> FakeDenseIndex:
         assert url == "http://127.0.0.1:6333"
         assert name == "specpilot_fixture"
-        assert frozen is True
         return cls()
 
     def vector_size(self) -> int:
@@ -72,6 +72,9 @@ class FakeDenseIndex:
         assert k == 5
         type(self).searches += 1
         return [DenseHit(unit_id=self.candidate_id, score=0.9, payload={})]
+
+    def close(self) -> None:
+        type(self).closes += 1
 
 
 @pytest.fixture
@@ -99,6 +102,7 @@ def pooling_workspace(
     FakeDenseIndex.count = len(clauses)
     FakeDenseIndex.ids = {clause.clause_id for clause in clauses}
     FakeDenseIndex.searches = 0
+    FakeDenseIndex.closes = 0
     monkeypatch.setattr(
         "specpilot.cli.DenseIndex",
         FakeDenseIndex,
@@ -216,6 +220,7 @@ def test_registration_freezes_two_independent_candidate_routes(
     assert result["status"] == "registered"
     assert result["item_count"] == 2
     assert FakeDenseIndex.searches == 2
+    assert FakeDenseIndex.closes == 1
     run = PoolingStore(Path(pooling_workspace["pool_dir"])).read_run(
         str(result["run_id"])
     )
