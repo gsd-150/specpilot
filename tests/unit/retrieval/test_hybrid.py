@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
+from specpilot.corpus.indexable import IndexUnit
 from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.retrieval.hybrid import (
     FusedRanking,
@@ -14,73 +16,278 @@ from specpilot.retrieval.hybrid import (
     reciprocal_rank_fusion,
 )
 from specpilot.retrieval.local import LocalCorpus
+from specpilot.retrieval.protocol import RetrievalLocator, locator_for_unit
 from tests.helpers import rfc_factory
 
 
-def fuse(*rankings: RouteRanking, k: int = 60) -> list[str]:
-    fused = reciprocal_rank_fusion(rankings, RrfParameters(k=k))
-    return [hit.unit_id for hit in fused.hits]
+def _index_unit(**changes: object) -> IndexUnit:
+    values: dict[str, object] = {
+        "unit_id": "ietf-rfc-9110:section-2-1",
+        "kind": "clause",
+        "document_id": "ietf-rfc-9110",
+        "document_version": "2022-06",
+        "section_number": "2",
+        "section_path": "Syntax",
+        "ordinal": 1,
+        "text": "source",
+        "indexed": "2 Syntax\nsource",
+    }
+    values.update(changes)
+    return IndexUnit(**values)  # type: ignore[arg-type]
 
 
-def test_a_unit_ranked_by_both_routes_beats_one_ranked_by_either() -> None:
-    bm25 = RouteRanking("bm25", ("a", "b", "c"))
-    dense = RouteRanking("dense", ("c", "a", "d"))
-
-    assert fuse(bm25, dense)[0] == "a"
-
-
-def test_a_unit_found_by_only_one_route_still_places() -> None:
-    """Dropping them would make the fusion an intersection, which throws away
-    exactly the recall the second route was added for."""
-    bm25 = RouteRanking("bm25", ("a", "b"))
-    dense = RouteRanking("dense", ("c",))
-
-    assert set(fuse(bm25, dense)) == {"a", "b", "c"}
-
-
-def test_the_order_the_routes_are_passed_in_does_not_matter() -> None:
-    bm25 = RouteRanking("bm25", ("a", "b", "c"))
-    dense = RouteRanking("dense", ("c", "a", "d"))
-
-    assert fuse(bm25, dense) == fuse(dense, bm25)
+def _locator(
+    *,
+    clause_id: str,
+    numeric_clause_path: tuple[int, ...],
+    corpus_manifest_id: str = "a" * 64,
+    document_id: str = "ietf-rfc-9110",
+    child_span: tuple[int, int] | None = None,
+    child_start: int = 0,
+) -> RetrievalLocator:
+    return RetrievalLocator(
+        corpus_manifest_id=corpus_manifest_id,
+        document_id=document_id,
+        clause_id=clause_id,
+        child_span=child_span,
+        numeric_clause_path=numeric_clause_path,
+        child_start=child_start,
+    )
 
 
-def test_ties_break_the_same_way_on_every_run() -> None:
-    """Pooling is executed once and audited much later."""
-    first = RouteRanking("bm25", ("b", "a"))
-    second = RouteRanking("dense", ("a", "b"))
+def test_rrf_deduplicates_by_full_identity_and_preserves_route_ranks() -> None:
+    shared = _locator(clause_id="shared", numeric_clause_path=(0, 2, -1, 1, 0))
+    single = _locator(clause_id="single", numeric_clause_path=(0, 3, -1, 1, 0))
+    rankings = (
+        RouteRanking("bm25", ("z-shared", "single")),
+        RouteRanking("dense", ("a-shared", "single")),
+    )
 
-    assert fuse(first, second) == fuse(first, second) == ["a", "b"]
+    fused = reciprocal_rank_fusion(
+        rankings,
+        locators={"z-shared": shared, "a-shared": shared, "single": single},
+    )
 
-
-def test_the_constant_shrinks_the_gap_between_ranks() -> None:
-    """A small k makes rank one dominate; the standard 60 keeps later ranks
-    contributing, which is the whole reason RRF beats taking the best list."""
-    bm25 = RouteRanking("bm25", ("a", "b", "c", "d", "e"))
-    dense = RouteRanking("dense", ("e", "d", "c", "b", "a"))
-
-    assert fuse(bm25, dense, k=1)[0] in {"a", "e"}
-    assert fuse(bm25, dense, k=60)[0] in {"a", "e"}
-    tight = reciprocal_rank_fusion((bm25, dense), RrfParameters(k=60))
-    assert tight.hits[0].score - tight.hits[-1].score < 0.01
+    assert [hit.unit_id for hit in fused.hits] == ["a-shared", "single"]
+    assert fused.hits[0].ranks == {"bm25": 1, "dense": 1}
+    assert fused.hits[0].locator == shared
 
 
-def test_a_fused_hit_records_the_rank_each_route_gave_it() -> None:
-    """§8.2.3 requires the pooling record to say where a candidate came from."""
-    bm25 = RouteRanking("bm25", ("a", "b"))
-    dense = RouteRanking("dense", ("b",))
+def test_each_route_scores_an_identity_once_but_display_uses_minimum_unit_id() -> None:
+    shared = _locator(clause_id="shared", numeric_clause_path=(0, 2, -1, 1, 0))
 
-    hits = {hit.unit_id: hit for hit in reciprocal_rank_fusion((bm25, dense)).hits}
+    fused = reciprocal_rank_fusion(
+        (RouteRanking("bm25", ("z", "a")),),
+        locators={"z": shared, "a": shared},
+    )
 
-    assert hits["a"].ranks == {"bm25": 1}
-    assert hits["b"].ranks == {"bm25": 2, "dense": 1}
+    assert len(fused.hits) == 1
+    assert fused.hits[0].unit_id == "a"
+    assert fused.hits[0].ranks == {"bm25": 1}
+    assert fused.hits[0].score == pytest.approx(1 / 61)
 
 
-def test_the_parameters_travel_with_the_result() -> None:
-    fused = reciprocal_rank_fusion((RouteRanking("bm25", ("a",)),))
+def test_rrf_is_invariant_to_route_input_order() -> None:
+    rankings = (
+        RouteRanking("z-route", ("a", "b", "c")),
+        RouteRanking("a-route", ("c", "a", "b")),
+    )
+    locators = {
+        "a": _locator(clause_id="a", numeric_clause_path=(0, 1, -1, 1, 0)),
+        "b": _locator(clause_id="b", numeric_clause_path=(0, 2, -1, 1, 0)),
+        "c": _locator(clause_id="c", numeric_clause_path=(0, 3, -1, 1, 0)),
+    }
 
+    forward = reciprocal_rank_fusion(rankings, locators=locators)
+    backward = reciprocal_rank_fusion(tuple(reversed(rankings)), locators=locators)
+
+    assert forward == backward
+
+
+def test_rrf_breaks_ties_by_numeric_clause_path_not_unit_id() -> None:
+    rankings = (
+        RouteRanking("bm25", ("z", "a")),
+        RouteRanking("dense", ("a", "z")),
+    )
+    locators = {
+        "z": _locator(clause_id="z", numeric_clause_path=(0, 2, -1, 1, 0)),
+        "a": _locator(clause_id="a", numeric_clause_path=(0, 10, -1, 1, 0)),
+    }
+
+    fused = reciprocal_rank_fusion(rankings, locators=locators)
+
+    assert [hit.unit_id for hit in fused.hits] == ["z", "a"]
+
+
+def test_rrf_breaks_ties_by_document_then_child_start() -> None:
+    rankings = (
+        RouteRanking("bm25", ("late", "z-document", "early", "a-document")),
+        RouteRanking("dense", ("z-document", "early", "a-document", "late")),
+        RouteRanking("lexical", ("early", "a-document", "late", "z-document")),
+        RouteRanking("semantic", ("a-document", "late", "z-document", "early")),
+    )
+    locators = {
+        "late": _locator(
+            clause_id="same-clause",
+            numeric_clause_path=(0, 2, -1, 1, 0),
+            child_span=(10, 20),
+            child_start=10,
+        ),
+        "early": _locator(
+            clause_id="same-clause",
+            numeric_clause_path=(0, 2, -1, 1, 0),
+            child_span=(5, 10),
+            child_start=5,
+        ),
+        "z-document": _locator(
+            clause_id="z",
+            document_id="z-document",
+            numeric_clause_path=(0, 2, -1, 1, 0),
+        ),
+        "a-document": _locator(
+            clause_id="a",
+            document_id="a-document",
+            numeric_clause_path=(0, 2, -1, 1, 0),
+        ),
+    }
+
+    fused = reciprocal_rank_fusion(rankings, locators=locators)
+
+    assert [hit.unit_id for hit in fused.hits] == [
+        "a-document",
+        "early",
+        "late",
+        "z-document",
+    ]
+
+
+def test_rrf_refuses_a_candidate_without_a_locator() -> None:
+    with pytest.raises(ValueError, match="no retrieval locator"):
+        reciprocal_rank_fusion(
+            (RouteRanking("bm25", ("missing",)),),
+            locators={},
+        )
+
+
+def test_rrf_refuses_candidates_from_different_manifests() -> None:
+    with pytest.raises(ValueError, match="cross corpus manifests"):
+        reciprocal_rank_fusion(
+            (RouteRanking("bm25", ("a", "b")),),
+            locators={
+                "a": _locator(
+                    clause_id="a",
+                    numeric_clause_path=(0, 1),
+                    corpus_manifest_id="a" * 64,
+                ),
+                "b": _locator(
+                    clause_id="b",
+                    numeric_clause_path=(0, 2),
+                    corpus_manifest_id="b" * 64,
+                ),
+            },
+        )
+
+
+def test_rrf_refuses_conflicting_locators_for_one_identity() -> None:
+    with pytest.raises(ValueError, match="conflicting locators"):
+        reciprocal_rank_fusion(
+            (RouteRanking("bm25", ("a", "b")),),
+            locators={
+                "a": _locator(clause_id="same", numeric_clause_path=(0, 1)),
+                "b": _locator(clause_id="same", numeric_clause_path=(0, 2)),
+            },
+        )
+
+
+def test_rrf_refuses_different_identities_with_the_same_stable_tie_key() -> None:
+    with pytest.raises(ValueError, match="stable tie key"):
+        reciprocal_rank_fusion(
+            (RouteRanking("bm25", ("a", "b")),),
+            locators={
+                "a": _locator(clause_id="a", numeric_clause_path=(0, 1)),
+                "b": _locator(clause_id="b", numeric_clause_path=(0, 1)),
+            },
+        )
+
+
+def test_nonempty_empty_routes_need_no_locators_and_return_no_hits() -> None:
+    fused = reciprocal_rank_fusion(
+        (RouteRanking("bm25", ()), RouteRanking("dense", ())),
+        locators={},
+    )
+
+    assert fused.hits == ()
     assert fused.parameters == RrfParameters()
-    assert fused.parameters.k == 60
+
+
+def test_locator_for_whole_unit_uses_unit_identity_and_zero_start() -> None:
+    locator = locator_for_unit("a" * 64, _index_unit())
+
+    assert locator.clause_id == "ietf-rfc-9110:section-2-1"
+    assert locator.child_span is None
+    assert locator.child_start == 0
+    assert locator.numeric_clause_path == (0, 2, -1, 1, 0)
+    assert locator.dedupe_key == (
+        "a" * 64,
+        "ietf-rfc-9110",
+        "ietf-rfc-9110:section-2-1",
+        None,
+    )
+    assert locator.stable_tie_key == (
+        "ietf-rfc-9110",
+        (0, 2, -1, 1, 0),
+        0,
+    )
+
+
+def test_retrieval_locator_is_frozen_and_slotted() -> None:
+    locator = _locator(clause_id="a", numeric_clause_path=(0, 1))
+
+    with pytest.raises(FrozenInstanceError):
+        locator.document_id = "changed"  # type: ignore[misc]
+    assert not hasattr(locator, "__dict__")
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"corpus_manifest_id": "a" * 63}, "manifest"),
+        ({"corpus_manifest_id": "A" * 64}, "manifest"),
+        ({"document_id": ""}, "document"),
+        ({"document_id": " document"}, "document"),
+        ({"clause_id": ""}, "clause"),
+        ({"clause_id": "clause "}, "clause"),
+        ({"numeric_clause_path": ()}, "numeric clause path"),
+        ({"numeric_clause_path": [0, 1]}, "numeric clause path"),
+        ({"numeric_clause_path": (0, True)}, "numeric clause path"),
+        ({"numeric_clause_path": (0, "1")}, "numeric clause path"),
+        ({"child_start": -1}, "child start"),
+        ({"child_start": True}, "child start"),
+        ({"child_start": 1}, "start at zero"),
+        ({"child_span": [0, 1]}, "child span"),
+        ({"child_span": (0,)}, "child span"),
+        ({"child_span": (False, 1)}, "child span"),
+        ({"child_span": (-1, 1)}, "span and start"),
+        ({"child_span": (1, 1), "child_start": 1}, "span and start"),
+        ({"child_span": (1, 2), "child_start": 0}, "span and start"),
+    ],
+)
+def test_retrieval_locator_refuses_malformed_runtime_values(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    values: dict[str, object] = {
+        "corpus_manifest_id": "a" * 64,
+        "document_id": "ietf-rfc-9110",
+        "clause_id": "clause",
+        "child_span": None,
+        "numeric_clause_path": (0, 1),
+        "child_start": 0,
+    }
+    values.update(changes)
+
+    with pytest.raises(ValueError, match=message):
+        RetrievalLocator(**values)  # type: ignore[arg-type]
 
 
 def test_a_route_cannot_be_named_after_the_fusion_it_feeds() -> None:
@@ -97,7 +304,12 @@ def test_a_route_cannot_be_named_after_the_fusion_it_feeds() -> None:
 def test_a_fused_ranking_is_not_a_route_ranking() -> None:
     """The type is the guard: pooling takes route rankings, and there is no
     way to turn a fused result back into one."""
-    fused = reciprocal_rank_fusion((RouteRanking("bm25", ("a",)),))
+    fused = reciprocal_rank_fusion(
+        (RouteRanking("bm25", ("a",)),),
+        locators={
+            "a": _locator(clause_id="a", numeric_clause_path=(0, 1)),
+        },
+    )
 
     assert isinstance(fused, FusedRanking)
     assert not isinstance(fused, RouteRanking)
@@ -107,13 +319,14 @@ def test_a_fused_ranking_is_not_a_route_ranking() -> None:
 def test_two_routes_cannot_share_a_name() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         reciprocal_rank_fusion(
-            (RouteRanking("bm25", ("a",)), RouteRanking("bm25", ("b",)))
+            (RouteRanking("bm25", ("a",)), RouteRanking("bm25", ("b",))),
+            locators={},
         )
 
 
 def test_fusing_nothing_is_refused() -> None:
     with pytest.raises(ValueError, match="at least one"):
-        reciprocal_rank_fusion(())
+        reciprocal_rank_fusion((), locators={})
 
 
 @pytest.fixture

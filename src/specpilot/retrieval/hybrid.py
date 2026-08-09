@@ -17,8 +17,11 @@ outright.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+
+from specpilot.retrieval.protocol import RetrievalLocator
 
 # Reserved because they name the fusion rather than a route into it. §8.2.3's
 # argument fails the moment the hybrid ranking enters the pool.
@@ -63,6 +66,7 @@ class FusedHit:
     # Which route placed it where. §8.2.3 requires a candidate's origin to be
     # recorded, and a fused score alone cannot say where it came from.
     ranks: dict[str, int] = field(default_factory=dict)
+    locator: RetrievalLocator = field(kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,8 @@ class FusedRanking:
 
 def reciprocal_rank_fusion(
     rankings: Sequence[RouteRanking],
+    *,
+    locators: Mapping[str, RetrievalLocator],
     parameters: RrfParameters | None = None,
 ) -> FusedRanking:
     """Fuse route rankings by reciprocal rank."""
@@ -82,26 +88,51 @@ def reciprocal_rank_fusion(
         raise ValueError("fusion needs at least one ranking")
     settings = parameters or RrfParameters()
 
-    seen: set[str] = set()
-    for ranking in rankings:
-        if ranking.route in seen:
-            raise ValueError(f"duplicate route {ranking.route!r}")
-        seen.add(ranking.route)
+    if len({ranking.route for ranking in rankings}) != len(rankings):
+        raise ValueError("fusion routes must be unique; duplicate route")
+    wanted = {unit_id for ranking in rankings for unit_id in ranking.unit_ids}
+    if wanted - set(locators):
+        raise ValueError("fusion candidate has no retrieval locator")
+    if wanted and len(
+        {locators[unit_id].corpus_manifest_id for unit_id in wanted}
+    ) != 1:
+        raise ValueError("fusion candidates cross corpus manifests")
 
-    scores: dict[str, float] = {}
-    ranks: dict[str, dict[str, int]] = {}
+    grouped: dict[tuple[object, ...], dict[str, tuple[int, str]]] = {}
+    identity_locator: dict[tuple[object, ...], RetrievalLocator] = {}
+    identity_unit_ids: dict[tuple[object, ...], set[str]] = {}
+    tie_owner: dict[tuple[object, ...], tuple[object, ...]] = {}
     for ranking in rankings:
-        for position, unit_id in enumerate(ranking.unit_ids, start=1):
-            scores[unit_id] = scores.get(unit_id, 0.0) + 1.0 / (settings.k + position)
-            ranks.setdefault(unit_id, {})[ranking.route] = position
+        for rank, unit_id in enumerate(ranking.unit_ids, start=1):
+            locator = locators[unit_id]
+            identity = locator.dedupe_key
+            previous = identity_locator.setdefault(identity, locator)
+            if previous != locator:
+                raise ValueError("one identity has conflicting locators")
+            owner = tie_owner.setdefault(locator.stable_tie_key, identity)
+            if owner != identity:
+                raise ValueError("two identities share one stable tie key")
+            identity_unit_ids.setdefault(identity, set()).add(unit_id)
+            grouped.setdefault(identity, {}).setdefault(
+                ranking.route, (rank, unit_id)
+            )
 
-    # Sorted by identifier as well as score so equal scores order identically
-    # on every run; a pooling log is read long after it is written.
-    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-    return FusedRanking(
-        hits=tuple(
-            FusedHit(unit_id=unit_id, score=score, ranks=ranks[unit_id])
-            for unit_id, score in ordered
-        ),
-        parameters=settings,
-    )
+    hits: list[FusedHit] = []
+    for identity, by_route in grouped.items():
+        score = math.fsum(
+            1.0 / (settings.k + by_route[route][0])
+            for route in sorted(by_route)
+        )
+        hits.append(
+            FusedHit(
+                unit_id=min(identity_unit_ids[identity]),
+                score=score,
+                ranks={
+                    route: value[0]
+                    for route, value in sorted(by_route.items())
+                },
+                locator=identity_locator[identity],
+            )
+        )
+    hits.sort(key=lambda hit: (-hit.score, *hit.locator.stable_tie_key))
+    return FusedRanking(hits=tuple(hits), parameters=settings)

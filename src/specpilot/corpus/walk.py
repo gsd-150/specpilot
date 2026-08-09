@@ -14,10 +14,13 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Final
 from xml.etree.ElementTree import Element  # noqa: S405 - parsed via defusedxml
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.ingestion.rfc import RfcInput, ensure_verified_rfc
+
+RFCXML_PARSER_VERSION: Final = "rfcxml-v3/v1"
 
 # List items and definition bodies whose prose the source did not wrap in <t>.
 # Measured on RFC 9110: 182 <li> holding 3689 words and 37 <dd> holding 454,

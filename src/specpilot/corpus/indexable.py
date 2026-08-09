@@ -23,6 +23,7 @@ they cannot drift apart about what a unit is.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import (
@@ -32,6 +33,8 @@ from specpilot.corpus.clauses import (
 )
 from specpilot.corpus.tables import TABLE_KIND, iter_table_rows
 from specpilot.ingestion.rfc import RfcInput
+
+CHUNKER_VERSION: Final = "rfc-clause-table/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,7 @@ class IndexUnit:
     document_version: str
     section_number: str | None
     section_path: str
+    ordinal: int
     text: str
     indexed: str
 
@@ -92,6 +96,7 @@ def build_index_units(
                 document_version=clause.document_version,
                 section_number=clause.section_number,
                 section_path=clause.section_path,
+                ordinal=clause.ordinal,
                 text=text,
                 indexed=_assemble(
                     clause.section_number, clause.section_path, text, settings
@@ -111,6 +116,7 @@ def build_index_units(
                 document_version=table.document_version,
                 section_number=table.section_number,
                 section_path=table.section_path,
+                ordinal=table.ordinal,
                 text=text,
                 indexed=_assemble(
                     table.section_number, table.section_path, text, settings

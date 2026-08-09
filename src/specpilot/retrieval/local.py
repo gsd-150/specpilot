@@ -49,6 +49,8 @@ class LocalCorpus:
         toc: list[tuple[str | None, str]] = []
         for source, clause_limits in documents:
             for unit in build_index_units(source, rfc_limits, clause_limits, policy):
+                if unit.unit_id in units:
+                    raise ValueError(f"duplicate unit id {unit.unit_id!r}")
                 units[unit.unit_id] = unit
             root = parse_verified(source, rfc_limits)
             for section in sections(root):
@@ -62,6 +64,10 @@ class LocalCorpus:
 
     def unit_count(self) -> int:
         return len(self._units)
+
+    def units(self) -> tuple[IndexUnit, ...]:
+        """Return units in canonical document and construction order."""
+        return tuple(self._units.values())
 
     def get_clause(self, unit_id: str) -> IndexUnit:
         """Return the whole unit. Raises rather than returning a partial one."""
