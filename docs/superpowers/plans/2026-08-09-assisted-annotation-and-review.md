@@ -239,10 +239,9 @@ the evaluation set.
 
 - [x] **Step 3: Implement, with the rate and salt recorded, not hard-coded**
 
-`deep_review_required` only. **`ReviewStatistics` is still open** and moves to
-Task 5, which is where the counting actually happens — a statistics type with
-no reporter to consume it would have been written against a guess at what the
-report needs.
+`deep_review_required` shipped with Task 4; `ReviewStatistics` followed with
+Task 5, which is where the counting is consumed — written earlier it would have
+been written against a guess at what the report needs.
 
 Brought forward out of order because Task 4 could not meet its own acceptance
 criterion without it: an item cannot be labelled for deep review before the
@@ -336,7 +335,7 @@ presented third of four, not first.
 - Test: `tests/unit/annotation/test_progress.py`,
   `tests/cli/test_annotation_progress.py`
 
-- [ ] **Step 1: Write failing progress tests**
+- [x] **Step 1: Write failing progress tests**
 
 Assert `proposal_acceptance_rate` counts rejected items in its denominator;
 that rejected items do not count toward the §8.1 targets; that deep-review
@@ -346,7 +345,35 @@ anywhere near a retrieval or answer figure in the output.
 
 - [x] **Step 2: Run and verify RED**
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [x] **Step 3: Implement and verify GREEN**
+
+**The deep-review sample is recomputed, not believed.** Counting how many
+decisions carry `deep_reviewed` would always agree with itself: the flag is set
+by the same function that decides the sample, so it can only ever match. The
+failure it needs to catch is a pass run under a rate or salt that is not the one
+the evaluation set declares — `--deep-review-rate 0.0` records no deep reviews
+and looks complete on its own terms. `review_statistics` therefore takes the
+*declared* rate and salt and recomputes which reviewed items should have been
+sampled, so that run reports coverage 0 of 10 instead of nothing at all.
+
+**Every decision counts, including a second one about the same item.** The store
+has no clock — files are content-addressed and read in hash order — so "the
+latest decision" is not knowable from it. Counting all of them is well defined
+and errs downward: a rejection later overturned still shows as a rejection,
+which understates the acceptance rate rather than overstating it. `re_reviews`
+makes the gap between decisions and items visible.
+
+**`gold_review` is a top-level block, absent when reviews were not asked for.**
+Not a field inside `l1`, where a reader finding an acceptance rate would take it
+for a result about SpecPilot's answers, and not an empty block, which would read
+as "no reviews happened" rather than "none were requested". The block carries
+`measures: gold_quality`, and a test asserts no key in it contains a retrieval or
+answer metric name.
+
+`--review-dir` is optional, but supplying it makes `--deep-review-rate` and
+`--deep-review-salt` required — argparse cannot express that, so the handler
+refuses with `deep_review_sample_undeclared`. Either reviews go unreported, or
+they are reported against a sample somebody declared.
 
 ---
 

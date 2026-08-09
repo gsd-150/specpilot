@@ -14,7 +14,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from specpilot.annotation.progress import read_progress
-from specpilot.annotation.review import ReviewStore, deep_review_required
+from specpilot.annotation.review import (
+    ReviewStore,
+    deep_review_required,
+    review_statistics,
+)
 from specpilot.annotation.store import AnnotationStore
 from specpilot.contracts.annotation import (
     AnnotationOrigin,
@@ -1078,8 +1082,32 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
     directory: Path = arguments.annotation_dir
     if not directory.is_dir():
         return _refuse("annotation_dir_not_found")
+
+    gold_review = None
+    review_dir: Path | None = arguments.review_dir
+    if review_dir is not None:
+        if arguments.deep_review_rate is None or arguments.deep_review_salt is None:
+            # Coverage against an undeclared rate is a number about nothing, and
+            # the sample is the only thing separating "the proposals were good"
+            # from "the review was shallow".
+            return _refuse("deep_review_sample_undeclared", EXIT_USAGE)
+        if not review_dir.is_dir():
+            # Not an empty report: zero reviews for a store that is not there
+            # would read as zero reviews having happened.
+            return _refuse("review_dir_not_found")
+        try:
+            gold_review = review_statistics(
+                ReviewStore(review_dir).read_all(),
+                rate=arguments.deep_review_rate,
+                salt=arguments.deep_review_salt,
+            )
+        except ValueError:
+            return _refuse("invalid_review_record")
+        except OSError:
+            return _refuse("io_error", EXIT_IO)
+
     try:
-        report = read_progress(directory)
+        report = read_progress(directory, gold_review)
     except UnsupportedAnnotationSchemaError:
         return _refuse("unsupported_annotation_schema")
     except ValueError:
@@ -1735,6 +1763,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     progress = annotation.add_parser("progress")
     progress.add_argument("--annotation-dir", type=Path, required=True)
+    # Optional as a group: reviews are reported only when asked for, and asking
+    # for them requires declaring the sample they should be measured against.
+    progress.add_argument("--review-dir", type=Path, default=None)
+    progress.add_argument("--deep-review-rate", type=float, default=None)
+    progress.add_argument("--deep-review-salt", default=None)
     progress.set_defaults(handler=_annotation_progress)
 
     template = annotation.add_parser("template")

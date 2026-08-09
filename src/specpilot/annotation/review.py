@@ -17,12 +17,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
-from specpilot.contracts.annotation import ReviewDecision
+from specpilot.contracts.annotation import ReviewDecision, ReviewOutcome
 from specpilot.manifests.canonical import canonical_json, canonical_sha256
 
 _MAX_RECORD_BYTES = 16 * 1024
@@ -39,6 +42,15 @@ _DRAW_WIDTH = 8
 _DRAW_SPACE = float(1 << (_DRAW_WIDTH * 8))
 
 
+def _validate_sample(rate: float, salt: str) -> None:
+    if not 0.0 <= rate <= 1.0:
+        raise ValueError("the deep-review rate must be between zero and one")
+    if not salt:
+        # Indistinguishable from having forgotten to configure one, and a
+        # forgotten salt makes the sample a constant nobody chose.
+        raise ValueError("the deep-review salt may not be empty")
+
+
 def deep_review_required(item_id: str, *, rate: float, salt: str) -> bool:
     """Whether this item is in the sample that gets read against full source.
 
@@ -53,12 +65,7 @@ def deep_review_required(item_id: str, *, rate: float, salt: str) -> bool:
     the evaluation set's own record — an unrecorded salt is one that can be
     chosen after the results are in.
     """
-    if not 0.0 <= rate <= 1.0:
-        raise ValueError("the deep-review rate must be between zero and one")
-    if not salt:
-        # Indistinguishable from having forgotten to configure one, and a
-        # forgotten salt makes the sample a constant nobody chose.
-        raise ValueError("the deep-review salt may not be empty")
+    _validate_sample(rate, salt)
     digest = hashlib.sha256(f"{salt}{_SEPARATOR}{item_id}".encode()).digest()
     draw = int.from_bytes(digest[:_DRAW_WIDTH], "big") / _DRAW_SPACE
     return draw < rate
@@ -133,4 +140,141 @@ class ReviewStore:
             os.close(descriptor)
 
 
-__all__ = ["ReviewStore", "deep_review_required"]
+@dataclass(frozen=True, slots=True)
+class ReviewStatistics:
+    """What the reviews found, as counts that describe the gold.
+
+    Not the system. An acceptance rate printed beside a Recall@k reads as a
+    quality result for SpecPilot, which it is not — §8.1 requires the two kept
+    apart, so `payload` says what it measures and the report keeps this in its
+    own block.
+
+    A high acceptance rate is ambiguous on its own: "the proposals were good"
+    and "the review was shallow" fit it equally well. Only the deep-review
+    sample separates them, which is why coverage sits in the same object rather
+    than somewhere it can be omitted.
+    """
+
+    reviewed_items: int
+    decisions: int
+    accepted: int
+    gold_changed: int
+    rejected: int
+    key_points_edited: int
+    unanswerable_reviews: int
+    deep_review_rate: float
+    deep_review_salt: str
+    deep_review_expected: int
+    deep_review_recorded: int
+    reviewers: dict[str, int]
+    proposal_producers: dict[str, int]
+
+    @property
+    def re_reviews(self) -> int:
+        return self.decisions - self.reviewed_items
+
+    @property
+    def proposal_acceptance_rate(self) -> float | None:
+        """``None`` rather than zero when nothing has been reviewed.
+
+        Zero reads as "every proposal was rejected", which is a different
+        statement from "no proposals".
+        """
+        if not self.decisions:
+            return None
+        return self.accepted / self.decisions
+
+    @property
+    def deep_review_coverage(self) -> float | None:
+        if not self.deep_review_expected:
+            return None
+        return self.deep_review_recorded / self.deep_review_expected
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "measures": "gold_quality",
+            "reviewed_items": self.reviewed_items,
+            "decisions": self.decisions,
+            "re_reviews": self.re_reviews,
+            "accepted": self.accepted,
+            "gold_changed": self.gold_changed,
+            "rejected": self.rejected,
+            "proposal_acceptance_rate": self.proposal_acceptance_rate,
+            "key_points_edited": self.key_points_edited,
+            "unanswerable_reviews": self.unanswerable_reviews,
+            "deep_review_rate": self.deep_review_rate,
+            "deep_review_salt": self.deep_review_salt,
+            "deep_review_expected": self.deep_review_expected,
+            "deep_review_recorded": self.deep_review_recorded,
+            "deep_review_coverage": self.deep_review_coverage,
+            "reviewers": self.reviewers,
+            "proposal_producers": self.proposal_producers,
+        }
+
+
+def review_statistics(
+    decisions: Iterable[ReviewDecision], *, rate: float, salt: str
+) -> ReviewStatistics:
+    """Count what the reviews decided, against the sample they should have used.
+
+    ``rate`` and ``salt`` are the evaluation set's declared ones, not whatever
+    a run happened to pass. The sample is recomputed here rather than believed,
+    because a pass run at rate zero records no deep reviews and looks complete
+    on its own terms; recomputing is what makes that visible as coverage 0 of N.
+
+    Every decision counts, including a second one about an item already
+    reviewed. The store has no clock, so "the latest decision" is not knowable
+    from it, and counting them all errs downward — a rejection later overturned
+    still shows as a rejection, understating the acceptance rate rather than
+    overstating it. ``re_reviews`` makes the gap visible.
+    """
+    # Up front, not inside the per-item loop: an empty store would otherwise
+    # report happily under a rate and salt nobody could have used.
+    _validate_sample(rate, salt)
+    outcomes: Counter[ReviewOutcome] = Counter()
+    reviewers: Counter[str] = Counter()
+    producers: Counter[str] = Counter()
+    items: set[str] = set()
+    deeply_reviewed: set[str] = set()
+    total = 0
+    edited = 0
+    unanswerable = 0
+
+    for decision in decisions:
+        total += 1
+        outcomes[decision.outcome] += 1
+        reviewers[decision.reviewer_id] += 1
+        producers[decision.proposal_producer] += 1
+        items.add(decision.item_id)
+        if decision.deep_reviewed:
+            deeply_reviewed.add(decision.item_id)
+        if decision.key_points_edited:
+            edited += 1
+        if decision.unanswerable:
+            unanswerable += 1
+
+    return ReviewStatistics(
+        reviewed_items=len(items),
+        decisions=total,
+        accepted=outcomes[ReviewOutcome.ACCEPTED_AS_PROPOSED],
+        gold_changed=outcomes[ReviewOutcome.GOLD_CHANGED],
+        rejected=outcomes[ReviewOutcome.ITEM_REJECTED],
+        key_points_edited=edited,
+        unanswerable_reviews=unanswerable,
+        deep_review_rate=rate,
+        deep_review_salt=salt,
+        deep_review_expected=sum(
+            deep_review_required(item, rate=rate, salt=salt) for item in items
+        ),
+        deep_review_recorded=len(deeply_reviewed),
+        reviewers=dict(sorted(reviewers.items())),
+        proposal_producers=dict(sorted(producers.items())),
+    )
+
+
+__all__ = [
+    "ReviewStatistics",
+    "ReviewStore",
+    "deep_review_required",
+    "review_statistics",
+]

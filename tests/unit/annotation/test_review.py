@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from specpilot.annotation.review import deep_review_required
+from specpilot.annotation.review import deep_review_required, review_statistics
+from specpilot.contracts.annotation import ReviewDecision
 
 SALT = "r1-2026-08"
 IDS = tuple(f"l1-dev-{n:03d}" for n in range(2000))
@@ -72,3 +73,155 @@ def test_an_empty_salt_is_refused() -> None:
     """An empty salt is indistinguishable from having forgotten to set one."""
     with pytest.raises(ValueError, match="salt"):
         deep_review_required("l1-dev-001", rate=0.2, salt="")
+
+
+def decision(item_id: str, outcome: str, **overrides: object) -> ReviewDecision:
+    accepted = outcome == "accepted_as_proposed"
+    rejected = outcome == "item_rejected"
+    fields: dict[str, object] = {
+        "reviewed_annotation_id": (
+            None if rejected else item_id.encode().hex().zfill(64)
+        ),
+        "item_id": item_id,
+        "outcome": outcome,
+        "candidates_shown": 4,
+        "chose_proposal": accepted,
+        "reviewer_id": "chunxue",
+        "proposal_producer": "claude-opus-5",
+        "deep_reviewed": deep_review_required(item_id, rate=0.25, salt=SALT),
+    }
+    return ReviewDecision(**{**fields, **overrides})
+
+
+def test_a_rejection_stays_in_the_acceptance_denominator() -> None:
+    """A store holding only accepted proposals reports 100% by construction.
+
+    Which is the exact shape of a number that reassures and measures nothing.
+    """
+    stats = review_statistics(
+        [
+            decision("l1-dev-001", "accepted_as_proposed"),
+            decision("l1-dev-002", "accepted_as_proposed"),
+            decision("l1-dev-003", "gold_changed"),
+            decision("l1-dev-004", "item_rejected"),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.accepted == 2
+    assert stats.gold_changed == 1
+    assert stats.rejected == 1
+    assert stats.proposal_acceptance_rate == 0.5
+
+
+def test_an_acceptance_rate_over_nothing_is_not_zero() -> None:
+    """Zero would read as "every proposal was rejected"."""
+    stats = review_statistics([], rate=0.25, salt=SALT)
+
+    assert stats.proposal_acceptance_rate is None
+    assert stats.deep_review_coverage is None
+
+
+def test_a_re_review_is_counted_as_another_decision_not_another_item() -> None:
+    """The store has no clock, so "the latest decision" is not knowable.
+
+    Counting every decision is well defined and errs downward: a rejection later
+    overturned still shows as a rejection, which understates the acceptance rate
+    rather than overstating it.
+    """
+    stats = review_statistics(
+        [
+            decision("l1-dev-001", "item_rejected"),
+            decision("l1-dev-001", "accepted_as_proposed"),
+            decision("l1-dev-002", "accepted_as_proposed"),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.decisions == 3
+    assert stats.reviewed_items == 2
+    assert stats.re_reviews == 1
+    assert stats.proposal_acceptance_rate == pytest.approx(2 / 3)
+
+
+def test_the_deep_review_sample_is_recomputed_rather_than_believed() -> None:
+    """The check that matters is against the declared rate, not the run's own.
+
+    A pass run at `--deep-review-rate 0.0` records no deep reviews and looks
+    complete on its own terms. Recomputing the sample from the salt the
+    evaluation set declares is what makes that visible.
+    """
+    items = [f"l1-dev-{n:03d}" for n in range(40)]
+    honest = review_statistics(
+        [decision(item, "accepted_as_proposed") for item in items],
+        rate=0.25,
+        salt=SALT,
+    )
+    skipped = review_statistics(
+        [
+            decision(item, "accepted_as_proposed", deep_reviewed=False)
+            for item in items
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert honest.deep_review_expected > 0
+    assert honest.deep_review_recorded == honest.deep_review_expected
+    assert honest.deep_review_coverage == 1.0
+    assert skipped.deep_review_expected == honest.deep_review_expected
+    assert skipped.deep_review_recorded == 0
+    assert skipped.deep_review_coverage == 0.0
+
+
+def test_edited_key_points_are_counted() -> None:
+    """Drafted key points are the part the forced choice cannot check.
+
+    So whether they were accepted verbatim is a countable fact rather than an
+    invisible one.
+    """
+    stats = review_statistics(
+        [
+            decision("l1-dev-001", "accepted_as_proposed", key_points_edited=True),
+            decision("l1-dev-002", "accepted_as_proposed"),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.key_points_edited == 1
+
+
+def test_the_statistics_name_who_reviewed_and_who_drafted() -> None:
+    stats = review_statistics(
+        [
+            decision("l1-dev-001", "accepted_as_proposed"),
+            decision(
+                "l1-dev-002", "accepted_as_proposed", proposal_producer="openai-codex"
+            ),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.reviewers == {"chunxue": 2}
+    assert stats.proposal_producers == {"claude-opus-5": 1, "openai-codex": 1}
+
+
+def test_the_payload_says_what_it_measures_and_carries_no_system_metric() -> None:
+    """§8.1: these describe the gold, not the system.
+
+    Reported beside a retrieval or answer figure without that distinction, an
+    acceptance rate reads as a quality result for SpecPilot, which it is not.
+    """
+    payload = review_statistics(
+        [decision("l1-dev-001", "accepted_as_proposed")], rate=0.25, salt=SALT
+    ).payload()
+
+    assert payload["measures"] == "gold_quality"
+    assert payload["deep_review_salt"] == SALT
+    assert payload["deep_review_rate"] == 0.25
+    forbidden = ("recall", "ndcg", "mrr", "precision", "f1", "latency", "accuracy")
+    assert not [key for key in payload if any(word in key for word in forbidden)]

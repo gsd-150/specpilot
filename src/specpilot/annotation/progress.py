@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from specpilot.annotation.review import ReviewStatistics
 from specpilot.annotation.store import Annotation, AnnotationStore
 from specpilot.contracts.annotation import (
     GoldOrigin,
@@ -163,15 +164,25 @@ class ProgressReport:
     l2: SetProgress
     annotated_items: int
     superseded_count: int
+    gold_review: ReviewStatistics | None = None
 
     def payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "status": "reported",
             "annotated_items": self.annotated_items,
             "superseded_count": self.superseded_count,
             "l1": self.l1.payload(),
             "l2": self.l2.payload(),
         }
+        if self.gold_review is not None:
+            # Its own key, deliberately outside `l1` and `l2`. These count how
+            # good the gold is, not how well the system answers against it, and
+            # a reader who finds an acceptance rate inside a set's progress
+            # block will read it as the second thing. Absent rather than zeroed
+            # when reviews were not asked for: an empty block reads as "no
+            # reviews", which is a different claim.
+            payload["gold_review"] = self.gold_review.payload()
+        return payload
 
 
 def _unanswerable(record: Annotation) -> bool:
@@ -284,8 +295,16 @@ def _set_progress(
     )
 
 
-def build_progress(records: Iterable[Annotation]) -> ProgressReport:
-    """Report progress over annotation records, counting items not files."""
+def build_progress(
+    records: Iterable[Annotation],
+    gold_review: ReviewStatistics | None = None,
+) -> ProgressReport:
+    """Report progress over annotation records, counting items not files.
+
+    ``gold_review`` is built by the caller, because the statistics need the
+    evaluation set's declared sample rate and salt and this module has no
+    business knowing either.
+    """
     by_id: dict[str, Annotation] = {}
     for record in records:
         if record.annotation_id is None:
@@ -314,9 +333,12 @@ def build_progress(records: Iterable[Annotation]) -> ProgressReport:
         l2=_set_progress("l2", L2_TARGET, sets["l2"]),
         annotated_items=len(items),
         superseded_count=len(superseded),
+        gold_review=gold_review,
     )
 
 
-def read_progress(directory: Path) -> ProgressReport:
+def read_progress(
+    directory: Path, gold_review: ReviewStatistics | None = None
+) -> ProgressReport:
     """Report progress over a stored annotation set, verifying every record."""
-    return build_progress(AnnotationStore(directory).iter_records())
+    return build_progress(AnnotationStore(directory).iter_records(), gold_review)
