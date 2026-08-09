@@ -4,7 +4,6 @@ import errno
 import os
 import re
 import stat
-from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -17,6 +16,7 @@ from specpilot.ingestion._secure_fs import (
 
 _CONTENT_FILE = re.compile(r"^([0-9a-f]{64})\.json$")
 _MAX_ENUMERATED_RECORD_BYTES = 256 * 1024
+_FileIdentity = tuple[int, int]
 
 
 class SecureRecordDirectory:
@@ -132,10 +132,7 @@ class SecureRecordDirectory:
                 or opened_after_read.st_size != len(data)
             ):
                 raise FileExistsError(self.path / name)
-            try:
-                named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
-            except OSError as error:
-                raise FileExistsError(self.path / name) from error
+            named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
             self._validate_file_status(name, named, max_bytes=max_bytes)
             if named.st_dev != opened.st_dev or named.st_ino != opened.st_ino:
                 raise FileExistsError(self.path / name)
@@ -154,38 +151,47 @@ class SecureRecordDirectory:
 
         self._revalidate_root()
         temporary_name: str | None = None
+        temporary_descriptor: int | None = None
+        temporary_identity: _FileIdentity | None = None
         published = False
         try:
-            descriptor, temporary_name = create_private_file(
+            temporary_descriptor, temporary_name = create_private_file(
                 self.fd,
                 prefix=".manifest-",
             )
-            try:
-                temporary_status = os.fstat(descriptor)
-                self._validate_file_status(
-                    temporary_name,
-                    temporary_status,
-                    max_bytes=max_bytes,
-                )
-                remaining = memoryview(data)
-                while remaining:
-                    written = os.write(descriptor, remaining)
-                    if written <= 0:
-                        raise OSError("unable to write secure record")
-                    remaining = remaining[written:]
-                os.fsync(descriptor)
-                written_status = os.fstat(descriptor)
-                self._validate_file_status(
-                    temporary_name,
-                    written_status,
-                    max_bytes=max_bytes,
-                )
-                if written_status.st_size != len(data):
-                    raise FileExistsError(self.path / temporary_name)
-            finally:
-                os.close(descriptor)
+            temporary_status = os.fstat(temporary_descriptor)
+            temporary_identity = self._file_identity(temporary_status)
+            self._validate_file_status(
+                temporary_name,
+                temporary_status,
+                max_bytes=max_bytes,
+            )
+            remaining = memoryview(data)
+            while remaining:
+                written = os.write(temporary_descriptor, remaining)
+                if written <= 0:
+                    raise OSError("unable to write secure record")
+                remaining = remaining[written:]
+            os.fsync(temporary_descriptor)
+            written_status = os.fstat(temporary_descriptor)
+            self._validate_file_status(
+                temporary_name,
+                written_status,
+                max_bytes=max_bytes,
+            )
+            if (
+                self._file_identity(written_status) != temporary_identity
+                or written_status.st_size != len(data)
+            ):
+                raise FileExistsError(self.path / temporary_name)
 
             self._revalidate_root()
+            self._require_named_identity(
+                temporary_name,
+                temporary_identity,
+                links=1,
+                max_bytes=max_bytes,
+            )
             try:
                 os.link(
                     temporary_name,
@@ -197,29 +203,62 @@ class SecureRecordDirectory:
                 published = True
             except FileExistsError:
                 pass
+            if published:
+                self._require_named_identity(
+                    name,
+                    temporary_identity,
+                    links=2,
+                    max_bytes=max_bytes,
+                )
+                self._require_named_identity(
+                    temporary_name,
+                    temporary_identity,
+                    links=2,
+                    max_bytes=max_bytes,
+                )
             self._revalidate_root()
 
-            os.unlink(temporary_name, dir_fd=self.fd)
+            expected_links = 2 if published else 1
+            if not self._unlink_if_identity(
+                temporary_name,
+                temporary_identity,
+                links=expected_links,
+                max_bytes=max_bytes,
+            ):
+                raise FileExistsError(self.path / temporary_name)
             temporary_name = None
-            os.fsync(self.fd)
+            os.close(temporary_descriptor)
+            temporary_descriptor = None
             self._revalidate_root()
 
+            if published:
+                self._require_named_identity(
+                    name,
+                    temporary_identity,
+                    links=1,
+                    max_bytes=max_bytes,
+                )
             stored = self.read(name, max_bytes=max_bytes)
             if stored != data:
                 raise FileExistsError(self.path / name)
+            if published:
+                self._require_named_identity(
+                    name,
+                    temporary_identity,
+                    links=1,
+                    max_bytes=max_bytes,
+                )
             self._revalidate_root()
             return stored
         except BaseException:
-            if published:
-                with suppress(FileNotFoundError):
-                    os.unlink(name, dir_fd=self.fd)
-                    os.fsync(self.fd)
+            if published and temporary_identity is not None:
+                self._unlink_if_identity(name, temporary_identity)
             raise
         finally:
-            if temporary_name is not None:
-                with suppress(FileNotFoundError):
-                    os.unlink(temporary_name, dir_fd=self.fd)
-                    os.fsync(self.fd)
+            if temporary_name is not None and temporary_identity is not None:
+                self._unlink_if_identity(temporary_name, temporary_identity)
+            if temporary_descriptor is not None:
+                os.close(temporary_descriptor)
 
     @staticmethod
     def _validate_root(path: Path, fd: int) -> None:
@@ -237,14 +276,65 @@ class SecureRecordDirectory:
         status: os.stat_result,
         *,
         max_bytes: int,
+        links: int = 1,
     ) -> None:
         if (
             not stat.S_ISREG(status.st_mode)
-            or status.st_nlink != 1
+            or status.st_nlink != links
             or stat.S_IMODE(status.st_mode) != 0o600
             or status.st_size > max_bytes
         ):
             raise FileExistsError(self.path / name)
+
+    @staticmethod
+    def _file_identity(status: os.stat_result) -> _FileIdentity:
+        return status.st_dev, status.st_ino
+
+    def _require_named_identity(
+        self,
+        name: str,
+        expected: _FileIdentity,
+        *,
+        links: int,
+        max_bytes: int,
+    ) -> None:
+        try:
+            named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except OSError as error:
+            raise FileExistsError(self.path / name) from error
+        self._validate_file_status(
+            name,
+            named,
+            max_bytes=max_bytes,
+            links=links,
+        )
+        if self._file_identity(named) != expected:
+            raise FileExistsError(self.path / name)
+
+    def _unlink_if_identity(
+        self,
+        name: str,
+        expected: _FileIdentity,
+        *,
+        links: int | None = None,
+        max_bytes: int | None = None,
+    ) -> bool:
+        try:
+            named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            if self._file_identity(named) != expected:
+                return False
+            if links is not None and max_bytes is not None:
+                self._validate_file_status(
+                    name,
+                    named,
+                    max_bytes=max_bytes,
+                    links=links,
+                )
+            os.unlink(name, dir_fd=self.fd)
+        except FileNotFoundError:
+            return False
+        os.fsync(self.fd)
+        return True
 
     @staticmethod
     def _validate_read(name: str, *, max_bytes: int) -> None:

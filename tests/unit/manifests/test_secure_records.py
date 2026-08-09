@@ -39,6 +39,26 @@ def _secure_root(tmp_path: Path) -> Path:
     return root
 
 
+def _replace_private_entry(
+    directory_descriptor: int,
+    name: str,
+    data: bytes,
+) -> os.stat_result:
+    os.unlink(name, dir_fd=directory_descriptor)
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_descriptor,
+    )
+    try:
+        assert os.write(descriptor, data) == len(data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+
+
 def _assert_enumeration_probe_rejects(root: Path) -> None:
     completed = subprocess.run(
         [sys.executable, "-c", ENUMERATE_PROBE, str(root)],
@@ -363,6 +383,252 @@ def test_conflicting_replay_fails_without_overwriting_existing_bytes(
     assert record.read_bytes() == b"existing"
     assert record.stat().st_ino == original_inode
     assert tuple(root.iterdir()) == (record,)
+
+
+def test_target_replacement_after_link_is_preserved_when_publish_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    replacement_statuses: list[os.stat_result] = []
+    original_link = os.link
+
+    def replacing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        assert src_dir_fd is not None
+        assert dst_dir_fd is not None
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        replacement_statuses.append(
+            _replace_private_entry(dst_dir_fd, destination, b"replacement-target")
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "link", replacing_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {replacing_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {replacing_link},
+    )
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError),
+    ):
+        records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    record = root / RECORD_NAME
+    assert len(replacement_statuses) == 1
+    assert record.read_bytes() == b"replacement-target"
+    assert record.stat().st_ino == replacement_statuses[0].st_ino
+    assert record.stat().st_nlink == 1
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600
+
+
+def test_temp_replacement_after_link_is_preserved_when_publish_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    replacement: list[tuple[str, os.stat_result]] = []
+    original_link = os.link
+
+    def replacing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        assert src_dir_fd is not None
+        assert dst_dir_fd is not None
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        replacement.append(
+            (
+                source,
+                _replace_private_entry(src_dir_fd, source, b"replacement-temp"),
+            )
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "link", replacing_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {replacing_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {replacing_link},
+    )
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(FileExistsError),
+    ):
+        records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert len(replacement) == 1
+    temporary_name, replacement_status = replacement[0]
+    temporary = root / temporary_name
+    assert temporary.read_bytes() == b"replacement-temp"
+    assert temporary.stat().st_ino == replacement_status.st_ino
+    assert temporary.stat().st_nlink == 1
+    assert stat.S_IMODE(temporary.stat().st_mode) == 0o600
+    assert not (root / RECORD_NAME).exists()
+
+
+def test_temp_replacement_on_link_error_is_preserved_by_exception_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    replacement: list[tuple[str, os.stat_result]] = []
+
+    def failing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        del destination, dst_dir_fd, follow_symlinks
+        assert src_dir_fd is not None
+        replacement.append(
+            (
+                source,
+                _replace_private_entry(src_dir_fd, source, b"replacement-temp"),
+            )
+        )
+        raise OSError("forced link failure")
+
+    monkeypatch.setattr(secure_records_module.os, "link", failing_link)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {failing_link})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {failing_link},
+    )
+
+    with (
+        SecureRecordDirectory.open(root, create=False) as records,
+        pytest.raises(OSError, match="forced link failure"),
+    ):
+        records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    assert len(replacement) == 1
+    temporary_name, replacement_status = replacement[0]
+    temporary = root / temporary_name
+    assert temporary.read_bytes() == b"replacement-temp"
+    assert temporary.stat().st_ino == replacement_status.st_ino
+    assert temporary.stat().st_nlink == 1
+    assert stat.S_IMODE(temporary.stat().st_mode) == 0o600
+    assert not (root / RECORD_NAME).exists()
+
+
+def test_publish_revalidates_each_required_publication_boundary_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from specpilot.manifests import _secure_records as secure_records_module
+
+    root = _secure_root(tmp_path)
+    events: list[str] = []
+    original_link = os.link
+    original_read = SecureRecordDirectory.read
+    original_revalidate = secure_records_module.revalidate_directory_path
+    original_unlink = os.unlink
+
+    def recording_revalidate(path: Path, descriptor: int) -> None:
+        events.append("revalidate")
+        original_revalidate(path, descriptor)
+
+    def recording_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        events.append("link")
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def recording_unlink(
+        name: str,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        events.append("unlink-temp" if name.startswith(".manifest-") else "unlink")
+        original_unlink(name, dir_fd=dir_fd)
+
+    def recording_read(
+        self: SecureRecordDirectory,
+        name: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        data = original_read(self, name, max_bytes=max_bytes)
+        events.append("read-return")
+        return data
+
+    monkeypatch.setattr(
+        secure_records_module,
+        "revalidate_directory_path",
+        recording_revalidate,
+    )
+    monkeypatch.setattr(secure_records_module.os, "link", recording_link)
+    monkeypatch.setattr(secure_records_module.os, "unlink", recording_unlink)
+    monkeypatch.setattr(SecureRecordDirectory, "read", recording_read)
+    monkeypatch.setattr(
+        os,
+        "supports_dir_fd",
+        os.supports_dir_fd | {recording_link, recording_unlink},
+    )
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {recording_link},
+    )
+
+    with SecureRecordDirectory.open(root, create=False) as records:
+        stored = records.publish(RECORD_NAME, b"canonical", max_bytes=MAX_BYTES)
+
+    link_index = events.index("link")
+    temporary_unlink_index = events.index("unlink-temp")
+    read_return_index = events.index("read-return")
+    assert stored == b"canonical"
+    assert events[link_index - 1] == "revalidate"
+    assert events[link_index + 1] == "revalidate"
+    assert events[temporary_unlink_index + 1] == "revalidate"
+    assert events[read_return_index + 1 :] == ["revalidate"]
 
 
 @pytest.mark.parametrize(

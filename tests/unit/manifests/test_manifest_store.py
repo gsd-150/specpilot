@@ -348,3 +348,78 @@ raise SystemExit(75)
         ManifestStore(store_dir).read_source(manifest_id)
     assert time.monotonic() - started < 0.5
     assert raised.value.args == (fifo_path,)
+
+
+def test_read_source_preserves_named_stat_file_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, manifest = create_initial(tmp_path / "manifests")
+    name = f"{manifest.manifest_id}.json"
+    original_stat = os.stat
+    original_unlink = os.unlink
+    removed = False
+
+    def removing_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal removed
+        if path == name and dir_fd is not None and not removed:
+            original_unlink(path, dir_fd=dir_fd)
+            removed = True
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "stat", removing_stat)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {removing_stat})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {removing_stat},
+    )
+
+    with pytest.raises(FileNotFoundError):
+        store.read_source(manifest.manifest_id)
+
+
+def test_read_source_preserves_named_stat_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, manifest = create_initial(tmp_path / "manifests")
+    name = f"{manifest.manifest_id}.json"
+    manifest_path = tmp_path / "manifests" / name
+    original_stat = os.stat
+
+    def rejecting_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if path == name and dir_fd is not None:
+            raise PermissionError(manifest_path)
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(secure_records_module.os, "stat", rejecting_stat)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {rejecting_stat})
+    monkeypatch.setattr(
+        os,
+        "supports_follow_symlinks",
+        os.supports_follow_symlinks | {rejecting_stat},
+    )
+
+    with pytest.raises(PermissionError) as raised:
+        store.read_source(manifest.manifest_id)
+
+    assert raised.value.args == (manifest_path,)
