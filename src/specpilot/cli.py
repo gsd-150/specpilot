@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from pydantic import ValidationError
 
 from specpilot.annotation.progress import read_progress
 from specpilot.annotation.review import (
+    DeepReviewStore,
     ReviewStore,
     deep_review_required,
     review_statistics,
@@ -22,6 +24,9 @@ from specpilot.annotation.review import (
 from specpilot.annotation.store import AnnotationStore
 from specpilot.contracts.annotation import (
     AnnotationOrigin,
+    DeepReviewFinding,
+    DeepReviewOutcome,
+    DeepReviewScope,
     GoldOrigin,
     GoldOriginEvent,
     L1Annotation,
@@ -1013,6 +1018,235 @@ def _refusal_record(proposal: Proposal) -> L1Annotation:
     )
 
 
+_DEEP_ANSWERS = {
+    "complete": DeepReviewOutcome.GOLD_COMPLETE,
+    "wrong": DeepReviewOutcome.GOLD_WRONG,
+    "flawed": DeepReviewOutcome.QUESTION_FLAWED,
+}
+
+
+def _deep_review_scope(
+    record: L1Annotation | L2Annotation,
+    texts: dict[Clause, str],
+) -> tuple[DeepReviewScope, tuple[Clause, ...]] | str:
+    """What gets put in front of the reviewer, and why that is the right set.
+
+    For an item with gold, the section it sits in. Everything the section says
+    is on screen, so "I did not have it" is not available, and the failure a
+    deep read exists to catch — a second clause that also answers — lives here
+    far more often than anywhere else.
+
+    For an unanswerable item there is no section to read, and the claim being
+    checked is about the whole document. Literal search supplies the candidates.
+    §8.2.1 forbids the retriever as a source of *initial* gold; this is §8.2.3's
+    completeness audit, where pooling proposing candidates for a human to
+    adjudicate is exactly the sanctioned use.
+    """
+    clauses = tuple(texts)
+    if record.gold_clause_ids:
+        gold = next(
+            (c for c in clauses if c.clause_id == record.gold_clause_ids[0]), None
+        )
+        if gold is None:
+            return "unknown_gold_clause"
+        return DeepReviewScope.SECTION, tuple(
+            c for c in clauses if c.section_anchor == gold.section_anchor
+        )
+
+    index = Bm25Index.build(
+        [(clause.clause_id, text) for clause, text in texts.items()]
+    )
+    by_id = {clause.clause_id: clause for clause in clauses}
+    hits = index.search(record.question, k=8)
+    return DeepReviewScope.LITERAL_SEARCH, tuple(by_id[hit.unit_id] for hit in hits)
+
+
+def _annotation_deep_review(arguments: argparse.Namespace) -> int:
+    """Read the whole scope for one sampled item and record what it found.
+
+    `ReviewDecision.deep_reviewed` records that the reviewer was told an item
+    was sampled, and nothing about whether they then read anything. A pass with
+    no deep reading in it reported complete coverage on exactly that basis. A
+    finding is the deep read's output and cannot be produced without one.
+
+    The command times itself. That is the cheapest signal separating a read
+    from a keystroke — a thirteen-paragraph section closed in twelve seconds
+    was not read — and it is measured here rather than asked for.
+    """
+    directory: Path = arguments.annotation_dir
+    if not directory.is_dir():
+        return _refuse("annotation_dir_not_found")
+    try:
+        records = {
+            record.item_id: record
+            for record in AnnotationStore(directory).iter_records()
+            if record.annotation_id is not None
+        }
+    except UnsupportedAnnotationSchemaError:
+        return _refuse("unsupported_annotation_schema")
+    except ValueError:
+        return _refuse("invalid_annotation_record")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    record = records.get(arguments.item)
+    if record is None or record.annotation_id is None:
+        return _refuse("unknown_item")
+    examined_annotation_id = record.annotation_id
+    if not deep_review_required(
+        record.item_id,
+        rate=arguments.deep_review_rate,
+        salt=arguments.deep_review_salt,
+    ):
+        # Deep-reviewing an unsampled item is choosing the sample, which is the
+        # one thing pre-registration exists to prevent.
+        return _refuse("item_not_sampled")
+
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+    manifest = source.manifest
+    if manifest.document_id != record.document_id:
+        return _refuse("document_id_mismatch")
+    if manifest.document_version != record.document_version:
+        return _refuse("document_version_mismatch")
+
+    try:
+        texts = dict(
+            iter_clause_texts(source.document, RfcLimits(), _clause_limits(manifest))
+        )
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    resolved = _deep_review_scope(record, texts)
+    if isinstance(resolved, str):
+        return _refuse(resolved)
+    scope, examined = resolved
+    if not examined:
+        return _refuse("empty_deep_review_scope")
+
+    gold = set(record.gold_clause_ids)
+    started = time.monotonic()
+    print(f"item {record.item_id} · {record.document_id} · scope {scope.value}")
+    print()
+    print(f"Q. {record.question}")
+    print()
+    for letter, clause in zip(_LETTERS, examined, strict=False):
+        mark = "GOLD" if clause.clause_id in gold else "    "
+        print(f"  [{letter}] {mark} §{clause.section_number} ¶{clause.ordinal}")
+        print(f"           {texts[clause]}")
+        print()
+    if record.expected_refusal:
+        print(
+            'This item claims no clause answers the question. Type "complete" to '
+            'confirm that, "wrong" if one of the above does answer it, or '
+            '"flawed" if the question cannot be answered as posed.'
+        )
+    else:
+        print(
+            "Name every further clause that is also needed to answer, as letters "
+            '(e.g. "B,D"). Or "complete" if the gold above is the whole answer, '
+            '"wrong" if it is not the answer at all, "flawed" if the question is.'
+        )
+
+    answered = _read_deep_answer(
+        len(examined), allow_clauses=not record.expected_refusal
+    )
+    if isinstance(answered, str):
+        return _refuse(answered)
+    outcome, chosen = answered
+    elapsed = int(time.monotonic() - started)
+
+    added = tuple(
+        examined[index].clause_id
+        for index in chosen
+        if examined[index].clause_id not in gold
+    )
+    if chosen and not added:
+        # Every letter named was already gold, so nothing was found. Recording
+        # `gold_extended` here would report work the finding did not do.
+        return _refuse("no_new_clause_named")
+
+    finding = DeepReviewFinding(
+        reviewed_annotation_id=examined_annotation_id,
+        item_id=record.item_id,
+        outcome=DeepReviewOutcome.GOLD_EXTENDED if added else outcome,
+        scope=scope,
+        clauses_examined=len(examined),
+        additional_gold_clause_ids=added,
+        elapsed_seconds=elapsed,
+        reviewer_id=arguments.reviewer,
+    )
+    try:
+        # Stored before the amendment: the finding is the evidence, and if the
+        # amendment fails it names exactly which clauses were still owed.
+        stored = DeepReviewStore(arguments.deep_review_dir).create(finding)
+    except (OSError, RuntimeError, ValueError):
+        return _refuse("deep_review_not_written", EXIT_IO)
+
+    amended_id: str | None = None
+    if added:
+        try:
+            amended_id = (
+                AnnotationStore(directory)
+                .amend(
+                    examined_annotation_id,
+                    added_gold_clause_ids=added,
+                    added_gold_section_paths=tuple(
+                        clause.section_path
+                        for clause in examined
+                        if clause.clause_id in added
+                    ),
+                    added_gold_origins=(
+                        GoldOriginEvent(origin=GoldOrigin.HUMAN_SOURCE_REVIEW),
+                    ),
+                    adjudication=f"deep review of the {scope.value} scope",
+                )
+                .annotation_id
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _refuse("annotation_not_amended", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "recorded",
+            "item_id": record.item_id,
+            "outcome": finding.outcome.value,
+            "scope": scope.value,
+            "clauses_examined": finding.clauses_examined,
+            "additional_gold_clause_count": len(added),
+            "elapsed_seconds": elapsed,
+            "finding_id": stored.finding_id,
+            "amended_annotation_id": amended_id,
+        }
+    )
+
+
+def _read_deep_answer(
+    count: int, *, allow_clauses: bool
+) -> tuple[DeepReviewOutcome, tuple[int, ...]] | str:
+    line = sys.stdin.readline().strip()
+    keyword = _DEEP_ANSWERS.get(line.lower())
+    if keyword is not None:
+        return keyword, ()
+    if not allow_clauses:
+        return "invalid_choice"
+    letters = [part.strip().upper() for part in line.split(",") if part.strip()]
+    if not letters or any(
+        letter not in _LETTERS[:count] for letter in letters
+    ):
+        return "invalid_choice"
+    if len(set(letters)) != len(letters):
+        return "invalid_choice"
+    return DeepReviewOutcome.GOLD_EXTENDED, tuple(
+        _LETTERS.index(letter) for letter in letters
+    )
+
+
 class _FixtureCounter:
     provider_id = "fixture-provider"
     model_id = "fixture-model-v1"
@@ -1095,9 +1329,13 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
             # Not an empty report: zero reviews for a store that is not there
             # would read as zero reviews having happened.
             return _refuse("review_dir_not_found")
+        findings_dir: Path | None = arguments.deep_review_dir
+        if findings_dir is not None and not findings_dir.is_dir():
+            return _refuse("deep_review_dir_not_found")
         try:
             gold_review = review_statistics(
                 ReviewStore(review_dir).read_all(),
+                DeepReviewStore(findings_dir).read_all() if findings_dir else (),
                 rate=arguments.deep_review_rate,
                 salt=arguments.deep_review_salt,
             )
@@ -1766,6 +2004,10 @@ def _parser() -> argparse.ArgumentParser:
     # Optional as a group: reviews are reported only when asked for, and asking
     # for them requires declaring the sample they should be measured against.
     progress.add_argument("--review-dir", type=Path, default=None)
+    # Optional even alongside --review-dir. Absent, coverage reports 0 of N,
+    # which is the truth about a pass that recorded no findings rather than an
+    # error about a missing flag.
+    progress.add_argument("--deep-review-dir", type=Path, default=None)
     progress.add_argument("--deep-review-rate", type=float, default=None)
     progress.add_argument("--deep-review-salt", default=None)
     progress.set_defaults(handler=_annotation_progress)
@@ -1802,6 +2044,21 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--deep-review-rate", type=float, required=True)
     review.add_argument("--deep-review-salt", required=True)
     review.set_defaults(handler=_annotation_review)
+
+    deep = annotation.add_parser("deep-review")
+    deep.add_argument("--item", required=True)
+    deep.add_argument("--annotation-dir", type=Path, required=True)
+    deep.add_argument("--deep-review-dir", type=Path, required=True)
+    deep.add_argument("--reviewer", required=True)
+    deep.add_argument("--manifest", required=True)
+    deep.add_argument("--manifest-dir", type=Path, required=True)
+    deep.add_argument("--xml", type=Path, required=True)
+    # The same rate and salt the pass was registered under. Supplied rather
+    # than defaulted, so a deep review of an unsampled item is refused instead
+    # of silently redefining which items the sample contained.
+    deep.add_argument("--deep-review-rate", type=float, required=True)
+    deep.add_argument("--deep-review-salt", required=True)
+    deep.set_defaults(handler=_annotation_deep_review)
 
     embedding = commands.add_parser("embedding").add_subparsers(
         dest="command", required=True

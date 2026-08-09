@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import statistics
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -25,7 +26,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from specpilot.contracts.annotation import ReviewDecision, ReviewOutcome
+from specpilot.contracts.annotation import (
+    DeepReviewFinding,
+    ReviewDecision,
+    ReviewOutcome,
+)
 from specpilot.manifests.canonical import canonical_json, canonical_sha256
 
 _MAX_RECORD_BYTES = 16 * 1024
@@ -71,38 +76,52 @@ def deep_review_required(item_id: str, *, rate: float, salt: str) -> bool:
     return draw < rate
 
 
-class ReviewStore:
+class _JudgementStore[Record: (ReviewDecision, DeepReviewFinding)]:
+    """Create-only, content-addressed storage for one kind of judgement record.
+
+    Shared by the forced-choice decisions and the deep-review findings because
+    they need identical discipline, and a second hand-written copy of it is a
+    second chance to get the permissions or the replay check subtly wrong.
+    """
+
+    _model: type[Record]
+    _schema: str
+    _id_field: str
+    _noun: str
+
     def __init__(self, directory: Path) -> None:
         self._directory = directory
 
-    def create(self, decision: ReviewDecision) -> ReviewDecision:
-        review_id = canonical_sha256(decision)
-        self._write(review_id, decision)
-        return self.read(review_id)
+    def create(self, record: Record) -> Record:
+        record_id = canonical_sha256(record)
+        self._write(record_id, record)
+        return self.read(record_id)
 
-    def read(self, review_id: str) -> ReviewDecision:
-        path = self._directory / f"{review_id}.json"
+    def read(self, record_id: str) -> Record:
+        path = self._directory / f"{record_id}.json"
         data = path.read_bytes()
         if len(data) > _MAX_RECORD_BYTES:
-            raise ValueError("stored review exceeds the maximum record size")
+            raise ValueError(f"stored {self._noun} exceeds the maximum record size")
         parsed = json.loads(data)
         if not isinstance(parsed, dict):
-            raise ValueError("stored review is invalid")
-        if parsed.get("schema_version") != "annotation-review/v1":
-            raise ValueError("unsupported review schema")
+            raise ValueError(f"stored {self._noun} is invalid")
+        if parsed.get("schema_version") != self._schema:
+            raise ValueError(f"unsupported {self._noun} schema")
         try:
-            record = ReviewDecision.model_validate_json(data)
+            record = self._model.model_validate_json(data)
         except ValidationError as error:
-            raise ValueError("stored review is invalid") from error
-        if canonical_sha256(record) != review_id:
-            raise ValueError("stored review ID does not match its content")
-        return record.model_copy(update={"review_id": review_id})
+            raise ValueError(f"stored {self._noun} is invalid") from error
+        if canonical_sha256(record) != record_id:
+            raise ValueError(f"stored {self._noun} ID does not match its content")
+        updated = record.model_copy(update={self._id_field: record_id})
+        assert isinstance(updated, self._model)
+        return updated
 
-    def read_all(self) -> tuple[ReviewDecision, ...]:
+    def read_all(self) -> tuple[Record, ...]:
         return tuple(self._iter_records())
 
-    def for_annotation(self, annotation_id: str) -> tuple[ReviewDecision, ...]:
-        """Every decision recorded about one annotation, in stored order.
+    def for_annotation(self, annotation_id: str) -> tuple[Record, ...]:
+        """Every record about one annotation, in stored order.
 
         More than one is not an error. A second review of the same item is a
         real event — the reviewer went back — and both belong in the audit
@@ -115,20 +134,22 @@ class ReviewStore:
             if record.reviewed_annotation_id == annotation_id
         )
 
-    def _iter_records(self) -> Iterator[ReviewDecision]:
+    def _iter_records(self) -> Iterator[Record]:
         if not self._directory.exists():
             return
         for path in sorted(self._directory.glob("*.json")):
             yield self.read(path.stem)
 
-    def _write(self, review_id: str, decision: ReviewDecision) -> None:
+    def _write(self, record_id: str, record: Record) -> None:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._directory.chmod(0o700)
-        path = self._directory / f"{review_id}.json"
-        data = canonical_json(decision)
+        path = self._directory / f"{record_id}.json"
+        data = canonical_json(record)
         if path.exists():
             if path.read_bytes() != data:
-                raise ValueError("stored review differs from the replayed record")
+                raise ValueError(
+                    f"stored {self._noun} differs from the replayed record"
+                )
             return
         descriptor = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
@@ -138,6 +159,20 @@ class ReviewStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+class ReviewStore(_JudgementStore[ReviewDecision]):
+    _model = ReviewDecision
+    _schema = "annotation-review/v1"
+    _id_field = "review_id"
+    _noun = "review"
+
+
+class DeepReviewStore(_JudgementStore[DeepReviewFinding]):
+    _model = DeepReviewFinding
+    _schema = "annotation-deep-review/v1"
+    _id_field = "finding_id"
+    _noun = "deep review"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +200,12 @@ class ReviewStatistics:
     deep_review_rate: float
     deep_review_salt: str
     deep_review_expected: int
+    deep_review_flagged: int
     deep_review_recorded: int
+    deep_review_outcomes: dict[str, int]
+    deep_review_additional_gold: int
+    deep_review_seconds_median: int | None
+    deep_review_seconds_min: int | None
     reviewers: dict[str, int]
     proposal_producers: dict[str, int]
 
@@ -186,6 +226,13 @@ class ReviewStatistics:
 
     @property
     def deep_review_coverage(self) -> float | None:
+        """Computed from findings, never from the flag on the decision.
+
+        `deep_reviewed` says the reviewer was told an item was sampled. Coverage
+        computed from it can only ever report 100%, because the same function
+        sets the flag and picks the sample — which is how a pass with no deep
+        reading in it reported complete coverage once already.
+        """
         if not self.deep_review_expected:
             return None
         return self.deep_review_recorded / self.deep_review_expected
@@ -205,15 +252,27 @@ class ReviewStatistics:
             "deep_review_rate": self.deep_review_rate,
             "deep_review_salt": self.deep_review_salt,
             "deep_review_expected": self.deep_review_expected,
+            # Flagged is how many were *told*; recorded is how many produced a
+            # finding. They are reported side by side because the gap between
+            # them is the whole question, and one number cannot show a gap.
+            "deep_review_flagged": self.deep_review_flagged,
             "deep_review_recorded": self.deep_review_recorded,
             "deep_review_coverage": self.deep_review_coverage,
+            "deep_review_outcomes": self.deep_review_outcomes,
+            "deep_review_additional_gold": self.deep_review_additional_gold,
+            "deep_review_seconds_median": self.deep_review_seconds_median,
+            "deep_review_seconds_min": self.deep_review_seconds_min,
             "reviewers": self.reviewers,
             "proposal_producers": self.proposal_producers,
         }
 
 
 def review_statistics(
-    decisions: Iterable[ReviewDecision], *, rate: float, salt: str
+    decisions: Iterable[ReviewDecision],
+    findings: Iterable[DeepReviewFinding] = (),
+    *,
+    rate: float,
+    salt: str,
 ) -> ReviewStatistics:
     """Count what the reviews decided, against the sample they should have used.
 
@@ -253,6 +312,16 @@ def review_statistics(
         if decision.unanswerable:
             unanswerable += 1
 
+    found: dict[str, DeepReviewFinding] = {}
+    finding_outcomes: Counter[str] = Counter()
+    added_gold = 0
+    durations: list[int] = []
+    for finding in findings:
+        found[finding.item_id] = finding
+        finding_outcomes[finding.outcome.value] += 1
+        added_gold += len(finding.additional_gold_clause_ids)
+        durations.append(finding.elapsed_seconds)
+
     return ReviewStatistics(
         reviewed_items=len(items),
         decisions=total,
@@ -266,13 +335,21 @@ def review_statistics(
         deep_review_expected=sum(
             deep_review_required(item, rate=rate, salt=salt) for item in items
         ),
-        deep_review_recorded=len(deeply_reviewed),
+        deep_review_flagged=len(deeply_reviewed),
+        deep_review_recorded=len(found),
+        deep_review_outcomes=dict(sorted(finding_outcomes.items())),
+        deep_review_additional_gold=added_gold,
+        deep_review_seconds_median=(
+            int(statistics.median(durations)) if durations else None
+        ),
+        deep_review_seconds_min=min(durations) if durations else None,
         reviewers=dict(sorted(reviewers.items())),
         proposal_producers=dict(sorted(producers.items())),
     )
 
 
 __all__ = [
+    "DeepReviewStore",
     "ReviewStatistics",
     "ReviewStore",
     "deep_review_required",

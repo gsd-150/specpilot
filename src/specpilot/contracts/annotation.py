@@ -259,6 +259,83 @@ class ReviewDecision(_FrozenModel):
         return self
 
 
+class DeepReviewOutcome(StrEnum):
+    GOLD_COMPLETE = "gold_complete"
+    GOLD_EXTENDED = "gold_extended"
+    GOLD_WRONG = "gold_wrong"
+    QUESTION_FLAWED = "question_flawed"
+
+
+class DeepReviewScope(StrEnum):
+    SECTION = "section"
+    LITERAL_SEARCH = "literal_search"
+
+
+class DeepReviewFinding(_FrozenModel):
+    """What reading the whole section actually turned up.
+
+    `ReviewDecision.deep_reviewed` records that the reviewer was *told* an item
+    was sampled. It does not record what they found, so a reviewer who ignored
+    the banner leaves a byte-identical record and the report calls coverage
+    complete. That is the defect this whole workflow exists to fix, one level
+    down: a check that records having run rather than what it saw.
+
+    A finding is the deep read's output, and it cannot be produced without one.
+    `gold_complete` is a real, expected result — most sections have nothing to
+    add — but it is a claim with clause ids behind it and a duration beside it,
+    not a flag.
+
+    `elapsed_seconds` is measured by the command, not typed in. It is the
+    cheapest signal that separates a read from a keystroke: a thirteen-paragraph
+    section closed in twelve seconds was not read. It is not tamper-proof —
+    anyone can leave a terminal open — but skipping currently costs nothing at
+    all, and that is the difference.
+    """
+
+    schema_version: Literal["annotation-deep-review/v1"] = "annotation-deep-review/v1"
+    reviewed_annotation_id: Sha256
+    item_id: Identifier
+    outcome: DeepReviewOutcome
+    scope: DeepReviewScope
+    clauses_examined: Annotated[int, Field(ge=1)]
+    additional_gold_clause_ids: tuple[Sha256, ...] = ()
+    elapsed_seconds: Annotated[int, Field(ge=0)]
+    reviewer_id: Identifier
+    finding_id: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _verify_finding_id(self) -> Self:
+        if self.finding_id is not None:
+            from specpilot.manifests.canonical import canonical_sha256
+
+            if self.finding_id != canonical_sha256(self):
+                raise ValueError("finding_id does not match canonical content")
+        return self
+
+    @model_validator(mode="after")
+    def _extended_means_something_was_added(self) -> Self:
+        """The outcome and the clause list say the same thing, so they agree.
+
+        `gold_extended` with nothing added would be a finding that reports work
+        it did not do; anything else with clauses attached would add gold that
+        no outcome accounts for.
+        """
+        extended = self.outcome is DeepReviewOutcome.GOLD_EXTENDED
+        if extended and not self.additional_gold_clause_ids:
+            raise ValueError("gold_extended requires at least one added clause")
+        if not extended and self.additional_gold_clause_ids:
+            raise ValueError("only gold_extended may add clauses")
+        return self
+
+    @model_validator(mode="after")
+    def _added_clauses_are_distinct(self) -> Self:
+        if len(set(self.additional_gold_clause_ids)) != len(
+            self.additional_gold_clause_ids
+        ):
+            raise ValueError("an added gold clause is listed twice")
+        return self
+
+
 class L1Annotation(_FrozenModel):
     schema_version: Literal["annotation-l1/v2"] = "annotation-l1/v2"
     item_id: Identifier

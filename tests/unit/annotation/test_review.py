@@ -147,19 +147,19 @@ def test_a_re_review_is_counted_as_another_decision_not_another_item() -> None:
 
 
 def test_the_deep_review_sample_is_recomputed_rather_than_believed() -> None:
-    """The check that matters is against the declared rate, not the run's own.
+    """The sample is checked against the declared rate, not against the run's own.
 
-    A pass run at `--deep-review-rate 0.0` records no deep reviews and looks
-    complete on its own terms. Recomputing the sample from the salt the
-    evaluation set declares is what makes that visible.
+    A pass run at `--deep-review-rate 0.0` flags nothing and looks complete on
+    its own terms. Recomputing from the salt the evaluation set declares is what
+    makes that visible as a gap.
     """
     items = [f"l1-dev-{n:03d}" for n in range(40)]
-    honest = review_statistics(
+    flagged = review_statistics(
         [decision(item, "accepted_as_proposed") for item in items],
         rate=0.25,
         salt=SALT,
     )
-    skipped = review_statistics(
+    unflagged = review_statistics(
         [
             decision(item, "accepted_as_proposed", deep_reviewed=False)
             for item in items
@@ -168,12 +168,32 @@ def test_the_deep_review_sample_is_recomputed_rather_than_believed() -> None:
         salt=SALT,
     )
 
-    assert honest.deep_review_expected > 0
-    assert honest.deep_review_recorded == honest.deep_review_expected
-    assert honest.deep_review_coverage == 1.0
-    assert skipped.deep_review_expected == honest.deep_review_expected
-    assert skipped.deep_review_recorded == 0
-    assert skipped.deep_review_coverage == 0.0
+    assert flagged.deep_review_expected > 0
+    assert flagged.deep_review_flagged == flagged.deep_review_expected
+    assert unflagged.deep_review_expected == flagged.deep_review_expected
+    assert unflagged.deep_review_flagged == 0
+
+
+def test_flagging_every_sampled_item_still_reports_no_coverage() -> None:
+    """This assertion used to read `recorded == expected` and pass.
+
+    It passed because `recorded` was counted from `deep_reviewed`, which the
+    same function sets that picks the sample — so it could only ever agree with
+    itself. A real pass then reported 100% coverage with no deep reading in it.
+    Coverage now comes from findings, and being flagged buys nothing.
+    """
+    items = [f"l1-dev-{n:03d}" for n in range(40)]
+
+    stats = review_statistics(
+        [decision(item, "accepted_as_proposed") for item in items],
+        [],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.deep_review_flagged == stats.deep_review_expected
+    assert stats.deep_review_recorded == 0
+    assert stats.deep_review_coverage == 0.0
 
 
 def test_edited_key_points_are_counted() -> None:

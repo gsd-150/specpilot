@@ -487,7 +487,7 @@ means a system that retrieves ¶2 and answers correctly scores as a retrieval
 miss. Owed: a §8.2.3 adjudication adding ¶2, and a rule for requirements that
 span consecutive paragraphs.
 
-- [ ] **Step 1a (new): give the deep read somewhere to land**
+- [x] **Step 1a (new): give the deep read somewhere to land**
 
 **`deep_review_coverage: 1.0` is not evidence that a deep review happened, and
 that is a defect in this plan's own design.** Sampled items took a median of 24
@@ -508,9 +508,37 @@ a separate recorded act with a finding in it, and it has to be a separate pass:
 asking someone to alternate between 20-second choices and 10-minute reads
 guarantees the reads lose.
 
-Until that exists, the §8.1 disclosure may not claim a deep-review sample, and
-the 0.95 acceptance rate stands unseparated between "the proposals were good"
-and "the review was shallow".
+**Built.** `DeepReviewFinding` and `annotation deep-review`, with coverage now
+computed from findings rather than from the flag. Re-running the report over the
+same pass turns `deep_review_coverage: 1.0` into `0.0`, beside
+`deep_review_flagged: 5` and `deep_review_recorded: 0` — the two numbers side by
+side, because one cannot show a gap.
+
+Four decisions in it:
+
+- **The gold is labelled on the sheet, not hidden.** The forced choice is over
+  and recorded; a second blind test would measure the same thing again. What is
+  wanted now is the section's other clauses, so the question becomes "what else
+  bears on this" rather than "which one".
+- **Scope is the section for an item with gold, literal search for one without.**
+  An unanswerable item has no section to read and its claim is about the whole
+  document. §8.2.1 bars retrieval as a source of *initial* gold; this is §8.2.3's
+  completeness audit, where pooling proposing candidates for a human to
+  adjudicate is the sanctioned use, and any gold that comes of it records its
+  retrieval origin.
+- **Finding extra gold amends the item.** The deep read produces better gold, not
+  just a record of having looked, so `gold_extended` appends through the existing
+  add-only amendment with a `human_source_review` origin. The finding is written
+  first: if the amendment fails it names exactly which clauses are still owed.
+- **The duration is measured, not asked for.** A thirteen-paragraph section
+  closed in twelve seconds was not read, and `deep_review_seconds_min` puts that
+  in the report next to the median, which would hide it. This is not tamper-proof
+  — a terminal can be left open — but skipping currently costs nothing at all,
+  and that is the whole difference.
+
+Until findings exist for the sample, the §8.1 disclosure may not claim a
+deep-review sample, and the 0.95 acceptance rate stands unseparated between "the
+proposals were good" and "the review was shallow".
 
 The timings matter as much as the records. Product plan §11 now says completion
 is determined entirely by annotation throughput and that the throughput has
