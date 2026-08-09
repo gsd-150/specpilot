@@ -328,25 +328,29 @@ def test_create_conflict_never_cleans_up_an_existing_collection(
             admin.close()
 
 
-def test_payload_only_drift_is_detected(real_freeze: RealFreeze) -> None:
+def test_payload_only_drift_is_detected(
+    real_freeze: RealFreeze,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     point = real_freeze.first_point
     changed_payload = dict(point.payload)
     changed_payload["section_path"] = "Changed locator"
-    real_freeze.admin.upsert(
+
+    def reject_vector_upsert(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("payload-only drift must not upsert a vector")
+
+    monkeypatch.setattr(real_freeze.admin, "upsert", reject_vector_upsert)
+    real_freeze.admin.overwrite_payload(
         collection_name=real_freeze.collection,
-        points=[
-            PointStruct(
-                id=point.point_id,
-                vector=point.vector,
-                payload=changed_payload,
-            )
-        ],
+        payload=changed_payload,
+        points=[point.point_id],
         wait=True,
     )
     stored = _stored_record(real_freeze, point.point_id)
     assert stored.point_id == point.point_id
     assert stored.payload == changed_payload
-    assert stored.vector == pytest.approx(point.vector, rel=0.0, abs=1e-7)
+    assert stored.vector == point.vector
 
     _assert_verify_refuses(real_freeze, "dense_point_inventory_mismatch")
 
