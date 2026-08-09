@@ -33,7 +33,7 @@ from specpilot.contracts.egress import (
     TaskLevel,
     VersionMetadata,
 )
-from specpilot.contracts.manifests import RfcSourceManifest
+from specpilot.contracts.manifests import RfcSourceManifest, SourceManifest
 from specpilot.corpus.clauses import Clause
 from specpilot.egress.ledger import TransmittedUsage
 from specpilot.providers.base import ProviderResponse
@@ -55,7 +55,7 @@ def build_request(
     question: str,
     evidence: Sequence[Evidence],
     *,
-    source_manifest: RfcSourceManifest,
+    source_manifest: SourceManifest | RfcSourceManifest,
     corpus_manifest_id: str,
     model_id: str,
     evaluation_root_id: str,

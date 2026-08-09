@@ -696,3 +696,36 @@ Raw output, per item: `artifacts/restricted/eval-retrieval-dev-2026-08-09.json`
   explicit that drafted key points are the weakest link in the chain.
 - **Placeholder scan:** every implementation step names concrete behaviour,
   files, and verification.
+
+---
+
+### Task 9 (blocker found while wiring the slice): the RFC corpus cannot be authorized
+
+`answer/run.py` drives the L1 path — reserve, send, record, verify — and its
+tests pass against a mock transport and a fake ledger. It cannot run live, and
+the reason is not a missing key or a stopped service.
+
+**Both frozen RFC manifests are `cloud_egress_authorized=false` with
+`provider_route_binding=null`, and `ManifestStore.create_successor` refuses any
+predecessor that is not v1.** §3.2 makes source manifests default-deny and
+authorization a recorded compliance decision expressed as a successor. That
+successor path exists only for the DOCX family. So the RFC corpus — the only
+corpus this project has — has no code path by which it could ever be authorized
+to send.
+
+This is why the slice's tests exercise the v1 family: it is the only one that
+can hold an authorization today. The chain itself is family-blind, matching
+`SourceManifestResolver`'s rule that authorization is a property of the
+compliance decision rather than of the file format.
+
+Owed, in order:
+
+1. `create_source_v2`'s successor path, so an RFC manifest can carry a route
+   binding and a compliance conclusion.
+2. A recorded §3.2 assessment for RFC 9110 and 9112 against the main route —
+   the IETF TLP terms, the provider's retention policy, and the per-document
+   outbound caps already measured at one-fifth.
+3. Only then the live run.
+
+Until (1) and (2), `specpilot answer` against the real corpus fails closed at
+`build_request`, which is the correct behaviour and not a bug to route around.
