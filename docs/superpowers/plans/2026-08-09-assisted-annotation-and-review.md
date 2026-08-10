@@ -772,3 +772,53 @@ below one fifth on every dimension. RFC 9110 — 314 / 18,412 / 76,113 against
 1,571 / 92,064 / 380,569. RFC 9112 — 70 / 3,943 / 16,069 against 351 / 19,717 /
 80,345. Raising `corpus_document_unique` above one fifth invalidates the premise
 and the decision must be made again rather than inherited.
+
+---
+
+### Task 10 (open, needs a decision): the freeze gate and the runtime gate count differently
+
+The live command refuses every real question with `excerpt_tokens_exceeded`.
+Measured over the frozen corpus:
+
+| | clauses over the 512 cap |
+| --- | --- |
+| `corpus qa`'s `excerpt_fit`, real BGE-M3 tokenizer | **0 of 1,907** |
+| the runtime gate, `ByteUpperBoundCounter` | **160 of 1,907 (8.4%)** |
+
+Worst clause: 952 bytes against 252 real tokens. So the corpus passes its own
+blocking QA and is then structurally unable to answer from 8% of itself, and
+nothing reports the disagreement because each gate is internally consistent.
+
+`ByteUpperBoundCounter` is not wrong as a bound — a byte-level BPE never emits
+more tokens than the text has UTF-8 bytes. It is wrong *against this cap*, which
+was calibrated with the real tokenizer, and it is loose by about four times.
+
+**The obvious fix does not work, and the reason is worth keeping.** Swapping in
+the corpus's tokenizer produces `token_counter_incompatible`: the enforcer
+requires `counter.provider_id == route.provider_id` and
+`counter.model_id == request.model_id`. That check is correct — counting with
+one model's tokenizer and sending to another records a number describing
+nothing — so the two requirements genuinely conflict and one of them has to give.
+
+Three ways out, none free:
+
+1. **Treat bytes as the only real control and drop the token cap to match.**
+   §12.3 already says bytes are load-bearing because they are exact and
+   tokenizer-independent; tokens are secondary. Under a byte-bound counter the
+   token cap is then a second, stricter, badly-scaled byte cap wearing a
+   token's name. Cheapest and most honest about what is actually measured;
+   costs the token dimension as an independent control.
+2. **Obtain the provider's tokenizer** and count with it. Makes the number mean
+   what it claims, and adds a per-provider dependency plus a new way for the
+   freeze gate and the runtime gate to drift apart again.
+3. **Recalibrate the excerpt token cap in byte-upper-bound units.** Keeps both
+   gates and both counters; the cap stops corresponding to any real token count,
+   so §12.3's appendix would have to say so plainly.
+
+Recommendation is (1), because it makes the disclosure control exactly the thing
+that is exactly measurable, and because §12.3 already commits to bytes being
+load-bearing — but it changes a shipped policy file and the report's cap table,
+so it is the author's call rather than a fix to apply quietly.
+
+Until this is decided the answer path runs end to end and refuses at the gate,
+which is correct behaviour for a system whose caps disagree with themselves.
