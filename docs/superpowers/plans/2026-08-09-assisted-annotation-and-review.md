@@ -880,3 +880,37 @@ readable and attributable to the policy they were accumulated under.
 Until that exists, a cap change on a corpus with recorded usage requires
 rebuilding the ledger database, which is acceptable only because every row in it
 today is from this session's own failed test sends.
+
+#### First live answers — the refusal works, the citation identifier does not
+
+Two real calls against RFC 9110 through the gate.
+
+**The unanswerable one worked, and it is the demonstration this project exists
+for.** Asked which status code the specification defines for a client sending
+too many requests, the model returned valid JSON with `sufficient: false` — no
+parse fault, no citation fault, `evidence_insufficient`. RFC 9110 defines no 429;
+the model certainly knows 429; it declined rather than supplying it. That is the
+claim working end to end against a real provider.
+
+**The answerable one exposed a defect in what the payload shows.** Retrieval put
+the correct clause — §15.5.6 ¶1, the Allow requirement — at rank 1. The model
+returned valid JSON and the citation was refused as `reply_citation_malformed`.
+
+The cause: the payload labels each excerpt `Evidence <content_hash[:12]>`, and
+the reply contract asks for a `clause_id`, which the parser requires to be 64
+hex characters. **The model is asked to cite an identifier it has never been
+shown.** The only handle it has is a twelve-character prefix of a different
+identifier.
+
+Same family as the two before it — a value present in the system and absent from
+the bytes — but the fix is a design choice rather than a wiring correction.
+`EvidenceExcerpt` carries no `clause_id` at all; it carries `content_hash`,
+which identifies the exact quoted bytes. Citing the content hash is arguably
+stronger than citing the clause: it binds the citation to what was actually
+disclosed rather than to the unit it came from, and `DisclosedClause` already
+carries it, so verification resolves without adding a field to the outbound
+payload.
+
+Owed: show the full excerpt identifier, ask for that identifier by the name the
+payload uses, and key `check_citation` on it. The retrieval side needs nothing —
+it already ranks the right clause first.
