@@ -1754,8 +1754,12 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
             "evidence_count": len(evidence),
             "retrieved_clause_ids": [unit.unit_id for unit in ranked],
             "reservation_id": outcome.reservation_id,
-            "transmitted_bytes": (
-                outcome.transmitted.transmitted_bytes if outcome.transmitted else None
+            # The measured request, not the enforcer's content figure. They are
+            # different numbers — 2,432 against 1,144 on a real call — and only
+            # the second is what a cap binds, so reporting either under the
+            # other's name makes the ledger look inconsistent with the output.
+            "request_bytes": (
+                outcome.request_size.request_bytes if outcome.request_size else None
             ),
             "provider_error": outcome.provider_error,
             "source_manifest_id": authorized.manifest_id,

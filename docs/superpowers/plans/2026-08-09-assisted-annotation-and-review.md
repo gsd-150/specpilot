@@ -970,5 +970,128 @@ The test doubles were wrong in the same direction and are corrected: `reply()` i
 `test_run.py` cited `clause_id` because whoever wrote it could see the internal
 identifier. A double that knows more than the wire tests the double.
 
-1,245 pass, ruff and mypy clean. **Not yet confirmed live** — the answerable
-question has not been re-asked against the provider since the fix.
+1,245 pass, ruff and mypy clean.
+
+#### Confirmed live — both halves of the claim now hold against a real provider
+
+`answered`, `citation_faults: []`, two citations that check out: RFC 9110
+§10.2.1 ("An origin server MUST generate an Allow header field in a 405…") and
+§15.5.6, the 405 definition. The answer is a faithful restatement of both, and
+the model cited two of the four excerpts it was given rather than all of them.
+
+**The project's claim is now demonstrated end to end in both directions.** The
+refusal case was verified earlier — asked for a status code RFC 9110 does not
+define, the model declined rather than supplying the 429 it certainly knows. The
+answered case now carries a citation a reader can resolve to a section number.
+Neither half is worth much without the other: a system that only refuses is
+useless and a system that only answers is unverifiable.
+
+Two numbers in that output need an explanation, and only one of them is fine.
+
+**Five retrieved, four disclosed — correct and documented.** Rank 4 was RFC 9112
+§3.2.1, dropped because evidence is scoped to a single document: `VersionMetadata`
+names one version, and an excerpt set spanning two would be priced and cited
+under a version statement covering only one of them. The scope is the top hit's
+document, reported as `scoped_document_id`. A question genuinely spanning both
+RFCs cannot be answered in one call, which `cli.py` already records as a real
+limitation of this slice rather than a detail.
+
+**`transmitted_bytes` is two different quantities wearing one name.** The CLI
+reported 2,432 and `egress_attempt` stores 2,432 — the real HTTP body, including
+the system prompt, the reply instructions, the attribution line, the question and
+the excerpt labels. The root usage snapshot stores 1,144 for the same call, which
+is the sum of the four quotes and nothing else, and **1,144 is the figure the
+transmitted cap is actually checked against.**
+
+Neither number is wrong. The transmitted ledger is deliberately counting corpus
+content with repetition — that is what makes §3.2's "4× the unique cap" sizing
+mean anything, since prompt overhead is not disclosure and would make the
+multiple describe nothing. The defect is the shared name: two quantities, one
+label, one database, and §12.3's appendix required to list the caps layer by
+layer. A reader who reconciles the CLI output against the ledger finds two
+numbers that disagree and no statement of why.
+
+Owed, and the author's call because it changes a shipped output field:
+`transmitted_bytes` should split into the content figure the cap binds and the
+wire figure the attempt records — `content_transmitted_bytes` against
+`request_bytes`, or similar.
+
+#### Resolved — and the naming collision was hiding a worse one
+
+**Which half gets renamed changed once the constraint was checked.** The
+recommendation above was to rename the cap-bound figure to
+`content_transmitted_*`. That is wrong here: `policy_hash` is
+`_canonical_hash(model_dump())`, so it covers the policy's **field names**, and
+`l1_root_transmitted` cannot be renamed without changing the hash — which
+invalidates the corpus ledger row and lands exactly in Task 11's dead end, where
+the row cannot be rebound and cannot be deleted either. Renaming only the usage
+fields while the cap fields stayed would have been worse still: one concept
+split across two names.
+
+So `transmitted` keeps the meaning §3.2 gives it — corpus content counted with
+repetition — and the wire measurement became `RequestSize.request_tokens` /
+`request_bytes`, with `egress_attempt` renamed to match. Verified: the policy
+hash is unchanged and still matches what the corpus ledger recorded.
+
+**The collision was concealing a real defect.** The two writers of that one
+column disagreed about which quantity they were storing. `answer/run.py` wrote
+`response.metadata.request_bytes` — the wire. `providers/transport.py` wrote
+`sum(fact.byte_count for fact in disclosures)` — the enforcer's content
+projection — into a field whose docstring already said "what one attempt actually
+put on the wire". Both were internally consistent, so `egress_attempt` holds
+whichever quantity the caller happened to produce, and rows written before this
+change are only distinguishable by which path made them. Migration 002 says so
+rather than pretending a rename fixes them.
+
+`transport.py` now records the measured request, and a test pins it against the
+response metadata rather than against the disclosure sum.
+
+**A third double did not match its real counterpart.** `FakeProvider` never set
+`request_bytes`, so it reported the field's default of 0 — every fixture and demo
+send recorded a request size of zero, and the column was never exercised by the
+offline path at all. It now measures what it was handed. Same lesson as the
+`token_counter` property and the `clause_id` reply: a double that does not match
+the real interface tests the double.
+
+**Two other things fell out of running the suite properly.** With
+`SPECPILOT_TEST_DSN` set, `test_a_policy_violation_produces_a_no_send_event`
+failed on `excerpt_tokens_exceeded` — a stale assertion left by Task 10's rename
+two commits earlier. It had never failed because it needs a DSN and was skipped
+in every run that reported green, which is worth naming: **42 skips is not a
+clean suite, and the summary line says "passed" either way.** And `Attempt`'s
+`schema_version` went to v2, since a version string that survives a field rename
+describes nothing; nothing stores that shape, so no data moved.
+
+1,271 pass with the ledger DSN set (1,246 without), ruff and mypy clean.
+Migration 002 applied to `specpilot_live`; the three recorded attempts kept their
+values.
+
+#### The re-run refused at `root_unique_excerpts_exceeded`, and the gate was right
+
+The first attempt after the fix never reached the provider. `r1-live-bytes` had
+9 of its 10 unique excerpts already recorded — 5 from the first question, the
+same 5 again when it was repeated, 4 from the second — and the new question
+needed 5 more.
+
+**This is not a cap that is too small; it is a root that means something other
+than what the script assumed.** §3.2 calls it the *evaluation-case* root ledger
+and sizes it as the online chain plus the judge sub-ledger **for a single case**:
+L1 10 = 5 + 5, L2 17 = 12 + 5, which are exactly `l1_online_unique +
+judge_unique` and `l2_online_unique + judge_unique` in `default-v1.json`. A root
+is one question. `tmp/ask.sh` pinned one root and asked three, so it spent one
+case's budget on several and was stopped at the third.
+
+Fixed in the script — `ROOT="case-$(date +%s)"`, per invocation, the way
+`run_id` already was. Worth stating plainly because it looks like the fix is
+"mint a new budget whenever you run out": **it is not laundering.** The corpus
+and per-document ledgers accumulate across every root and never reset, and those
+are the ones the one-fifth premise rests on — currently 9 excerpts / 3,833 bytes
+of RFC 9110 against 314 / 76,113. Within a case nothing resets either; §3.2
+makes re-retrieval, cross-references, role switching and retries all cumulative.
+The layering does the work: the per-case cap bounds one answer, the per-document
+cap bounds the licence exposure, and only the second is a compliance quantity.
+
+The reason this looked like a defect for a moment is worth keeping: the script's
+own comment said the root was fresh "because the caps changed", which is a
+session-shaped reading of a case-shaped identifier. The name `evaluation_root_id`
+did not disambiguate it and the code could not — every value is valid.

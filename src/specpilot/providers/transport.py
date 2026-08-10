@@ -9,7 +9,7 @@ from specpilot.egress.ledger import (
     AttemptOutcome,
     EgressLedger,
     LedgerError,
-    TransmittedUsage,
+    RequestSize,
 )
 from specpilot.providers.base import (
     ProviderError,
@@ -28,6 +28,14 @@ class NoAdapterForRoute(LedgerError):
         code: str = "no_adapter_for_route",
     ) -> None:
         super().__init__(code, message)
+
+
+# A failed send has no measured request: the adapter never produced response
+# metadata. Zero here means "nothing was measured", not "nothing left the
+# machine" — for the unclassified fault that distinction is real and the record
+# cannot express it. What bounds the disclosure in that case is the reservation,
+# which was already committed and is never refunded on error.
+_NOTHING_MEASURED = RequestSize(request_tokens=0, request_bytes=0)
 
 
 class PolicyBoundTransport:
@@ -78,14 +86,11 @@ class PolicyBoundTransport:
             idempotency_key=idempotency_key,
         )
 
-        transmitted = TransmittedUsage(
-            transmitted_tokens=sum(
-                fact.token_count for fact in reservation_request.disclosures
-            ),
-            transmitted_bytes=sum(
-                fact.byte_count for fact in reservation_request.disclosures
-            ),
-        )
+        # Filled from the response, not from the disclosure facts. This used to
+        # record `sum(fact.byte_count)` — the enforcer's content projection —
+        # into a field documented as what went on the wire, while the answer
+        # path recorded the real request size into the same column. One column,
+        # two quantities, decided by which caller you came through.
         started = time.monotonic()
         try:
             response = await adapter.send(reservation_request.projected_payload)
@@ -93,7 +98,7 @@ class PolicyBoundTransport:
             await self.__record(
                 reservation.reservation_id,
                 request,
-                transmitted,
+                _NOTHING_MEASURED,
                 AttemptOutcome.FAILED_KNOWN,
                 duration_ms=_elapsed_ms(started),
                 public_error_code=error.public_error_code,
@@ -106,7 +111,7 @@ class PolicyBoundTransport:
             await self.__record(
                 reservation.reservation_id,
                 request,
-                transmitted,
+                _NOTHING_MEASURED,
                 AttemptOutcome.FAILED_KNOWN,
                 duration_ms=_elapsed_ms(started),
                 public_error_code="provider_unclassified_error",
@@ -116,7 +121,10 @@ class PolicyBoundTransport:
         await self.__record(
             reservation.reservation_id,
             request,
-            transmitted,
+            RequestSize(
+                request_tokens=response.metadata.prompt_tokens,
+                request_bytes=response.metadata.request_bytes,
+            ),
             AttemptOutcome.SUCCEEDED,
             duration_ms=_elapsed_ms(started),
         )
@@ -126,7 +134,7 @@ class PolicyBoundTransport:
         self,
         reservation_id: str,
         request: EgressRequest,
-        transmitted: TransmittedUsage,
+        request_size: RequestSize,
         outcome: AttemptOutcome,
         *,
         duration_ms: int,
@@ -136,7 +144,7 @@ class PolicyBoundTransport:
             await self.__ledger.record_attempt(
                 reservation_id,
                 request.route,
-                transmitted,
+                request_size,
                 outcome,
                 duration_ms=duration_ms,
                 public_error_code=public_error_code,

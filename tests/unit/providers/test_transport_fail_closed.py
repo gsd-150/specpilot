@@ -17,11 +17,11 @@ from specpilot.egress.ledger import (
     Attempt,
     AttemptOutcome,
     LedgerUnavailable,
+    RequestSize,
     Reservation,
     ReservationAmbiguous,
     ReservationState,
     RunSealed,
-    TransmittedUsage,
 )
 from specpilot.providers.base import ProviderError
 from specpilot.providers.fake import FakeProvider
@@ -90,7 +90,7 @@ class StubLedger:
         self,
         reservation_id: str,
         route: ProviderRouteBinding,
-        transmitted_usage: TransmittedUsage,
+        request_size: RequestSize,
         outcome: AttemptOutcome,
         *,
         duration_ms: int,
@@ -101,7 +101,7 @@ class StubLedger:
             reservation_id=reservation_id,
             route=route,
             outcome=outcome,
-            transmitted_usage=transmitted_usage,
+            request_size=request_size,
             duration_ms=duration_ms,
             public_error_code=public_error_code,
         )
@@ -172,6 +172,29 @@ async def test_happy_path_sends_once_and_records_one_attempt() -> None:
     assert len(ledger.attempts) == 1
     assert ledger.attempts[0].outcome is AttemptOutcome.SUCCEEDED
     assert response.content.startswith("fixture answer")
+
+
+async def test_the_attempt_records_the_request_not_the_cap_figure() -> None:
+    """Two quantities that used to share a column, decided by the caller.
+
+    This path recorded `sum(fact.byte_count)` — the enforcer's projection of
+    source text, which is what the caps bind — into a field documented as what
+    went on the wire, while the answer path recorded the real request size into
+    the same column. Both writers were self-consistent and the column held
+    whichever one you happened to produce.
+    """
+    excerpt = distinct_excerpt(1)
+    _, ledger, response = await send(
+        egress_request(payload=l1_payload(evidence_excerpts=(excerpt,)))
+    )
+
+    recorded = ledger.attempts[0].request_size
+
+    assert recorded.request_bytes == response.metadata.request_bytes
+    assert recorded.request_tokens == response.metadata.prompt_tokens
+    # The distinction is only worth a column if the two numbers differ: the
+    # request carries the whole payload, the cap prices the quoted text alone.
+    assert recorded.request_bytes > len(excerpt.quote.encode("utf-8"))
 
 
 async def test_unstored_manifest_is_no_send() -> None:

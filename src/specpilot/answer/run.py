@@ -22,7 +22,7 @@ from specpilot.answer.chain import build_request, verify_response
 from specpilot.answer.evidence import Evidence
 from specpilot.contracts.answer import AnswerVerdict, RefusalReason, VerifiedAnswer
 from specpilot.contracts.manifests import RfcSourceManifest, SourceManifest
-from specpilot.egress.ledger import AttemptOutcome, TransmittedUsage
+from specpilot.egress.ledger import AttemptOutcome, RequestSize
 from specpilot.providers.base import ProviderError
 
 
@@ -31,7 +31,7 @@ class AnswerOutcome:
     verified: VerifiedAnswer
     reservation_id: str | None
     replayed: bool
-    transmitted: TransmittedUsage | None
+    request_size: RequestSize | None
     provider_error: str | None
     parse_fault: str | None
 
@@ -67,7 +67,7 @@ async def run_answer(
             ),
             reservation_id=None,
             replayed=False,
-            transmitted=None,
+            request_size=None,
             provider_error=None,
             parse_fault=None,
         )
@@ -98,7 +98,7 @@ async def run_answer(
         await ledger.record_attempt(  # type: ignore[attr-defined]
             reservation.reservation_id,
             request.route,
-            TransmittedUsage(transmitted_tokens=0, transmitted_bytes=0),
+            RequestSize(request_tokens=0, request_bytes=0),
             AttemptOutcome.FAILED_KNOWN,
             duration_ms=elapsed,
             public_error_code=error.public_error_code,
@@ -111,19 +111,19 @@ async def run_answer(
             ),
             reservation_id=reservation.reservation_id,
             replayed=reservation.replayed,
-            transmitted=None,
+            request_size=None,
             provider_error=error.public_error_code,
             parse_fault=None,
         )
 
-    transmitted = TransmittedUsage(
-        transmitted_tokens=response.metadata.prompt_tokens,
-        transmitted_bytes=response.metadata.request_bytes,
+    request_size = RequestSize(
+        request_tokens=response.metadata.prompt_tokens,
+        request_bytes=response.metadata.request_bytes,
     )
     await ledger.record_attempt(  # type: ignore[attr-defined]
         reservation.reservation_id,
         request.route,
-        transmitted,
+        request_size,
         AttemptOutcome.SUCCEEDED,
         duration_ms=response.metadata.duration_ms,
     )
@@ -135,7 +135,7 @@ async def run_answer(
         verified=verified,
         reservation_id=reservation.reservation_id,
         replayed=reservation.replayed,
-        transmitted=transmitted,
+        request_size=request_size,
         provider_error=None,
         parse_fault=parse_fault,
     )

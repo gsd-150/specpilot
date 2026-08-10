@@ -22,11 +22,11 @@ from specpilot.egress.ledger import (
     Attempt,
     AttemptOutcome,
     LedgerUnavailable,
+    RequestSize,
     Reservation,
     ReservationAmbiguous,
     ReservationState,
     RunSealed,
-    TransmittedUsage,
 )
 from specpilot.egress.policy import EgressPolicy
 
@@ -92,7 +92,7 @@ class PostgresEgressLedger:
         self,
         reservation_id: str,
         route: ProviderRouteBinding,
-        transmitted_usage: TransmittedUsage,
+        request_size: RequestSize,
         outcome: AttemptOutcome,
         *,
         duration_ms: int,
@@ -106,8 +106,8 @@ class PostgresEgressLedger:
                     """
                         INSERT INTO egress_attempt (
                             attempt_id, reservation_id, provider_id,
-                            endpoint_purpose, outcome, transmitted_tokens,
-                            transmitted_bytes, duration_ms, public_error_code
+                            endpoint_purpose, outcome, request_tokens,
+                            request_bytes, duration_ms, public_error_code
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                     (
@@ -116,8 +116,8 @@ class PostgresEgressLedger:
                         route.provider_id,
                         route.endpoint_purpose,
                         outcome.value,
-                        transmitted_usage.transmitted_tokens,
-                        transmitted_usage.transmitted_bytes,
+                        request_size.request_tokens,
+                        request_size.request_bytes,
                         duration_ms,
                         public_error_code,
                     ),
@@ -141,7 +141,7 @@ class PostgresEgressLedger:
             reservation_id=reservation_id,
             route=route,
             outcome=outcome,
-            transmitted_usage=transmitted_usage,
+            request_size=request_size,
             duration_ms=duration_ms,
             public_error_code=public_error_code,
         )

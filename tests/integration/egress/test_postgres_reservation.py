@@ -4,7 +4,7 @@ import pytest
 
 from specpilot.contracts.egress import EgressStage
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
-from specpilot.egress.ledger import AttemptOutcome, ReservationState, TransmittedUsage
+from specpilot.egress.ledger import AttemptOutcome, RequestSize, ReservationState
 from specpilot.egress.postgres import PostgresEgressLedger
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_policy_projection import (
@@ -185,7 +185,7 @@ async def test_attempts_are_recorded_against_a_reservation(
     attempt = await book.record_attempt(
         reservation.reservation_id,
         reservation.route,
-        TransmittedUsage(transmitted_tokens=2, transmitted_bytes=16),
+        RequestSize(request_tokens=2, request_bytes=16),
         AttemptOutcome.SUCCEEDED,
         duration_ms=12,
     )

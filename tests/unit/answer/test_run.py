@@ -28,7 +28,7 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, iter_clause_texts
-from specpilot.egress.ledger import AttemptOutcome, TransmittedUsage
+from specpilot.egress.ledger import AttemptOutcome, RequestSize
 from specpilot.manifests.store import ManifestStore
 from specpilot.providers.base import ProviderError, ProviderResponse, ResponseMetadata
 from tests.helpers import rfc_factory
@@ -70,7 +70,7 @@ class FakeLedger:
     """Records the call order, which is the thing under test."""
 
     events: list[str] = field(default_factory=list)
-    attempts: list[tuple[AttemptOutcome, TransmittedUsage]] = field(
+    attempts: list[tuple[AttemptOutcome, RequestSize]] = field(
         default_factory=list
     )
 
@@ -84,14 +84,14 @@ class FakeLedger:
         self,
         reservation_id: str,
         route: Any,
-        transmitted_usage: TransmittedUsage,
+        request_size: RequestSize,
         outcome: AttemptOutcome,
         *,
         duration_ms: int,
         public_error_code: str | None = None,
     ) -> None:
         self.events.append(f"record:{outcome.value}")
-        self.attempts.append((outcome, transmitted_usage))
+        self.attempts.append((outcome, request_size))
 
 
 @dataclass
@@ -249,8 +249,8 @@ async def test_a_disclosed_clause_verifies_end_to_end(
     assert [c.clause_id for c in outcome.verified.citations] == [
         pairs[0][0].clause_id
     ]
-    assert outcome.transmitted == TransmittedUsage(
-        transmitted_tokens=120, transmitted_bytes=4096
+    assert outcome.request_size == RequestSize(
+        request_tokens=120, request_bytes=4096
     )
 
 

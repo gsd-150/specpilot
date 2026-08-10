@@ -184,7 +184,11 @@ async def test_a_policy_violation_produces_a_no_send_event(
             idempotency_key="smoke-2",
         )
 
-    assert caught.value.code == "excerpt_tokens_exceeded"
+    # Bytes, not tokens: every cap vector's `tokens` now equals its `bytes`, so
+    # the byte check is what can fire first. This assertion still named the old
+    # code two commits after that rename, because the test needs a DSN and was
+    # skipped in every run that reported green.
+    assert caught.value.code == "excerpt_bytes_exceeded"
     assert provider.call_count == 0, "a refusal that still called the provider"
     with psycopg.connect(clean_ledger) as connection:
         attempts = connection.execute("SELECT count(*) FROM egress_attempt").fetchone()

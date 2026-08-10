@@ -84,11 +84,27 @@ class AttemptOutcome(StrEnum):
     FAILED_KNOWN = "failed_known"
 
 
-class TransmittedUsage(_FrozenModel):
-    """What one attempt actually put on the wire."""
+class RequestSize(_FrozenModel):
+    """The measured size of one request that actually went out.
 
-    transmitted_tokens: Annotated[int, Field(ge=0)]
-    transmitted_bytes: Annotated[int, Field(ge=0)]
+    **Not the same quantity as ``transmitted_*`` anywhere else in this package,
+    and the two must never share a name again.** ``transmitted`` is corpus
+    content counted with repetition — what §3.2's transmitted ledger bounds at
+    four times the unique cap, computed by the enforcer at reserve time, before
+    anything is sent. This is the whole request as observed afterwards: system
+    prompt, reply contract, attribution line, question, excerpt labels and
+    quotes together. For one real call those were 1,144 and 2,432 bytes.
+
+    Both numbers are wanted and neither substitutes for the other. Measuring the
+    cap against this one would make "four times the unique cap" describe
+    nothing, since prompt overhead is not disclosure; reporting the cap figure as
+    what left would understate the wire by half.
+
+    Recorded and never enforced: no cap reads it.
+    """
+
+    request_tokens: Annotated[int, Field(ge=0)]
+    request_bytes: Annotated[int, Field(ge=0)]
 
 
 class Reservation(_FrozenModel):
@@ -119,12 +135,16 @@ class Reservation(_FrozenModel):
 class Attempt(_FrozenModel):
     """One recorded send attempt against a reservation."""
 
-    schema_version: Literal["egress-attempt/v1"] = "egress-attempt/v1"
+    # v2: `transmitted_usage` became `request_size`. Nothing stores this shape —
+    # `egress_attempt` is explicit columns, not a document — so no data needs
+    # migrating, and the bump is here because a version string that survives a
+    # field rename stops describing anything.
+    schema_version: Literal["egress-attempt/v2"] = "egress-attempt/v2"
     attempt_id: Identifier
     reservation_id: Identifier
     route: ProviderRouteBinding
     outcome: AttemptOutcome
-    transmitted_usage: TransmittedUsage
+    request_size: RequestSize
     duration_ms: Annotated[int, Field(ge=0)]
     public_error_code: str | None = None
 
@@ -156,7 +176,7 @@ class EgressLedger(Protocol):
         self,
         reservation_id: str,
         route: ProviderRouteBinding,
-        transmitted_usage: TransmittedUsage,
+        request_size: RequestSize,
         outcome: AttemptOutcome,
         *,
         duration_ms: int,

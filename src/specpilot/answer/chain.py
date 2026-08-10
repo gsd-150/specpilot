@@ -35,7 +35,7 @@ from specpilot.contracts.egress import (
 )
 from specpilot.contracts.manifests import RfcSourceManifest, SourceManifest
 from specpilot.corpus.clauses import Clause
-from specpilot.egress.ledger import TransmittedUsage
+from specpilot.egress.ledger import RequestSize
 from specpilot.providers.base import ProviderResponse
 
 
@@ -46,7 +46,7 @@ class AnswerRun:
     verified: VerifiedAnswer
     evidence_count: int
     reservation_id: str | None
-    transmitted: TransmittedUsage | None
+    request_size: RequestSize | None
     parse_fault: str | None
     retrieved_clause_ids: tuple[str, ...]
 

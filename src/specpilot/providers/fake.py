@@ -63,6 +63,15 @@ class FakeProvider:
                 completion_tokens=len(content.split()),
                 finish_reason="stop",
                 duration_ms=0,
+                # The real adapter reports `len(encoded)` of the HTTP body. This
+                # one builds no body, so it reports the size of what it was
+                # actually handed — not the same bytes, but a real measurement
+                # of a real object rather than the default 0. Left unset, every
+                # fixture and demo run recorded a request size of zero and the
+                # ledger column that holds it was never exercised at all.
+                request_bytes=len(
+                    projected_payload.model_dump_json().encode("utf-8")
+                ),
             ),
         )
 
