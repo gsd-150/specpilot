@@ -118,7 +118,9 @@ def test_maximum_envelope_rejects_an_extra_excerpt_or_toc_node() -> None:
 @pytest.mark.parametrize(
     ("quote", "code"),
     [
-        (sized_quote(tokens=513), "excerpt_tokens_exceeded"),
+        # One dimension, not two: the runtime counter is a byte upper
+        # bound, so there is no 'one token over' that is not also one
+        # byte over.
         (sized_quote(tokens=512, byte_count=8193), "excerpt_bytes_exceeded"),
     ],
 )
@@ -279,7 +281,7 @@ def test_policy_loading_and_hashing_are_semantic_and_deterministic(
 
     assert reloaded == policy
     assert reloaded.policy_hash == policy.policy_hash
-    assert policy.l2_root_transmitted.tokens == 29_696
+    assert policy.l2_root_transmitted.tokens == 475_136
     assert policy.l2_root_transmitted.bytes == 475_136
 
 

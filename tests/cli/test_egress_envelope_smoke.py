@@ -41,7 +41,7 @@ def test_envelope_smoke_proves_one_over_each_limit_is_refused(
     assert refusals == {
         "one_more_excerpt": "root_unique_excerpts_exceeded",
         "one_more_toc_node": "toc_run_exceeded",
-        "one_more_token_in_an_excerpt": "excerpt_tokens_exceeded",
+        "one_more_token_in_an_excerpt": "excerpt_bytes_exceeded",
         "one_more_byte_in_an_excerpt": "excerpt_bytes_exceeded",
     }, "the smoke must show each boundary refusing, not just the envelope passing"
 

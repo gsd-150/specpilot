@@ -259,13 +259,20 @@ def test_shipped_caps_stay_under_one_fifth_of_the_measured_document(
     section 3.c.iii(y)'s additional obligation cannot be reached. Raising a cap
     without re-measuring would break that argument silently, so the argument is
     a test.
+
+    Bytes and excerpts carry it. The token figure no longer makes an independent
+    claim: the runtime counter is a byte upper bound, so a token cap below the
+    byte cap was a second and stricter byte cap wearing a token's name — and it
+    refused 8% of the corpus that `corpus qa` had cleared. Tokens are pinned
+    equal to bytes so the token check can never fire before the byte check, and
+    that equality is asserted here rather than left as a coincidence.
     """
     measured = MEASURED_CORPUS[document_id]
     cap = EgressPolicy.load().corpus_document_unique[document_id]
 
     assert cap.excerpts <= measured["units"] // 5
-    assert cap.tokens <= measured["tokens"] // 5
     assert cap.bytes <= measured["bytes"] // 5
+    assert cap.tokens == cap.bytes
 
 
 def test_every_frozen_document_is_priced_by_the_shipped_policy() -> None:

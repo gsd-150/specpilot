@@ -1,32 +1,110 @@
 {
+  "corpus_document_unique": {
+    "ietf-rfc-9110": {
+      "bytes": 76113,
+      "excerpts": 314,
+      "tokens": 76113
+    },
+    "ietf-rfc-9112": {
+      "bytes": 16069,
+      "excerpts": 70,
+      "tokens": 16069
+    },
+    "synthetic-fixture-spec": {
+      "bytes": 524288,
+      "excerpts": 64,
+      "tokens": 524288
+    }
+  },
+  "corpus_unique": {
+    "bytes": 8388608,
+    "excerpts": 1024,
+    "tokens": 8388608
+  },
+  "excerpt": {
+    "bytes": 8192,
+    "excerpts": 1,
+    "tokens": 8192
+  },
+  "judge_transmitted": {
+    "bytes": 81920,
+    "excerpts": 0,
+    "tokens": 81920
+  },
+  "judge_unique": {
+    "bytes": 40960,
+    "excerpts": 5,
+    "tokens": 40960
+  },
+  "l1_online_transmitted": {
+    "bytes": 163840,
+    "excerpts": 0,
+    "tokens": 163840
+  },
+  "l1_online_unique": {
+    "bytes": 40960,
+    "excerpts": 5,
+    "tokens": 40960
+  },
+  "l1_query_tokens": 1024,
+  "l1_root_transmitted": {
+    "bytes": 245760,
+    "excerpts": 0,
+    "tokens": 245760
+  },
+  "l1_root_unique": {
+    "bytes": 81920,
+    "excerpts": 10,
+    "tokens": 81920
+  },
+  "l2_claim_unique": {
+    "bytes": 32768,
+    "excerpts": 4,
+    "tokens": 32768
+  },
+  "l2_design_tokens": 2048,
+  "l2_online_transmitted": {
+    "bytes": 393216,
+    "excerpts": 0,
+    "tokens": 393216
+  },
+  "l2_online_unique": {
+    "bytes": 98304,
+    "excerpts": 12,
+    "tokens": 98304
+  },
+  "l2_root_transmitted": {
+    "bytes": 475136,
+    "excerpts": 0,
+    "tokens": 475136
+  },
+  "l2_root_unique": {
+    "bytes": 139264,
+    "excerpts": 17,
+    "tokens": 139264
+  },
+  "max_l2_claims_per_run": 3,
   "schema_version": "egress-policy/v1",
   "stage_payload_allowlist": {
-    "evidence": ["l1_query", "l2_design", "l2_atomic_claim"],
-    "compliance": ["l1_query", "l2_design", "l2_atomic_claim"],
-    "verifier": ["l1_query", "l2_design", "l2_atomic_claim"],
-    "judge": ["judge"]
-  },
-  "excerpt": {"excerpts": 1, "tokens": 512, "bytes": 8192},
-  "l1_online_unique": {"excerpts": 5, "tokens": 2560, "bytes": 40960},
-  "l1_online_transmitted": {"excerpts": 0, "tokens": 10240, "bytes": 163840},
-  "l2_online_unique": {"excerpts": 12, "tokens": 6144, "bytes": 98304},
-  "l2_claim_unique": {"excerpts": 4, "tokens": 2048, "bytes": 32768},
-  "l2_online_transmitted": {"excerpts": 0, "tokens": 24576, "bytes": 393216},
-  "judge_unique": {"excerpts": 5, "tokens": 2560, "bytes": 40960},
-  "judge_transmitted": {"excerpts": 0, "tokens": 5120, "bytes": 81920},
-  "l1_root_unique": {"excerpts": 10, "tokens": 5120, "bytes": 81920},
-  "l1_root_transmitted": {"excerpts": 0, "tokens": 15360, "bytes": 245760},
-  "l2_root_unique": {"excerpts": 17, "tokens": 8704, "bytes": 139264},
-  "l2_root_transmitted": {"excerpts": 0, "tokens": 29696, "bytes": 475136},
-  "corpus_unique": {"excerpts": 1024, "tokens": 524288, "bytes": 8388608},
-  "corpus_document_unique": {
-    "ietf-rfc-9110": {"excerpts": 314, "tokens": 18412, "bytes": 76113},
-    "ietf-rfc-9112": {"excerpts": 70, "tokens": 3943, "bytes": 16069},
-    "synthetic-fixture-spec": {"excerpts": 64, "tokens": 32768, "bytes": 524288}
+    "compliance": [
+      "l1_query",
+      "l2_design",
+      "l2_atomic_claim"
+    ],
+    "evidence": [
+      "l1_query",
+      "l2_design",
+      "l2_atomic_claim"
+    ],
+    "judge": [
+      "judge"
+    ],
+    "verifier": [
+      "l1_query",
+      "l2_design",
+      "l2_atomic_claim"
+    ]
   },
   "toc_per_call": 12,
-  "toc_per_run": 24,
-  "l1_query_tokens": 1024,
-  "l2_design_tokens": 2048,
-  "max_l2_claims_per_run": 3
+  "toc_per_run": 24
 }

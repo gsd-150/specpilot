@@ -202,14 +202,16 @@ async def test_expired_authorization_is_no_send() -> None:
 
 async def test_excerpt_over_the_token_cap_is_no_send() -> None:
     payload = l1_payload(
-        evidence_excerpts=(distinct_excerpt(1, sized_quote(tokens=513)),)
+        evidence_excerpts=(
+            distinct_excerpt(1, sized_quote(tokens=512, byte_count=8193)),
+        )
     )
 
     error = await assert_no_send(
         egress_request(payload=payload), EgressPolicyViolation
     )
 
-    assert error.code == "excerpt_tokens_exceeded"
+    assert error.code == "excerpt_bytes_exceeded"
 
 
 async def test_a_budget_refusal_from_the_ledger_is_no_send() -> None:

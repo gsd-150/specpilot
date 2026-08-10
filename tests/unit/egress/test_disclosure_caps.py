@@ -192,7 +192,11 @@ def test_disclosure_identity_includes_normalized_span() -> None:
 @pytest.mark.parametrize(
     ("quote", "code"),
     [
-        (sized_quote(tokens=513), "excerpt_tokens_exceeded"),
+        # One dimension, not two. The runtime counter is a byte upper
+        # bound, so a token count and a byte count are the same
+        # measurement and there is no 'one token over' that is not also
+        # one byte over. Kept as a single case rather than a duplicate
+        # pair that would look like two independent guards.
         (sized_quote(tokens=512, byte_count=8193), "excerpt_bytes_exceeded"),
     ],
 )
@@ -264,7 +268,7 @@ def test_l1_online_unique_and_transmitted_caps_are_exact() -> None:
 
     with pytest.raises(EgressPolicyViolation) as transmitted:
         apply_reservation(state, reservation)
-    assert transmitted.value.code == "online_transmitted_tokens_exceeded"
+    assert transmitted.value.code == "online_transmitted_bytes_exceeded"
 
     extra = fixture_enforcer().prepare(
         egress_request(
@@ -332,7 +336,7 @@ def test_judge_unique_and_transmitted_caps_are_exact() -> None:
 
     with pytest.raises(EgressPolicyViolation) as transmitted:
         apply_reservation(state, reservation)
-    assert transmitted.value.code == "judge_transmitted_tokens_exceeded"
+    assert transmitted.value.code == "judge_transmitted_bytes_exceeded"
 
     extra = prepare_judge(
         (distinct_excerpt(200, "one token"),),

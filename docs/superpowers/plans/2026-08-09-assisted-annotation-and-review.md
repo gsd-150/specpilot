@@ -822,3 +822,34 @@ so it is the author's call rather than a fix to apply quietly.
 
 Until this is decided the answer path runs end to end and refuses at the gate,
 which is correct behaviour for a system whose caps disagree with themselves.
+
+#### Task 10 resolved — bytes are the control
+
+Option (1). Every cap vector's `tokens` is now set equal to its `bytes`, so the
+token check can never fire before the byte check. `corpus qa`'s `excerpt_fit`
+and the runtime gate now agree, which is the property that was missing: what QA
+clears at freeze time is what the enforcer prices at run time.
+
+**The licence premise survives on the load-bearing dimension.** Caps are still
+exactly one fifth: RFC 9110 76,113 / 380,569 = 20.0%, RFC 9112 16,069 / 80,345 =
+20.0%. The recorded §3.2 assessment already named bytes as load-bearing because
+they are exact and tokenizer-independent, so nothing in it needs restating.
+
+Consequences worth naming rather than absorbing:
+
+- **The token dimension is no longer an independent control.** The one-fifth
+  guard test now asserts bytes and excerpts against the measurement and asserts
+  `cap.tokens == cap.bytes` as an invariant, so a future edit that reintroduces a
+  stricter token cap fails rather than silently refusing 8% of the corpus again.
+- **Refusals now name bytes.** `excerpt_tokens_exceeded` became
+  `excerpt_bytes_exceeded` and so on across the scopes, because bytes are what
+  bind. The tests were updated to expect the dimension that actually stopped the
+  request.
+- **"One token over" and "one byte over" are the same case.** The duplicated
+  parametrizations collapsed to one, with a note, rather than being left as two
+  cases that look like two independent guards over one measurement.
+- **The corpus ledger for a frozen corpus is bound to one policy.** Changing the
+  caps makes the existing row unusable — `policy_snapshot_mismatch` — which is
+  correct: a total spanning two cap sets describes neither. Re-opening the
+  accounting for a corpus after a cap change is a deliberate act, not a
+  migration to run quietly.
