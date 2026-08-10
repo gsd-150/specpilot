@@ -1,29 +1,31 @@
 .PHONY: setup check unit integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant
 
+SPECPILOT_PYTHON ?= .venv/bin/python
+
 setup:
 	python -m venv .venv
-	.venv/bin/python -m pip install --upgrade pip
-	.venv/bin/python -m pip install -e ".[dev]"
+	$(SPECPILOT_PYTHON) -m pip install --upgrade pip
+	$(SPECPILOT_PYTHON) -m pip install -e ".[dev]"
 
 check: lint typecheck unit
 
 unit:
-	.venv/bin/python -m pytest tests/unit -q
+	$(SPECPILOT_PYTHON) -m pytest tests/unit -q
 
 integration:
-	.venv/bin/python -m pytest -q -m integration
+	$(SPECPILOT_PYTHON) -m pytest -q -m integration
 
 # The ledger tests skip without a database, and a skipped run produces no
 # concurrency or recovery evidence at all, so this target refuses to look green
 # when SPECPILOT_TEST_DSN is unset.
 integration-db: require-dsn
-	.venv/bin/python -m pytest tests/integration -q
+	$(SPECPILOT_PYTHON) -m pytest tests/integration -q
 
 lint:
-	.venv/bin/python -m ruff check .
+	$(SPECPILOT_PYTHON) -m ruff check .
 
 typecheck:
-	.venv/bin/python -m mypy src
+	$(SPECPILOT_PYTHON) -m mypy src
 
 # Scoped to tests/smoke on purpose: pytest exits 4 when that path is absent and 5
 # when nothing carries the marker, so this target cannot report success on an
@@ -33,7 +35,7 @@ typecheck:
 # collection schema, point count, and read-only-after-freeze posture hold
 # against a real server, and a skipped run produces none of it.
 integration-qdrant: require-qdrant
-	.venv/bin/python -m pytest tests/integration/qdrant -q
+	$(SPECPILOT_PYTHON) -m pytest tests/integration/qdrant -q
 
 require-qdrant:
 	@test -n "$$SPECPILOT_TEST_QDRANT_URL" || { \
@@ -41,7 +43,7 @@ require-qdrant:
 		exit 1; }
 
 fixture-smoke: require-dsn
-	.venv/bin/python -m pytest tests/smoke -q -m fixture_smoke
+	$(SPECPILOT_PYTHON) -m pytest tests/smoke -q -m fixture_smoke
 
 require-dsn:
 	@test -n "$$SPECPILOT_TEST_DSN" || { \

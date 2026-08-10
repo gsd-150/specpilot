@@ -21,6 +21,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
+  SPECPILOT_PYTHON: python
 
 jobs:
   static:
@@ -142,5 +143,5 @@ jobs:
           cd "$(mktemp -d)"
           python -c "from specpilot.egress.policy import EgressPolicy; \
             p = EgressPolicy.load(); \
-            assert p.l2_root_transmitted.tokens == 29696, p; \
+            assert p.l2_root_transmitted.bytes == 475136, p; \
             print('packaged policy loaded')"
