@@ -108,7 +108,15 @@ class FakeAdapter:
     events: list[str] | None = None
     endpoint: FakeEndpoint = field(default_factory=FakeEndpoint)
 
+    @property
     def token_counter(self) -> Any:
+        """A property, because the real adapter's is one.
+
+        It was a method here, so these tests passed against a double that
+        production could not have been built from — the live command failed on
+        the first call with 'object is not callable'.
+        """
+
         class _Counter:
             provider_id = "deepseek"
             model_id = "deepseek-v4-flash"

@@ -81,7 +81,7 @@ async def run_answer(
         evaluation_root_id=evaluation_root_id,
         run_id=run_id,
     )
-    counter = adapter.token_counter()  # type: ignore[attr-defined]
+    counter = adapter.token_counter  # type: ignore[attr-defined]
     reservation = await ledger.check_and_reserve(  # type: ignore[attr-defined]
         enforcer.prepare(request, counter),  # type: ignore[attr-defined]
         counter,
