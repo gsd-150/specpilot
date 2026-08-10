@@ -278,8 +278,27 @@ def _render_messages(payload: EgressPayload) -> list[dict[str, str]]:
     ]
 
 
+# IETF TLP 5.0 §3 requires an excerpt to name its source. The condition is on
+# the bytes that leave, not on the objects behind them: before this line existed
+# a quote went out attached to a truncated content hash and nothing else, which
+# satisfied the enforcer and not the licence. `JudgePayload` carries no version
+# metadata by design — its gold excerpts are scoring inputs, and the answer under
+# review already names what it cites — so it renders no attribution line.
+_ATTRIBUTION = (
+    "Source: IETF {document_id} ({document_version}). "
+    "The excerpts below are unmodified quotations from that RFC."
+)
+
+
 def _render_user(payload: EgressPayload) -> str:
     lines: list[str] = []
+    if not isinstance(payload, JudgePayload):
+        lines.append(
+            _ATTRIBUTION.format(
+                document_id=payload.version.document_id,
+                document_version=payload.version.document_version,
+            )
+        )
     if isinstance(payload, L1OnlinePayload):
         lines.append(f"Question: {payload.query}")
     elif isinstance(payload, L2DesignPayload):

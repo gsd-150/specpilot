@@ -280,3 +280,24 @@ async def test_probing_adds_its_tool_schema_to_the_counted_bytes() -> None:
     probing = await adapter_returning(ok_body(), probe_tools=True).send(l1_payload())
 
     assert probing.metadata.request_bytes > plain.metadata.request_bytes
+
+
+async def test_the_excerpts_go_out_naming_the_rfc_they_came_from() -> None:
+    """IETF TLP 5.0 §3 requires an excerpt to name its source.
+
+    The condition is on the bytes that leave, not on the objects behind them.
+    Before this, a quote went out attached to a truncated content hash and
+    nothing else — which satisfied the enforcer and not the licence.
+    """
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured)
+    payload = l1_payload()
+
+    await adapter.send(payload)
+
+    sent = json.loads(captured[0].content)
+    user = next(m["content"] for m in sent["messages"] if m["role"] == "user")
+    assert user.startswith("Source: IETF ")
+    assert payload.version.document_id in user
+    assert payload.version.document_version in user
+    assert "unmodified quotations" in user
