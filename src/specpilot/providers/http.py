@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 
+from specpilot.contracts.answer import REPLY_INSTRUCTIONS
 from specpilot.contracts.egress import (
     EgressPayload,
     JudgePayload,
@@ -273,7 +274,7 @@ def _render_messages(payload: EgressPayload) -> list[dict[str, str]]:
     this function because they are not on the payload in the first place.
     """
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt(payload)},
         {"role": "user", "content": _render_user(payload)},
     ]
 
@@ -288,6 +289,13 @@ _ATTRIBUTION = (
     "Source: IETF {document_id} ({document_version}). "
     "The excerpts below are unmodified quotations from that RFC."
 )
+
+
+def _system_prompt(payload: EgressPayload) -> str:
+    """The judge scores; everything else answers under the citation contract."""
+    if isinstance(payload, JudgePayload):
+        return _SYSTEM_PROMPT
+    return f"{_SYSTEM_PROMPT}\n\n{REPLY_INSTRUCTIONS}"
 
 
 def _render_user(payload: EgressPayload) -> str:

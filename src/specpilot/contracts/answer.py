@@ -30,6 +30,22 @@ SectionNumber = Annotated[
 ]
 
 
+# What the model is told to return, kept beside the contract it has to satisfy.
+# It lived next to the parser, which the provider adapter cannot import without
+# inverting the layering — so it was written and never sent, and the first live
+# call came back as prose.
+REPLY_INSTRUCTIONS = """\
+Answer only from the numbered excerpts provided. Reply with one JSON object and \
+nothing else:
+
+  {"sufficient": true, "answer": "...", "citations": ["<clause_id>", ...]}
+
+Set "sufficient" to false, with an empty citation list and no answer, when the \
+excerpts do not settle the question. Cite a clause_id only if that excerpt was \
+given to you above. Do not cite anything you were not shown, and do not answer \
+from memory of the specification."""
+
+
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -120,6 +136,7 @@ class VerifiedAnswer(_FrozenModel):
 
 
 __all__ = [
+    "REPLY_INSTRUCTIONS",
     "AnswerText",
     "AnswerVerdict",
     "Citation",

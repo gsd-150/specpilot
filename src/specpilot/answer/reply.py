@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from specpilot.answer.verify import ClaimedCitation
+from specpilot.contracts.answer import REPLY_INSTRUCTIONS
 
 # Bounded because the reply is untrusted input and every one of these is copied
 # into a record or compared against a store. A model that needs more than this
@@ -27,16 +28,7 @@ _MAX_CITATIONS = 32
 _MAX_ANSWER_CHARS = 4_096
 _SHA256_LENGTH = 64
 
-REPLY_INSTRUCTIONS = """\
-Answer only from the numbered excerpts provided. Reply with one JSON object and \
-nothing else:
 
-  {"sufficient": true, "answer": "...", "citations": ["<clause_id>", ...]}
-
-Set "sufficient" to false, with an empty citation list and no answer, when the \
-excerpts do not settle the question. Cite a clause_id only if that excerpt was \
-given to you above. Do not cite anything you were not shown, and do not answer \
-from memory of the specification."""
 
 
 @dataclass(frozen=True, slots=True)

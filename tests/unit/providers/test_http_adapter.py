@@ -301,3 +301,25 @@ async def test_the_excerpts_go_out_naming_the_rfc_they_came_from() -> None:
     assert payload.version.document_id in user
     assert payload.version.document_version in user
     assert "unmodified quotations" in user
+
+
+async def test_the_reply_contract_is_actually_sent() -> None:
+    """It was written and never wired, so the first live call came back prose.
+
+    The instructions lived beside the parser, which the provider adapter cannot
+    import without inverting the layering — the kind of gap that only a real
+    call finds, because every test supplied its own canned reply.
+    """
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured)
+
+    await adapter.send(l1_payload())
+
+    system = next(
+        m["content"]
+        for m in json.loads(captured[0].content)["messages"]
+        if m["role"] == "system"
+    )
+    assert '"sufficient"' in system
+    assert '"citations"' in system
+    assert "Do not cite anything you were not shown" in system
