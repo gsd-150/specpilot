@@ -106,7 +106,18 @@ jobs:
       # frozen-collection release blocker look satisfied by nothing.
       - run: make integration-db
       - run: make integration-qdrant
-      - run: make fixture-smoke
+      # Each pytest process applies every migration to a fresh database. The
+      # integration suite above has already migrated specpilot_test, so the
+      # separately invoked smoke suite needs its own empty database rather than
+      # re-running migration 002 against columns it already renamed.
+      - name: create fresh fixture smoke database
+        env:
+          PGPASSWORD: specpilot-ci-only
+        run: createdb --host=127.0.0.1 --username=specpilot specpilot_smoke
+      - name: run fixture smoke against fresh database
+        env:
+          SPECPILOT_TEST_DSN: postgresql://specpilot:specpilot-ci-only@127.0.0.1:5432/specpilot_smoke
+        run: make fixture-smoke
 
   images:
     name: compose config and image build
