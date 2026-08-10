@@ -2,6 +2,11 @@
 
 SpecPilot is a safety-first foundation for specification intelligence.
 
+**Working on this repository — start here:** [`AGENTS.md`](AGENTS.md) for how to
+run it and which invariants must not be broken, then the newest file in
+[`docs/handoff/`](docs/handoff/) for where things currently stand and what comes
+next.
+
 ## Local development
 
 Use Python 3.12 through 3.14 and run `make setup` to create a repository-local
@@ -15,6 +20,13 @@ brew services start postgresql@17
 createdb specpilot_test
 SPECPILOT_TEST_DSN=postgresql://localhost:5432/specpilot_test make integration-db
 ```
+
+Use a fresh database. The fixture applies every file in `migrations/` in
+filename order, so reusing one you migrated by hand hides a missing migration.
+
+`make unit` and `make check` skip the integration, Qdrant and smoke suites and
+still report "passed". A run that proves anything sets both
+`SPECPILOT_TEST_DSN` and `SPECPILOT_TEST_QDRANT_URL`.
 
 ## Running the stack
 

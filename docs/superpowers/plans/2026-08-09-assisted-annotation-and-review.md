@@ -1066,6 +1066,27 @@ describes nothing; nothing stores that shape, so no data moved.
 Migration 002 applied to `specpilot_live`; the three recorded attempts kept their
 values.
 
+#### The commit above shipped a defect, found while writing the handoff
+
+`tests/conftest.py` named `001_egress_ledger.sql` and no other migration, so
+adding `002` left the test schema a version behind production. It passed because
+the developer database had been migrated by hand; **on a fresh database
+`4f40817` fails** — `postgres.py` inserts into `request_tokens` and the table
+still has `transmitted_tokens`.
+
+Same shape as everything else this session: a value present in the code and
+absent from the path that actually runs. And it is the exact defect the CI in
+this repository is configured to catch — it creates a clean `specpilot_test` and
+runs `make integration-db` — except **there is no git remote, so that workflow
+has never executed on any commit.**
+
+Fixed by reading the directory in filename order rather than repeating a
+filename, so a third migration cannot reintroduce it. Running the suite properly
+also revealed that the skip gap is wider than the DSN alone: `SPECPILOT_TEST_DSN`
+plus `SPECPILOT_TEST_QDRANT_URL` on a fresh database gives **1,288 passed, 0
+skipped**, against 1,246 / 42 skipped for a bare `pytest`. All three print
+"passed".
+
 #### The re-run refused at `root_unique_excerpts_exceeded`, and the gate was right
 
 The first attempt after the fix never reached the provider. `r1-live-bytes` had

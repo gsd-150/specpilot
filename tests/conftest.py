@@ -6,9 +6,7 @@ from pathlib import Path
 
 import pytest
 
-MIGRATION = (
-    Path(__file__).resolve().parents[1] / "migrations" / "001_egress_ledger.sql"
-)
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 _TABLES = (
     "egress_run_seal",
     "egress_attempt",
@@ -64,9 +62,22 @@ def qdrant_url() -> str:
 
 @pytest.fixture(scope="session")
 def migrated_dsn(ledger_dsn: str) -> Iterator[str]:
+    """Every migration, in filename order.
+
+    This named one file. A second migration therefore left the test schema a
+    version behind production, and the suite still passed on any database that
+    happened to have been migrated by hand — which is how the columns renamed in
+    002 were exercised locally and would have failed on a fresh CI database.
+    Discovering that needs a clean database, so the directory is read rather
+    than a filename repeated.
+    """
     psycopg = pytest.importorskip("psycopg")
+    migrations = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if not migrations:
+        raise AssertionError(f"no migrations found in {MIGRATIONS_DIR}")
     with psycopg.connect(ledger_dsn, autocommit=True) as connection:
-        connection.execute(MIGRATION.read_text(encoding="utf-8"))
+        for migration in migrations:
+            connection.execute(migration.read_text(encoding="utf-8"))
     yield ledger_dsn
 
 
