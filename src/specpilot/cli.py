@@ -118,7 +118,7 @@ from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_s
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
-from specpilot.retrieval.dense import DenseIndex
+from specpilot.retrieval.dense import DenseBackendUnavailable, DenseIndex
 from specpilot.retrieval.hybrid import (
     RouteRanking,
     RrfParameters,
@@ -1469,6 +1469,9 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
 
     protocol = corpus_manifest.retrieval
     dense: DenseIndex | None = None
+    # Catches the search too, not only the open. The backend can go away
+    # between the two, and a handler that lets that escape prints a traceback
+    # where every other failure in this CLI prints one stable code.
     try:
         try:
             dense = DenseIndex.open(
@@ -1526,6 +1529,8 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
                         question_gold_jaccard=record.question_gold_jaccard or 0.0,
                     )
                 )
+    except DenseBackendUnavailable:
+        return _refuse("dense_index_unavailable", EXIT_IO)
     finally:
         if dense is not None:
             dense.close()
@@ -1630,6 +1635,9 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
 
     protocol = corpus_manifest.retrieval
     dense: DenseIndex | None = None
+    # Catches the search too, not only the open. The backend can go away
+    # between the two, and a handler that lets that escape prints a traceback
+    # where every other failure in this CLI prints one stable code.
     try:
         try:
             dense = DenseIndex.open(
@@ -1670,6 +1678,8 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
             locators=locators,
             parameters=RrfParameters(k=protocol.rrf_k),
         )
+    except DenseBackendUnavailable:
+        return _refuse("dense_index_unavailable", EXIT_IO)
     finally:
         if dense is not None:
             dense.close()
