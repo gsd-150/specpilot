@@ -853,3 +853,30 @@ Consequences worth naming rather than absorbing:
   correct: a total spanning two cap sets describes neither. Re-opening the
   accounting for a corpus after a cap change is a deliberate act, not a
   migration to run quietly.
+
+#### Task 11 (open): a corpus ledger bound to one policy has no way to be rebound
+
+Changing the caps made the corpus ledger row for `1abafff7…` unusable —
+`policy_snapshot_mismatch`, which is correct. Deleting it is refused too:
+`egress_reservation.corpus_manifest_id` has a foreign key onto it, so the row
+that records the accounting cannot be removed while anything that consumed it
+exists.
+
+Both behaviours are right on their own and together they are a dead end. The
+system can enter a state — caps changed on a corpus that has usage — with no
+exit that does not destroy audit rows. That is the third gap of this shape found
+this session, after the RFC family having no authorization path and the two
+gates counting differently: **a rule enforced in one direction with no
+corresponding path in the other.**
+
+The right fix matches what this project does everywhere else: immutable
+successors rather than mutation. `egress_corpus_ledger` is a single mutable row
+keyed by `corpus_manifest_id`, which is the anomaly — every manifest here is
+content-addressed and superseded rather than edited. Reopening accounting after
+a deliberate cap change should write a successor row carrying the new
+`policy_hash` and a pointer to the one it supersedes, leaving the old totals
+readable and attributable to the policy they were accumulated under.
+
+Until that exists, a cap change on a corpus with recorded usage requires
+rebuilding the ledger database, which is acceptable only because every row in it
+today is from this session's own failed test sends.
