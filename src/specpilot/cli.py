@@ -148,6 +148,8 @@ EXIT_REFUSED = 2
 EXIT_IO = 3
 EXIT_USAGE = 4
 
+LIVE_ROUTE_NAMES = ("main", "judge")
+
 _FIXTURE_CORPUS_ID = "c" * 64
 
 
@@ -1571,6 +1573,187 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
     )
 
 
+def _answer(arguments: argparse.Namespace) -> int:
+    """Answer one question from the frozen corpus, or refuse.
+
+    The whole vertical path in one command: retrieve under the frozen protocol,
+    disclose bounded evidence through the ledger-backed gate, and verify what
+    comes back against what this request actually sent.
+
+    Evidence is scoped to a single document — `VersionMetadata` names one, and
+    an excerpt set spanning two would be priced and cited under a version
+    statement that covers only one of them. The document is the one the top hit
+    belongs to, so a question whose answer genuinely spans both RFCs cannot be
+    answered in a single call. That is a real limitation of this slice rather
+    than a detail: it is recorded in the output as `scoped_document_id`.
+    """
+    return asyncio.run(_answer_async(arguments))
+
+
+async def _answer_async(arguments: argparse.Namespace) -> int:
+    from specpilot.answer.evidence import build_evidence_from_unit
+    from specpilot.answer.run import run_answer
+    from specpilot.egress.postgres import PostgresEgressLedger
+    from specpilot.providers.http import (
+        LIVE_ROUTES,
+        HttpChatAdapter,
+        ProviderCredentialMissing,
+        resolve_credential,
+    )
+
+    try:
+        corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_manifest_not_found")
+
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    store = ManifestStore(arguments.manifest_dir)
+    try:
+        authorized = store.read_source(arguments.source_manifest)
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("manifest_not_found")
+    try:
+        corpus = _pool_corpus(resolved)
+    except (UnsafeRfcError, OversizedClauseError, OSError):
+        return _refuse("invalid_corpus")
+
+    if weights_sha256(arguments.model_dir) != corpus_manifest.embedding_weights_sha256:
+        return _refuse("embedding_weights_mismatch")
+    try:
+        encoder = load_encoder(arguments.model_dir, arguments.device)
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+
+    protocol = corpus_manifest.retrieval
+    dense: DenseIndex | None = None
+    try:
+        try:
+            dense = DenseIndex.open(
+                arguments.qdrant_url, corpus_manifest.collection_name
+            )
+        except Exception:
+            return _refuse("dense_index_unavailable", EXIT_IO)
+        sparse = Bm25Index.build(corpus.indexable())
+        if sparse.fingerprint != corpus_manifest.bm25.index_fingerprint:
+            return _refuse("bm25_fingerprint_mismatch")
+
+        locators = {
+            unit_id: locator_for_unit(
+                corpus_manifest.manifest_id, corpus.get_clause(unit_id)
+            )
+            for unit_id in corpus.unit_ids()
+        }
+        vector = encoder([arguments.question])[0].tolist()
+        fused = reciprocal_rank_fusion(
+            [
+                RouteRanking(
+                    route="bm25",
+                    unit_ids=tuple(
+                        hit.unit_id
+                        for hit in sparse.search(
+                            arguments.question, protocol.bm25_top_k
+                        )
+                    ),
+                ),
+                RouteRanking(
+                    route="dense",
+                    unit_ids=tuple(
+                        hit.unit_id
+                        for hit in dense.search(vector, protocol.dense_top_k)
+                    ),
+                ),
+            ],
+            locators=locators,
+            parameters=RrfParameters(k=protocol.rrf_k),
+        )
+    finally:
+        if dense is not None:
+            dense.close()
+
+    ranked = [corpus.get_clause(hit.unit_id) for hit in fused.hits][
+        : protocol.final_top_k
+    ]
+    if not ranked:
+        return _emit({"status": "refused", "refusal_reason": "no_evidence_retrieved"})
+    scoped = ranked[0].document_id
+    if authorized.document_id != scoped:
+        return _refuse("source_manifest_document_mismatch")
+    try:
+        evidence = tuple(
+            build_evidence_from_unit(
+                unit, corpus_manifest_id=corpus_manifest.manifest_id
+            )
+            for unit in ranked
+            if unit.document_id == scoped
+        )
+    except ValueError:
+        return _refuse("invalid_evidence_set")
+
+    enforcer = EgressPolicyEnforcer(EgressPolicy.load(), manifests=store)
+    ledger = PostgresEgressLedger(
+        arguments.ledger_dsn, policy=EgressPolicy.load(), manifests=store
+    )
+    endpoint = LIVE_ROUTES[arguments.route].endpoint
+    try:
+        key = resolve_credential(endpoint)
+    except ProviderCredentialMissing:
+        return _refuse("provider_credential_missing", EXIT_USAGE)
+    adapter = HttpChatAdapter(endpoint, api_key=key)
+    try:
+        outcome = await run_answer(
+            arguments.question,
+            evidence,
+            enforcer=enforcer,
+            ledger=ledger,
+            adapter=adapter,
+            source_manifest=authorized,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            evaluation_root_id=arguments.evaluation_root_id,
+            run_id=arguments.run_id,
+        )
+    except EgressPolicyViolation as violation:
+        return _refuse(violation.code)
+    finally:
+        await adapter.aclose()
+
+    answer = outcome.verified
+    return _emit(
+        {
+            "status": answer.verdict.value,
+            "answer": answer.answer,
+            "citations": [
+                {
+                    "clause_id": citation.clause_id,
+                    "section_number": citation.section_number,
+                    "document_id": citation.document_id,
+                    "document_version": citation.document_version,
+                    "content_hash": citation.content_hash,
+                    "corpus_manifest_id": citation.corpus_manifest_id,
+                }
+                for citation in answer.citations
+            ],
+            "refusal_reason": (
+                answer.refusal_reason.value if answer.refusal_reason else None
+            ),
+            "citation_faults": list(answer.citation_faults),
+            "scoped_document_id": scoped,
+            "evidence_count": len(evidence),
+            "retrieved_clause_ids": [unit.unit_id for unit in ranked],
+            "reservation_id": outcome.reservation_id,
+            "transmitted_bytes": (
+                outcome.transmitted.transmitted_bytes if outcome.transmitted else None
+            ),
+            "provider_error": outcome.provider_error,
+            "source_manifest_id": authorized.manifest_id,
+            "corpus_manifest_id": corpus_manifest.manifest_id,
+        }
+    )
+
+
 def _annotation_pool_register(arguments: argparse.Namespace) -> int:
     if not arguments.annotation_dir.is_dir():
         return _refuse("annotation_dir_not_found")
@@ -2732,6 +2915,26 @@ def _parser() -> argparse.ArgumentParser:
     # number whose split is implicit is one that gets quoted as a test result.
     evaluate.add_argument("--split", choices=["dev", "locked"], required=True)
     evaluate.set_defaults(handler=_retrieval_evaluate)
+
+    answer = commands.add_parser("answer")
+    answer.add_argument("--question", required=True)
+    answer.add_argument("--corpus-manifest", required=True)
+    answer.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    answer.add_argument("--manifest-dir", type=Path, required=True)
+    answer.add_argument("--manifest", action="append", required=True)
+    answer.add_argument("--xml", action="append", type=Path, required=True)
+    # The authorized successor, named separately from the corpus sources: the
+    # sources say which documents the index covers, this one says which
+    # compliance decision permits sending from them.
+    answer.add_argument("--source-manifest", required=True)
+    answer.add_argument("--model-dir", type=Path, required=True)
+    answer.add_argument("--device", choices=["mps", "cpu"], required=True)
+    answer.add_argument("--qdrant-url", required=True)
+    answer.add_argument("--ledger-dsn", required=True)
+    answer.add_argument("--route", choices=sorted(LIVE_ROUTE_NAMES), default="main")
+    answer.add_argument("--evaluation-root-id", required=True)
+    answer.add_argument("--run-id", required=True)
+    answer.set_defaults(handler=_answer)
 
     annotation = commands.add_parser("annotation").add_subparsers(
         dest="command", required=True

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from specpilot.answer.verify import DisclosedClause
 from specpilot.contracts.egress import EvidenceExcerpt, NormalizedExcerptSpan
 from specpilot.corpus.clauses import Clause
+from specpilot.corpus.indexable import IndexUnit
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,26 @@ class Evidence:
 
     excerpt: EvidenceExcerpt
     disclosed: DisclosedClause
+
+
+def build_evidence_from_unit(unit: IndexUnit, *, corpus_manifest_id: str) -> Evidence:
+    """Build from what retrieval actually serves.
+
+    `IndexUnit` and `Clause` describe the same paragraph and name its id
+    differently — `unit_id` against `clause_id`. Two explicit constructors
+    rather than one that reads whichever attribute happens to be there: a
+    getattr fallback would silently build an excerpt with an empty locator the
+    day a third type turns up.
+    """
+    return _build(
+        clause_id=unit.unit_id,
+        document_id=unit.document_id,
+        document_version=unit.document_version,
+        section_number=unit.section_number,
+        ordinal=unit.ordinal,
+        text=unit.text,
+        corpus_manifest_id=corpus_manifest_id,
+    )
 
 
 def build_evidence(
@@ -40,6 +61,27 @@ def build_evidence(
     are set against whole clauses, so slicing one would produce a citation
     pointing at text the reader cannot locate by the anchor it names.
     """
+    return _build(
+        clause_id=clause.clause_id,
+        document_id=clause.document_id,
+        document_version=clause.document_version,
+        section_number=clause.section_number,
+        ordinal=clause.ordinal,
+        text=text,
+        corpus_manifest_id=corpus_manifest_id,
+    )
+
+
+def _build(
+    *,
+    clause_id: str,
+    document_id: str,
+    document_version: str,
+    section_number: str | None,
+    ordinal: int,
+    text: str,
+    corpus_manifest_id: str,
+) -> Evidence:
     if not text:
         raise ValueError("an excerpt needs text")
     content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -50,19 +92,19 @@ def build_evidence(
             quote=text,
             quote_hash=content_hash,
             span=NormalizedExcerptSpan(
-                paragraph_start=clause.ordinal,
-                paragraph_end=clause.ordinal,
+                paragraph_start=ordinal,
+                paragraph_end=ordinal,
                 token_start=0,
-                token_end=max(clause.word_count, 1),
+                token_end=max(len(text.split()), 1),
             ),
         ),
         disclosed=DisclosedClause(
-            clause_id=clause.clause_id,
+            clause_id=clause_id,
             corpus_manifest_id=corpus_manifest_id,
-            document_id=clause.document_id,
-            document_version=clause.document_version,
+            document_id=document_id,
+            document_version=document_version,
             content_hash=content_hash,
-            section_number=clause.section_number,
+            section_number=section_number,
         ),
     )
 
@@ -87,4 +129,9 @@ def build_evidence_set(
     )
 
 
-__all__ = ["Evidence", "build_evidence", "build_evidence_set"]
+__all__ = [
+    "Evidence",
+    "build_evidence",
+    "build_evidence_from_unit",
+    "build_evidence_set",
+]
