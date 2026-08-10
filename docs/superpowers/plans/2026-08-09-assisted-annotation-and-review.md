@@ -729,3 +729,46 @@ Owed, in order:
 
 Until (1) and (2), `specpilot answer` against the real corpus fails closed at
 `build_request`, which is the correct behaviour and not a bug to route around.
+
+#### Task 9 resolved — the RFC corpus is authorized
+
+**9.1** `create_successor_v2`. **9.2** the §3.2 assessment, researched by the
+author on 2026-08-10 and recorded in both RFC manifests (local, gitignored).
+
+Authorized for the online main route, expiring **2026-11-08**. Successors:
+`ietf-rfc-9110 → c42813e7…`, `ietf-rfc-9112 → b74abd04…`.
+
+**Researching the licence found a defect before it authorized anything, which is
+the argument for doing it in that order.** TLP 5.0 §3 requires an excerpt to
+identify its source. The outbound payload rendered `Evidence <hash[:12]>:
+<quote>` — `document_id` and `document_version` sat on the payload object and
+were never rendered into the bytes that left. The enforcer was satisfied and the
+licence was not, and from inside the system those look identical: every cap
+held, every disclosure was priced, and the quote left unattributed. Fixed and
+tested before the decision was recorded.
+
+Two TLP conditions turned out to be already met, one by accident worth naming:
+non-code content may not be made into derivative works on TLP authority alone,
+and §8.1's rule that no committable record may hold clause prose means no RFC
+text is reproduced downstream. A rule written for evaluation hygiene happens to
+discharge a licence condition.
+
+**What is disclosed about the provider, as found:** trains on inputs with no
+default opt-out (opt-out by request only); no unified retention period published
+for API request data or logs; no complete named subprocessor list; data
+processed in the PRC. The material sent is published specification text rather
+than confidential or personal data, which is why these are disclosed rather than
+disqualifying — **disclosed, not waived**, and they belong in §12.3's appendix.
+
+**Two recorded uncertainties, which are the honest part:** whether sending
+excerpts to a model API acting as a confidential processor is "publish",
+"display" or "distribute" under TLP is undefined and may vary by jurisdiction —
+the caps and the attribution line are set so the answer does not change the
+outcome, which is not the same as having answered it. And retention is the least
+determined of the four provider facts.
+
+**The premise this decision rests on, recorded so it is re-checkable:** caps
+below one fifth on every dimension. RFC 9110 — 314 / 18,412 / 76,113 against
+1,571 / 92,064 / 380,569. RFC 9112 — 70 / 3,943 / 16,069 against 351 / 19,717 /
+80,345. Raising `corpus_document_unique` above one fifth invalidates the premise
+and the decision must be made again rather than inherited.
