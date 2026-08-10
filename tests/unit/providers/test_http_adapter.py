@@ -11,10 +11,12 @@ says so.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
 
+from specpilot.answer.reply import parse_reply
 from specpilot.providers.base import ProviderError
 from specpilot.providers.http import (
     HttpChatAdapter,
@@ -323,3 +325,41 @@ async def test_the_reply_contract_is_actually_sent() -> None:
     assert '"sufficient"' in system
     assert '"citations"' in system
     assert "Do not cite anything you were not shown" in system
+
+
+async def test_the_identifier_shown_is_the_identifier_the_parser_takes() -> None:
+    """The join no test crossed, which is why the first answerable call failed.
+
+    The payload labelled each excerpt with a twelve-character prefix of a
+    content hash; the contract asked for a `clause_id`; the parser required 64
+    hex characters. Three components, each self-consistent, and a model that
+    could not cite anything — it was being asked for an identifier it had never
+    been shown.
+
+    So this test plays the model: it copies back exactly what the bytes offered
+    and nothing else. Anything less exact — reading the id off the payload
+    object rather than the rendered text — would test the objects again and miss
+    the same gap a second time.
+    """
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured)
+    payload = l1_payload()
+
+    await adapter.send(payload)
+
+    user = next(
+        m["content"]
+        for m in json.loads(captured[0].content)["messages"]
+        if m["role"] == "user"
+    )
+    shown = re.findall(r"^Evidence ([0-9a-f]+):", user, flags=re.MULTILINE)
+    assert len(shown) == len(payload.evidence_excerpts)
+
+    parsed = parse_reply(
+        json.dumps(
+            {"sufficient": True, "answer": "It must.", "citations": shown}
+        )
+    )
+
+    assert parsed.parse_fault is None
+    assert [c.evidence_id for c in parsed.citations] == shown

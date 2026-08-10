@@ -117,12 +117,26 @@ def build_evidence_set(
     A duplicate clause would be priced twice by the enforcer and would let one
     disclosure count against the caps as two, so it is an error rather than a
     thing to quietly collapse.
+
+    Two *different* clauses with byte-identical text are refused for a second
+    reason: the excerpt's identity is the hash of its bytes, so they would reach
+    the model as one indistinguishable handle and the citation could not say
+    which was meant. The ambiguity is real on the wire, not an artefact of the
+    lookup — the model is shown one identifier twice.
     """
     seen: set[str] = set()
-    for clause, _ in clauses:
+    seen_text: set[str] = set()
+    for clause, text in clauses:
         if clause.clause_id in seen:
             raise ValueError("the same clause appears twice in one evidence set")
         seen.add(clause.clause_id)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if digest in seen_text:
+            raise ValueError(
+                "two clauses in one evidence set have identical text and would "
+                "share an evidence id"
+            )
+        seen_text.add(digest)
     return tuple(
         build_evidence(clause, text, corpus_manifest_id=corpus_manifest_id)
         for clause, text in clauses

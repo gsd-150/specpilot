@@ -5,20 +5,31 @@ manifests, the content-addressed clauses, the disclosure ledger, the gold
 protocol — exists so that this function can be written, and it is worth nothing
 unless it can turn a fluent answer into a refusal.
 
-Four faults, each a different way a citation can be untrue, kept apart because
-they say different things about where the system went wrong:
+**What the model cites is the evidence id — the hash of the exact bytes it was
+shown** — and the clause identity is resolved from that, not taken from the
+model. The model is never told a clause id, so it cannot name one, correctly or
+otherwise. A citation is therefore a claim about a disclosure rather than a
+claim about the corpus, and the checker holds the disclosure record only.
 
-- **unknown_clause** — the model named a clause the corpus does not contain. It
-  invented a locator.
-- **not_disclosed** — the clause exists, but was not among the excerpts sent.
-  The model cited something it never saw, so whatever it said about that clause
-  came from training rather than from the source in front of it. This is the
-  one a naive implementation misses, because the citation checks out against
-  the corpus and looks perfectly valid.
-- **content_drift** — the clause was sent, but its text no longer hashes to what
-  the citation claims. The corpus moved under the answer.
+Two faults, which is fewer than this once claimed and is the honest count:
+
+- **not_disclosed** — the id was not among the excerpts this request sent. The
+  model cited something it never saw, so whatever it said about it came from
+  training rather than from the source in front of it. This is the one a naive
+  implementation misses, because such a citation checks out against the corpus
+  and looks perfectly valid.
 - **cross_manifest** — citations spanning two frozen corpora, which §6.4 makes a
   fail-closed condition because no single version statement covers them.
+
+Two former faults are gone and their absence is deliberate. `unknown_clause`
+promised to separate an invented locator from a real clause that was never sent,
+but this function has only ever held the disclosed set — it never consulted the
+corpus, so it could not tell them apart and reported both under the name that
+claimed it had. Recovering that distinction means giving the checker the corpus
+manifest, which is a change to make on purpose rather than a name to keep
+pretending. And `content_drift` cannot be stated once the identifier is the hash
+of the disclosed bytes: an id that does not match what was sent is not a drifted
+citation, it is one of something else.
 
 A determinate answer carrying any fault becomes a refusal. Not a warning beside
 the answer: an answer whose support is unverifiable is exactly the confident
@@ -41,9 +52,7 @@ from specpilot.contracts.answer import (
 
 
 class CitationFault(StrEnum):
-    UNKNOWN_CLAUSE = "unknown_clause"
     NOT_DISCLOSED = "not_disclosed"
-    CONTENT_DRIFT = "content_drift"
     CROSS_MANIFEST = "cross_manifest"
 
 
@@ -62,15 +71,20 @@ class DisclosedClause:
 
 @dataclass(frozen=True, slots=True)
 class ClaimedCitation:
-    """A clause id the model named, before anything is known about it."""
+    """An evidence id the model named, before anything is known about it.
 
-    clause_id: str
-    content_hash: str | None = None
+    One field, because the model is shown one handle. Carrying a second — a
+    clause id, a hash to cross-check — would be carrying a value the payload
+    never printed, which is precisely how the first live answer came to cite an
+    identifier that could not exist.
+    """
+
+    evidence_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class CitationCheck:
-    clause_id: str
+    evidence_id: str
     fault: CitationFault | None
     citation: Citation | None
 
@@ -85,19 +99,22 @@ def check_citation(
     *,
     corpus_manifest_id: str,
 ) -> CitationCheck:
-    """Resolve one claimed clause against what was disclosed for this request."""
-    found = disclosed.get(claimed.clause_id)
+    """Resolve one claimed excerpt against what was disclosed for this request.
+
+    `disclosed` is keyed by evidence id — the content hash — because that is the
+    only identifier the model was given. The clause identity comes out of the
+    record on this side; it is never read off the reply.
+    """
+    found = disclosed.get(claimed.evidence_id)
     if found is None:
         # Deliberately not "look it up in the corpus, and if it is there accept
         # it". A clause the model never saw cannot be its evidence, however real
         # the clause is.
-        return CitationCheck(claimed.clause_id, CitationFault.UNKNOWN_CLAUSE, None)
+        return CitationCheck(claimed.evidence_id, CitationFault.NOT_DISCLOSED, None)
     if found.corpus_manifest_id != corpus_manifest_id:
-        return CitationCheck(claimed.clause_id, CitationFault.CROSS_MANIFEST, None)
-    if claimed.content_hash is not None and claimed.content_hash != found.content_hash:
-        return CitationCheck(claimed.clause_id, CitationFault.CONTENT_DRIFT, None)
+        return CitationCheck(claimed.evidence_id, CitationFault.CROSS_MANIFEST, None)
     return CitationCheck(
-        claimed.clause_id,
+        claimed.evidence_id,
         None,
         Citation(
             clause_id=found.clause_id,
@@ -139,13 +156,14 @@ def verify_answer(
             refusal_reason=RefusalReason.EVIDENCE_INSUFFICIENT,
         )
 
-    by_id = {clause.clause_id: clause for clause in disclosed}
+    # Keyed by what the model was shown, not by what this side calls it.
+    by_evidence_id = {clause.content_hash: clause for clause in disclosed}
     checks = [
-        check_citation(claimed, by_id, corpus_manifest_id=corpus_manifest_id)
+        check_citation(claimed, by_evidence_id, corpus_manifest_id=corpus_manifest_id)
         for claimed in _deduplicate(claimed_citations)
     ]
     faults = tuple(
-        f"{check.clause_id[:16]}:{check.fault.value}"
+        f"{check.evidence_id[:16]}:{check.fault.value}"
         for check in checks
         if check.fault is not None
     )
@@ -172,18 +190,18 @@ def verify_answer(
 
 
 def _deduplicate(claimed: Sequence[ClaimedCitation]) -> list[ClaimedCitation]:
-    """Keep the first mention of each clause, in order.
+    """Keep the first mention of each excerpt, in order.
 
-    A model repeating a clause id is not a fault — it is how prose reads — but
-    counting it twice would let one verified clause satisfy a requirement for
-    two.
+    A model repeating an evidence id is not a fault — it is how prose reads —
+    but counting it twice would let one verified clause satisfy a requirement
+    for two.
     """
     seen: set[str] = set()
     unique: list[ClaimedCitation] = []
     for citation in claimed:
-        if citation.clause_id in seen:
+        if citation.evidence_id in seen:
             continue
-        seen.add(citation.clause_id)
+        seen.add(citation.evidence_id)
         unique.append(citation)
     return unique
 

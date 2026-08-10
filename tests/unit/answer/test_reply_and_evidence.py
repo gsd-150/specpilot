@@ -21,7 +21,7 @@ from specpilot.corpus.clauses import ClauseLimits, build_clauses, iter_clause_te
 from tests.helpers import rfc_factory
 
 CORPUS = "c" * 64
-CLAUSE = "a" * 64
+EVIDENCE_ID = "a" * 64
 
 
 def reply(**body: object) -> str:
@@ -30,13 +30,13 @@ def reply(**body: object) -> str:
 
 def test_a_sufficient_reply_yields_its_answer_and_citations() -> None:
     parsed = parse_reply(
-        reply(sufficient=True, answer="It must send Allow.", citations=[CLAUSE])
+        reply(sufficient=True, answer="It must send Allow.", citations=[EVIDENCE_ID])
     )
 
     assert parsed.usable
     assert parsed.sufficient is True
     assert parsed.answer == "It must send Allow."
-    assert [c.clause_id for c in parsed.citations] == [CLAUSE]
+    assert [c.evidence_id for c in parsed.citations] == [EVIDENCE_ID]
 
 
 def test_an_insufficient_reply_carries_nothing_else() -> None:
@@ -51,7 +51,7 @@ def test_an_insufficient_reply_carries_nothing_else() -> None:
 def test_a_fenced_code_block_is_a_formatting_habit_not_a_failure() -> None:
     parsed = parse_reply(
         f'```json\n{{"sufficient": true, "answer": "Yes.", '
-        f'"citations": ["{CLAUSE}"]}}\n```'
+        f'"citations": ["{EVIDENCE_ID}"]}}\n```'
     )
 
     assert parsed.usable
@@ -90,12 +90,31 @@ def test_a_missing_verdict_is_not_defaulted_to_refusal() -> None:
     assert parsed.parse_fault == "reply_missing_sufficient"
 
 
-def test_a_section_number_where_a_clause_id_belongs_is_its_own_fault() -> None:
-    """Not passed through as an unknown clause: "returned the wrong kind of
+def test_a_section_number_where_an_evidence_id_belongs_is_its_own_fault() -> None:
+    """Not passed through as an undisclosed excerpt: "returned the wrong kind of
     identifier" and "invented an identifier" are different failures."""
     parsed = parse_reply(reply(sufficient=True, answer="Yes.", citations=["15.5.6"]))
 
     assert parsed.parse_fault == "reply_citation_malformed"
+
+
+def test_the_parser_reads_the_one_key_the_instructions_name() -> None:
+    """`clause_id` was the old spelling and the payload never printed one. Read
+    as a fallback it would let the instructions and this parser drift apart
+    again while every test kept passing."""
+    parsed = parse_reply(
+        reply(
+            sufficient=True,
+            answer="Yes.",
+            citations=[{"evidence_id": EVIDENCE_ID}],
+        )
+    )
+    stale = parse_reply(
+        reply(sufficient=True, answer="Yes.", citations=[{"clause_id": EVIDENCE_ID}])
+    )
+
+    assert [c.evidence_id for c in parsed.citations] == [EVIDENCE_ID]
+    assert stale.parse_fault == "reply_citation_not_a_string"
 
 
 def test_an_oversized_reply_is_refused_before_parsing() -> None:
@@ -106,7 +125,7 @@ def test_an_oversized_reply_is_refused_before_parsing() -> None:
 
 def test_too_many_citations_is_refused() -> None:
     parsed = parse_reply(
-        reply(sufficient=True, answer="Yes.", citations=[CLAUSE] * 33)
+        reply(sufficient=True, answer="Yes.", citations=[EVIDENCE_ID] * 33)
     )
 
     assert parsed.parse_fault == "reply_too_many_citations"

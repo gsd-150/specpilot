@@ -914,3 +914,61 @@ payload.
 Owed: show the full excerpt identifier, ask for that identifier by the name the
 payload uses, and key `check_citation` on it. The retrieval side needs nothing —
 it already ranks the right clause first.
+
+#### Resolved — the model cites what it was shown, and the clause identity is resolved on this side
+
+All three, plus the consequences they force.
+
+`Evidence <content_hash>` in full rather than twelve characters,
+`REPLY_INSTRUCTIONS` asking for an `evidence_id` and naming where it appears,
+`parse_reply` reading that one key, and `verify_answer` keying the disclosed map
+on `content_hash`. Verified against real RFC 9110 bytes: the rendered payload's
+identifiers parse and resolve to §9.1 and §9.3.7 — **clause ids the model was
+never shown and now never needs.** The reply supplies a handle to a disclosure;
+everything a reader needs to look the citation up comes out of the record.
+
+**This is a better contract than the one it replaces, not just a working one.**
+The model cannot name a clause at all, so it cannot invent a locator; and the
+identifier it does name is the hash of the exact bytes disclosed, so citing
+something unsent fails immediately rather than after a corpus lookup that would
+have said the clause was real.
+
+Consequences worth naming rather than absorbing:
+
+- **`content_drift` is gone, because it can no longer be stated.** When the
+  identifier *is* the hash of the disclosed bytes, an id that does not match what
+  was sent is not a drifted citation — it is a citation of something else. It was
+  also unreachable from the wire already: `parse_reply` never populated the
+  second field, so only a direct call in a test could produce it.
+- **`unknown_clause` is gone, and this one was already untrue.** It promised to
+  separate an invented locator from a real clause never sent, but
+  `check_citation` has only ever held the disclosed set — it never consulted the
+  corpus, so it could not tell them apart and reported both under the name that
+  claimed it had. Everything is now `not_disclosed`, which is what the function
+  can actually determine. Recovering the distinction means giving the checker the
+  corpus manifest; that is a change to make deliberately, not a name to keep.
+- **Byte-identical clauses are now refused in one evidence set.** Two different
+  clauses with the same text share an evidence id, so they would reach the model
+  as one indistinguishable handle. The ambiguity is on the wire, not in the
+  lookup: the model is shown one identifier twice and no citation can say which
+  was meant.
+- **The label costs 52 more outbound bytes per excerpt and no more RFC text.**
+  The enforcer prices `excerpt.quote` only — the label, the attribution line, the
+  question and the instructions are outbound bytes it never caps, though the
+  ledger records the real wire size through `request_bytes`. Since a hex
+  identifier is not specification text, the one-fifth premise the §3.2 assessment
+  rests on is untouched.
+
+**The regression guard is a test that crosses the join, because that is what was
+missing.** `test_the_identifier_shown_is_the_identifier_the_parser_takes` renders
+the payload, scrapes the identifiers out of the *rendered text*, and feeds them
+to the parser as a reply. Reading them off the payload object instead would test
+the objects again and miss the same gap a second time — three components were
+each self-consistent and no test crossed between them.
+
+The test doubles were wrong in the same direction and are corrected: `reply()` in
+`test_run.py` cited `clause_id` because whoever wrote it could see the internal
+identifier. A double that knows more than the wire tests the double.
+
+1,245 pass, ruff and mypy clean. **Not yet confirmed live** — the answerable
+question has not been re-asked against the provider since the fix.

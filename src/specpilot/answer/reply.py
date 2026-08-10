@@ -84,17 +84,21 @@ def parse_reply(content: str) -> ParsedReply:
 
     citations: list[ClaimedCitation] = []
     for entry in raw:
-        clause_id = entry.get("clause_id") if isinstance(entry, dict) else entry
-        if not isinstance(clause_id, str):
+        # `evidence_id` and nothing else. Reading a second spelling as a
+        # fallback would let the instructions and this parser drift apart again
+        # while the tests kept passing — which is how the model came to be asked
+        # for an identifier the payload never printed.
+        evidence_id = entry.get("evidence_id") if isinstance(entry, dict) else entry
+        if not isinstance(evidence_id, str):
             return _unparseable("reply_citation_not_a_string")
-        clause_id = clause_id.strip().lower()
-        if len(clause_id) != _SHA256_LENGTH or not _is_hex(clause_id):
-            # Rejected here rather than passed through as an unknown clause.
-            # "The model returned a section number instead of a clause id" and
-            # "the model invented a clause id" are different faults and the
-            # second should not absorb the first.
+        evidence_id = evidence_id.strip().lower()
+        if len(evidence_id) != _SHA256_LENGTH or not _is_hex(evidence_id):
+            # Rejected here rather than passed through as an undisclosed
+            # excerpt. "The model returned a section number instead of an
+            # evidence id" and "the model invented an evidence id" are different
+            # faults and the second should not absorb the first.
             return _unparseable("reply_citation_malformed")
-        citations.append(ClaimedCitation(clause_id))
+        citations.append(ClaimedCitation(evidence_id))
 
     return ParsedReply(
         sufficient=True, answer=answer.strip(), citations=tuple(citations)

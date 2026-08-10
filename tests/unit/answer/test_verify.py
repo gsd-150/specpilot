@@ -1,9 +1,13 @@
 """The claim, and every way it is allowed to fail.
 
-A citation checker that only catches invented clause ids is easy and nearly
+A citation checker that only catches invented identifiers is easy and nearly
 useless: the interesting failure is a real clause the model never saw, which
 checks out against the corpus and looks perfectly valid. These tests exist to
 keep that case caught.
+
+The two identifiers are kept deliberately different throughout — the clause is
+`a…`, the evidence id it was disclosed under is `e…` — so that a lookup keyed on
+the wrong one fails these tests instead of passing by coincidence.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ def answered(**overrides: object) -> VerifiedAnswer:
     return verify_answer(
         **{  # type: ignore[arg-type]
             "answer_text": "The origin server must send an Allow header field.",
-            "claimed_citations": [ClaimedCitation("a" * 64)],
+            "claimed_citations": [ClaimedCitation("e" * 64)],
             "disclosed": [disclosed()],
             "corpus_manifest_id": CORPUS,
             **overrides,
@@ -54,13 +58,24 @@ def answered(**overrides: object) -> VerifiedAnswer:
     )
 
 
-def test_a_cited_clause_that_was_disclosed_verifies() -> None:
+def test_a_cited_excerpt_that_was_disclosed_verifies() -> None:
     result = answered()
 
     assert result.verdict is AnswerVerdict.ANSWERED
     assert [c.clause_id for c in result.citations] == ["a" * 64]
     assert result.citations[0].section_number == "15.5.6"
     assert result.citations[0].content_hash == "e" * 64
+
+
+def test_the_clause_identity_comes_from_the_record_not_the_reply() -> None:
+    """The model cited `e…` and the answer names clause `a…`, which it was never
+    told. The reply supplies a handle to what was disclosed; everything a reader
+    needs to look the citation up is resolved on this side, so the model cannot
+    name a clause at all — correctly or otherwise."""
+    result = answered()
+
+    assert result.citations[0].clause_id == "a" * 64
+    assert result.citations[0].document_id == "ietf-rfc-9110"
 
 
 def test_a_clause_the_model_never_saw_is_not_evidence() -> None:
@@ -71,34 +86,36 @@ def test_a_clause_the_model_never_saw_is_not_evidence() -> None:
 
     assert result.verdict is AnswerVerdict.REFUSED
     assert result.refusal_reason is RefusalReason.UNVERIFIABLE_CITATION
-    assert result.citation_faults == (f"{'b' * 16}:unknown_clause",)
+    assert result.citation_faults == (f"{'b' * 16}:not_disclosed",)
+
+
+def test_citing_the_clause_id_instead_of_the_evidence_id_is_not_disclosed() -> None:
+    """The clause id is a real identifier for this exact clause, and it is still
+    refused: it is not what was disclosed. This is the guard against a future
+    edit that keys the lookup back on `clause_id` — such a change would make
+    this test pass a citation the model could not have produced."""
+    result = answered(claimed_citations=[ClaimedCitation("a" * 64)])
+
+    assert result.verdict is AnswerVerdict.REFUSED
+    assert result.citation_faults == (f"{'a' * 16}:not_disclosed",)
 
 
 def test_one_bad_citation_sinks_the_whole_answer() -> None:
     """Keeping the good ones would publish a conclusion partly reasoned from
     outside the corpus, with nothing in the output saying so."""
     result = answered(
-        claimed_citations=[ClaimedCitation("a" * 64), ClaimedCitation("b" * 64)]
+        claimed_citations=[ClaimedCitation("e" * 64), ClaimedCitation("b" * 64)]
     )
 
     assert result.verdict is AnswerVerdict.REFUSED
     assert result.citations == ()
 
 
-def test_content_drift_is_caught_when_the_model_echoes_a_hash() -> None:
-    result = answered(
-        claimed_citations=[ClaimedCitation("a" * 64, content_hash="f" * 64)]
-    )
-
-    assert result.verdict is AnswerVerdict.REFUSED
-    assert result.citation_faults == (f"{'a' * 16}:content_drift",)
-
-
 def test_a_citation_from_another_frozen_corpus_fails_closed() -> None:
     """§6.4: evidence and run carry one corpus_manifest_id."""
     check = check_citation(
-        ClaimedCitation("a" * 64),
-        {"a" * 64: disclosed(corpus_manifest_id=OTHER_CORPUS)},
+        ClaimedCitation("e" * 64),
+        {"e" * 64: disclosed(corpus_manifest_id=OTHER_CORPUS)},
         corpus_manifest_id=CORPUS,
     )
 
@@ -133,7 +150,7 @@ def test_no_evidence_outranks_the_models_own_refusal() -> None:
 def test_repeating_a_clause_is_prose_not_a_fault() -> None:
     """But it must not let one verified clause count as two."""
     result = answered(
-        claimed_citations=[ClaimedCitation("a" * 64), ClaimedCitation("a" * 64)]
+        claimed_citations=[ClaimedCitation("e" * 64), ClaimedCitation("e" * 64)]
     )
 
     assert result.verdict is AnswerVerdict.ANSWERED

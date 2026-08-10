@@ -34,16 +34,24 @@ SectionNumber = Annotated[
 # It lived next to the parser, which the provider adapter cannot import without
 # inverting the layering — so it was written and never sent, and the first live
 # call came back as prose.
+#
+# It then asked for a `clause_id`, which the payload never shows. `EvidenceExcerpt`
+# carries no clause id at all — it carries `content_hash`, which names the exact
+# bytes disclosed — so the model was being asked for an identifier it had never
+# been given. The name here is now the name the payload prints, and the two are
+# only correct together: changing one without the other silently reproduces a
+# fault that looks like the model disobeying.
 REPLY_INSTRUCTIONS = """\
-Answer only from the numbered excerpts provided. Reply with one JSON object and \
-nothing else:
+Answer only from the excerpts provided. Each is introduced by \
+`Evidence <evidence_id>:`, and that identifier is what you cite — copy it \
+exactly as shown. Reply with one JSON object and nothing else:
 
-  {"sufficient": true, "answer": "...", "citations": ["<clause_id>", ...]}
+  {"sufficient": true, "answer": "...", "citations": ["<evidence_id>", ...]}
 
 Set "sufficient" to false, with an empty citation list and no answer, when the \
-excerpts do not settle the question. Cite a clause_id only if that excerpt was \
-given to you above. Do not cite anything you were not shown, and do not answer \
-from memory of the specification."""
+excerpts do not settle the question. Cite an evidence_id only if that excerpt \
+was given to you above. Do not cite anything you were not shown, and do not \
+answer from memory of the specification."""
 
 
 class _FrozenModel(BaseModel):

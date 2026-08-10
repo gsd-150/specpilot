@@ -328,7 +328,11 @@ def _render_user(payload: EgressPayload) -> str:
         else payload.evidence_excerpts
     )
     for excerpt in excerpts:
-        lines.append(f"Evidence {excerpt.content_hash[:12]}: {excerpt.quote}")
+        # The whole identifier, not a prefix. This is the handle the model is
+        # asked to cite back, and a truncated one is a handle it cannot use:
+        # the parser requires the full hash, so a twelve-character label made
+        # every citation malformed by construction.
+        lines.append(f"Evidence {excerpt.content_hash}: {excerpt.quote}")
     return "\n".join(lines)
 
 

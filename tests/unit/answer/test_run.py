@@ -8,6 +8,7 @@ against what this request disclosed rather than against the corpus.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -202,12 +203,19 @@ async def drive(source: Any, evidence: Any, adapter: FakeAdapter) -> Any:
     return outcome, ledger
 
 
-def reply(clause_ids: list[str], *, sufficient: bool = True) -> str:
+def reply(evidence_ids: list[str], *, sufficient: bool = True) -> str:
+    """Cites what the payload actually shows a model — the evidence id.
+
+    It used to cite `clause_id`, which no payload has ever printed. The tests
+    passed because the fake reply was written by someone who could see the
+    internal identifier, and the first real call failed on exactly that: a
+    double that knows more than the wire tests the double.
+    """
     return json.dumps(
         {
             "sufficient": sufficient,
             "answer": "It exists." if sufficient else None,
-            "citations": clause_ids,
+            "citations": evidence_ids,
         }
     )
 
@@ -217,8 +225,8 @@ async def test_the_budget_is_committed_before_anything_is_sent(
     source: Any, evidence: Any
 ) -> None:
     """A budget check after the bytes have left is a report, not a control."""
-    built, pairs = evidence
-    adapter = FakeAdapter(content=reply([pairs[0][0].clause_id]))
+    built, _ = evidence
+    adapter = FakeAdapter(content=reply([built[0].disclosed.content_hash]))
 
     _, ledger = await drive(source, evidence, adapter)
 
@@ -230,12 +238,14 @@ async def test_a_disclosed_clause_verifies_end_to_end(
     source: Any, evidence: Any
 ) -> None:
     built, pairs = evidence
-    adapter = FakeAdapter(content=reply([pairs[0][0].clause_id]))
+    adapter = FakeAdapter(content=reply([built[0].disclosed.content_hash]))
 
     outcome, _ = await drive(source, evidence, adapter)
 
     assert outcome.verified.verdict is AnswerVerdict.ANSWERED
     assert outcome.verified.answer == "It exists."
+    # Cited by evidence id, reported by clause id: the locator a reader needs
+    # comes out of the disclosure record, never out of the reply.
     assert [c.clause_id for c in outcome.verified.citations] == [
         pairs[0][0].clause_id
     ]
@@ -255,8 +265,8 @@ async def test_a_real_clause_that_was_not_sent_is_still_refused(
     # Disclose only the first clause; cite the second, which is real and was
     # never sent.
     only_first = (build_evidence_set(every[:1], corpus_manifest_id=CORPUS), every[:1])
-    unsent = every[1][0].clause_id
-    assert unsent not in {item.disclosed.clause_id for item in only_first[0]}
+    unsent = hashlib.sha256(every[1][1].encode("utf-8")).hexdigest()
+    assert unsent not in {item.disclosed.content_hash for item in only_first[0]}
     adapter = FakeAdapter(content=reply([unsent]))
 
     outcome, _ = await drive(source, only_first, adapter)
@@ -337,7 +347,7 @@ async def test_the_request_is_priced_at_the_evidence_stage(
 ) -> None:
     """Priced as JUDGE it would spend the allowance reserved for scoring."""
     manifest, _ = source
-    built, pairs = evidence
+    built, _ = evidence
     enforcer = FakeEnforcer()
 
     await run_answer(
@@ -345,7 +355,7 @@ async def test_the_request_is_priced_at_the_evidence_stage(
         built,
         enforcer=enforcer,
         ledger=FakeLedger(),
-        adapter=FakeAdapter(content=reply([pairs[0][0].clause_id])),
+        adapter=FakeAdapter(content=reply([built[0].disclosed.content_hash])),
         source_manifest=manifest,
         corpus_manifest_id=CORPUS,
         evaluation_root_id="slice-1",
