@@ -79,6 +79,51 @@ class ManifestStore:
         )
         return self._create(SourceManifest.from_draft(draft))
 
+    def create_successor_v2(
+        self,
+        predecessor: RfcSourceManifest,
+        *,
+        assessment: ComplianceAssessment,
+        route_binding: ProviderRouteBinding,
+        created_at: datetime,
+    ) -> RfcSourceManifest:
+        """Record the compliance decision that authorizes an RFC source to send.
+
+        The v1 twin of this existed from W0 and this one did not, which meant
+        the RFC corpus — the only corpus this project has — had no path by which
+        it could ever become authorized. §3.2 makes source manifests default-deny
+        and expresses authorization as a successor, so a missing successor path
+        is not a gap in convenience; it is the whole authorization mechanism
+        being absent for the family that actually holds the documents.
+
+        Deliberately a separate method rather than a widened `create_successor`.
+        The two draft types share no base class on purpose — §6.4's manifest IDs
+        are content hashes, and a shared base could reorder v1's fields and move
+        IDs that are already frozen and cited.
+        """
+        stored_predecessor = self.read_source(predecessor.manifest_id)
+        if stored_predecessor != predecessor:
+            raise ValueError("predecessor does not match the stored manifest")
+        if not isinstance(stored_predecessor, RfcSourceManifest):
+            raise ValueError("create_successor_v2 requires a v2 predecessor")
+
+        draft = RfcSourceManifestDraft(
+            schema_version=predecessor.schema_version,
+            document_id=predecessor.document_id,
+            document_version=predecessor.document_version,
+            text_url=predecessor.text_url,
+            xml_url=predecessor.xml_url,
+            text_sha256=predecessor.text_sha256,
+            xml_sha256=predecessor.xml_sha256,
+            downloaded_at=predecessor.downloaded_at,
+            created_at=created_at,
+            predecessor_manifest_id=predecessor.manifest_id,
+            cloud_egress_authorized=True,
+            compliance_assessment=assessment,
+            provider_route_binding=route_binding,
+        )
+        return self._create(RfcSourceManifest.from_draft(draft))
+
     def read_source(self, manifest_id: str) -> SourceManifest | RfcSourceManifest:
         self._validate_manifest_id(manifest_id)
         with SecureRecordDirectory.open(self._directory, create=False) as records:
