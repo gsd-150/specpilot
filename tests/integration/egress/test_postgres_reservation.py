@@ -69,8 +69,9 @@ async def dump_all_text(dsn: str) -> str:
 
 
 async def test_first_reservation_persists_both_scopes(clean_ledger: str) -> None:
+    request = reservation_for(distinct_excerpt(1))
     reservation = await ledger(clean_ledger).check_and_reserve(
-        reservation_for(distinct_excerpt(1)),
+        request,
         FixtureTokenCounter(),
         idempotency_key="evidence-1",
     )
@@ -81,6 +82,42 @@ async def test_first_reservation_persists_both_scopes(clean_ledger: str) -> None
     assert reservation.usage.root_transmitted_tokens == 2
     assert len(reservation.corpus_usage.disclosure_ids) == 1
     assert reservation.corpus_usage.unique_tokens == 2
+
+    import psycopg
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        row = await (
+            await connection.execute(
+                """
+                SELECT reservation.corpus_ledger_id,
+                       head.corpus_ledger_id,
+                       root.corpus_ledger_id,
+                       ledger.corpus_manifest_id,
+                       ledger.predecessor_ledger_id
+                FROM egress_reservation AS reservation
+                JOIN egress_corpus_ledger_head AS head
+                  ON head.corpus_manifest_id = reservation.corpus_manifest_id
+                JOIN egress_evaluation_root AS root
+                  ON root.evaluation_root_id = reservation.evaluation_root_id
+                JOIN egress_corpus_ledger AS ledger
+                  ON ledger.corpus_ledger_id = reservation.corpus_ledger_id
+                WHERE reservation.reservation_id = %s
+                """,
+                (reservation.reservation_id,),
+            )
+        ).fetchone()
+
+    assert row is not None
+    (
+        reservation_ledger_id,
+        head_ledger_id,
+        root_ledger_id,
+        ledger_corpus_manifest_id,
+        predecessor_ledger_id,
+    ) = row
+    assert reservation_ledger_id == head_ledger_id == root_ledger_id
+    assert ledger_corpus_manifest_id == request.version.corpus_manifest_id
+    assert predecessor_ledger_id is None
 
 
 async def test_ledger_stores_no_query_claim_or_excerpt_text(

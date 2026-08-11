@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -31,13 +32,19 @@ from specpilot.egress.ledger import (
 from specpilot.egress.policy import EgressPolicy
 
 
+@dataclass(frozen=True)
+class _LockedCorpus:
+    corpus_ledger_id: str
+    usage: CorpusUsage | None
+
+
 class PostgresEgressLedger:
     """Durable, atomic check-and-reserve over the pure enforcer.
 
-    The transaction locks the corpus row and then the evaluation-root row --
-    always in that order, because every reservation touches both and a fixed
-    order is what prevents deadlock -- re-runs the enforcer against the stored
-    state, and writes both scopes back before committing.
+    The transaction locks the corpus head, then its active epoch, and then the
+    evaluation-root row -- always in that order, because every reservation
+    touches all three and a fixed order is what prevents deadlock -- re-runs the
+    enforcer against the stored state, and writes both scopes before committing.
 
     Cap arithmetic is never reimplemented here. A second implementation would be
     free to drift from the enforcer, and drift in this direction is a silently
@@ -188,8 +195,14 @@ class PostgresEgressLedger:
         # reservation" and then race to insert it; only one can win the unique
         # constraint and the rest fail for a reason that has nothing to do with
         # their budget. Holding both locks makes the lookup authoritative.
-        corpus_usage = await _lock_corpus(connection, corpus_manifest_id, policy_hash)
-        usage = await _lock_root(connection, request, policy_hash, corpus_manifest_id)
+        locked_corpus = await _lock_corpus(connection, corpus_manifest_id, policy_hash)
+        usage = await _lock_root(
+            connection,
+            request,
+            policy_hash,
+            corpus_manifest_id,
+            locked_corpus.corpus_ledger_id,
+        )
 
         await _require_unsealed(connection, request)
 
@@ -198,17 +211,24 @@ class PostgresEgressLedger:
             return replay
 
         outcome = self._enforcer.apply_reservation(
-            usage, corpus_usage, request, counter
+            usage, locked_corpus.usage, request, counter
         )
 
         reservation_id = str(uuid.uuid4())
-        await _write_scopes(connection, request, outcome, corpus_manifest_id)
+        await _write_scopes(
+            connection,
+            request,
+            outcome,
+            corpus_manifest_id,
+            locked_corpus.corpus_ledger_id,
+        )
         await _write_reservation(
             connection,
             reservation_id,
             request,
             policy_hash,
             corpus_manifest_id,
+            locked_corpus.corpus_ledger_id,
             idempotency_key,
         )
         return Reservation(
@@ -257,28 +277,58 @@ async def _lock_corpus(
     connection: psycopg.AsyncConnection[Any],
     corpus_manifest_id: str,
     policy_hash: str,
-) -> CorpusUsage | None:
-    """Take the outermost lock first. Every reservation passes through here."""
+) -> _LockedCorpus:
+    """Lock the corpus head, then its active epoch, before the root lock."""
     await connection.execute(
         """
-        INSERT INTO egress_corpus_ledger (
-            corpus_manifest_id, policy_hash, corpus_usage,
-            unique_excerpts, unique_tokens, unique_bytes
-        ) VALUES (%s, %s, %s, 0, 0, 0)
+        INSERT INTO egress_corpus_ledger_head (
+            corpus_manifest_id, corpus_ledger_id
+        ) VALUES (%s, NULL)
         ON CONFLICT (corpus_manifest_id) DO NOTHING
         """,
-        (corpus_manifest_id, policy_hash, "null"),
+        (corpus_manifest_id,),
     )
-    row = await (
+    head = await (
         await connection.execute(
-            "SELECT corpus_usage FROM egress_corpus_ledger "
+            "SELECT corpus_ledger_id FROM egress_corpus_ledger_head "
             "WHERE corpus_manifest_id = %s FOR UPDATE",
             (corpus_manifest_id,),
         )
     ).fetchone()
-    if row is None or row[0] is None:
-        return None
-    return CorpusUsage.model_validate(row[0])
+    if head is None:
+        raise LedgerUnavailable("corpus ledger head disappeared while locked")
+
+    corpus_ledger_id = str(uuid.uuid4()) if head[0] is None else str(head[0])
+    if head[0] is None:
+        await connection.execute(
+            """
+            INSERT INTO egress_corpus_ledger (
+                corpus_ledger_id, corpus_manifest_id, policy_hash, corpus_usage,
+                unique_excerpts, unique_tokens, unique_bytes
+            ) VALUES (%s, %s, %s, %s, 0, 0, 0)
+            """,
+            (corpus_ledger_id, corpus_manifest_id, policy_hash, "null"),
+        )
+        await connection.execute(
+            """
+            UPDATE egress_corpus_ledger_head
+            SET corpus_ledger_id = %s, updated_at = now()
+            WHERE corpus_manifest_id = %s
+            """,
+            (corpus_ledger_id, corpus_manifest_id),
+        )
+
+    epoch = await (
+        await connection.execute(
+            "SELECT corpus_usage FROM egress_corpus_ledger "
+            "WHERE corpus_ledger_id = %s FOR UPDATE",
+            (corpus_ledger_id,),
+        )
+    ).fetchone()
+    if epoch is None:
+        raise LedgerUnavailable("active corpus ledger epoch is unavailable")
+    usage = None if epoch[0] is None else CorpusUsage.model_validate(epoch[0])
+    return _LockedCorpus(corpus_ledger_id=corpus_ledger_id, usage=usage)
 
 
 async def _lock_root(
@@ -286,13 +336,14 @@ async def _lock_root(
     request: ReservationRequest,
     policy_hash: str,
     corpus_manifest_id: str,
+    corpus_ledger_id: str,
 ) -> UsageSnapshot | None:
     await connection.execute(
         """
         INSERT INTO egress_evaluation_root (
             evaluation_root_id, policy_hash, task_level,
-            corpus_manifest_id, usage_snapshot
-        ) VALUES (%s, %s, %s, %s, %s)
+            corpus_manifest_id, corpus_ledger_id, usage_snapshot
+        ) VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (evaluation_root_id) DO NOTHING
         """,
         (
@@ -300,17 +351,25 @@ async def _lock_root(
             policy_hash,
             request.task_level.value,
             corpus_manifest_id,
+            corpus_ledger_id,
             "null",
         ),
     )
     row = await (
         await connection.execute(
-            "SELECT usage_snapshot FROM egress_evaluation_root "
+            "SELECT usage_snapshot, corpus_ledger_id FROM egress_evaluation_root "
             "WHERE evaluation_root_id = %s FOR UPDATE",
             (request.evaluation_root_id,),
         )
     ).fetchone()
-    if row is None or row[0] is None:
+    if row is None:
+        return None
+    if str(row[1]) != corpus_ledger_id:
+        raise EgressPolicyViolation(
+            "policy_snapshot_mismatch",
+            "evaluation root belongs to another corpus ledger epoch",
+        )
+    if row[0] is None:
         return None
     return UsageSnapshot.model_validate(row[0])
 
@@ -320,6 +379,7 @@ async def _write_scopes(
     request: ReservationRequest,
     outcome: ReservationOutcome,
     corpus_manifest_id: str,
+    corpus_ledger_id: str,
 ) -> None:
     corpus_usage = outcome.corpus_usage
     usage = outcome.usage
@@ -328,14 +388,14 @@ async def _write_scopes(
         UPDATE egress_corpus_ledger
         SET corpus_usage = %s, unique_excerpts = %s, unique_tokens = %s,
             unique_bytes = %s, updated_at = now()
-        WHERE corpus_manifest_id = %s
+        WHERE corpus_ledger_id = %s
         """,
         (
             corpus_usage.model_dump_json(),
             len(corpus_usage.disclosure_ids),
             corpus_usage.unique_tokens,
             corpus_usage.unique_bytes,
-            corpus_manifest_id,
+            corpus_ledger_id,
         ),
     )
     await connection.execute(
@@ -366,15 +426,16 @@ async def _write_reservation(
     request: ReservationRequest,
     policy_hash: str,
     corpus_manifest_id: str,
+    corpus_ledger_id: str,
     idempotency_key: str,
 ) -> None:
     await connection.execute(
         """
         INSERT INTO egress_reservation (
             reservation_id, idempotency_key, evaluation_root_id, run_id,
-            policy_hash, corpus_manifest_id, stage, provider_id,
+            policy_hash, corpus_manifest_id, corpus_ledger_id, stage, provider_id,
             endpoint_purpose, provider_use, model_id, state
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             reservation_id,
@@ -383,6 +444,7 @@ async def _write_reservation(
             request.run_id,
             policy_hash,
             corpus_manifest_id,
+            corpus_ledger_id,
             request.stage.value,
             request.route.provider_id,
             request.route.endpoint_purpose,
@@ -422,7 +484,7 @@ async def _find_replay(
             JOIN egress_evaluation_root e
               ON e.evaluation_root_id = r.evaluation_root_id
             JOIN egress_corpus_ledger c
-              ON c.corpus_manifest_id = r.corpus_manifest_id
+              ON c.corpus_ledger_id = r.corpus_ledger_id
             WHERE r.evaluation_root_id = %s AND r.run_id = %s
               AND r.policy_hash = %s AND r.idempotency_key = %s
             """,

@@ -14,6 +14,7 @@ _TABLES = (
     "egress_reservation_disclosure",
     "egress_reservation",
     "egress_evaluation_root",
+    "egress_corpus_ledger_head",
     "egress_corpus_ledger",
     "egress_policy_snapshot",
 )
