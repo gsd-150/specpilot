@@ -366,6 +366,50 @@ async def test_identical_rebind_retry_returns_the_same_successor(
 
 
 @pytest.mark.anyio
+async def test_retry_after_successor_usage_reports_original_inherited_totals(
+    clean_ledger: str,
+) -> None:
+    old_policy = fixture_policy()
+    new_policy = old_policy.model_copy(update={"toc_per_run": 25})
+    first_request = reservation_for(distinct_excerpt(1))
+    second_request = reservation_for(distinct_excerpt(2)).model_copy(
+        update={"evaluation_root_id": "retry-case-2", "run_id": "retry-run-2"}
+    )
+    await _ledger(clean_ledger, old_policy).check_and_reserve(
+        first_request,
+        FixtureTokenCounter(),
+        idempotency_key="retry-after-usage-seed",
+    )
+    book = _ledger(clean_ledger, new_policy)
+    first = await book.rebind_policy(
+        first_request.version.corpus_manifest_id,
+        expected_policy_hash=old_policy.policy_hash,
+    )
+    successor_reservation = await book.check_and_reserve(
+        second_request,
+        FixtureTokenCounter(),
+        idempotency_key="retry-after-usage-successor",
+    )
+
+    retry = await book.rebind_policy(
+        first_request.version.corpus_manifest_id,
+        expected_policy_hash=old_policy.policy_hash,
+    )
+
+    assert len(successor_reservation.corpus_usage.disclosure_ids) == 2
+    assert (
+        first.inherited_unique_excerpts,
+        first.inherited_unique_tokens,
+        first.inherited_unique_bytes,
+    ) == (1, 2, 16)
+    assert (
+        retry.inherited_unique_excerpts,
+        retry.inherited_unique_tokens,
+        retry.inherited_unique_bytes,
+    ) == (1, 2, 16)
+
+
+@pytest.mark.anyio
 async def test_rebind_to_the_active_policy_returns_the_active_epoch_unchanged(
     clean_ledger: str,
 ) -> None:

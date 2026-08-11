@@ -354,12 +354,19 @@ async def _rebind_policy(
             raise PolicyRebindConflict()
         predecessor = await (
             await connection.execute(
-                "SELECT policy_hash FROM egress_corpus_ledger "
+                "SELECT policy_hash, corpus_usage FROM egress_corpus_ledger "
                 "WHERE corpus_ledger_id = %s AND corpus_manifest_id = %s",
                 (predecessor_ledger_id, corpus_manifest_id),
             )
         ).fetchone()
-        if predecessor is None or str(predecessor[0]) != expected_policy_hash:
+        if predecessor is None or predecessor[1] is None:
+            raise PolicyRebindConflict()
+        predecessor_usage = CorpusUsage.model_validate(predecessor[1])
+        if (
+            str(predecessor[0]) != expected_policy_hash
+            or predecessor_usage.policy_hash != expected_policy_hash
+            or predecessor_usage.corpus_manifest_id != corpus_manifest_id
+        ):
             raise PolicyRebindConflict()
         return _policy_rebind_result(
             corpus_manifest_id,
@@ -367,7 +374,7 @@ async def _rebind_policy(
             successor_ledger_id=active_ledger_id,
             old_policy_hash=expected_policy_hash,
             new_policy_hash=active_policy_hash,
-            usage=active_usage,
+            usage=predecessor_usage,
             rebound=False,
         )
 
