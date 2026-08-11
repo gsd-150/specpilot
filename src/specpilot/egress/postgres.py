@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import tuple_row
+from pydantic import ValidationError
 
 from specpilot.contracts.egress import (
     CorpusUsage,
@@ -22,6 +23,7 @@ from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolatio
 from specpilot.egress.ledger import (
     Attempt,
     AttemptOutcome,
+    LedgerIntegrityError,
     LedgerUnavailable,
     PolicyRebindAmbiguous,
     PolicyRebindConflict,
@@ -103,6 +105,7 @@ class PostgresEgressLedger:
         self,
         corpus_manifest_id: str,
         *,
+        expected_ledger_id: str,
         expected_policy_hash: str,
     ) -> PolicyRebindResult:
         connection = await self._connect()
@@ -112,6 +115,7 @@ class PostgresEgressLedger:
                 return await _rebind_policy(
                     connection,
                     corpus_manifest_id,
+                    expected_ledger_id=expected_ledger_id,
                     expected_policy_hash=expected_policy_hash,
                     new_policy_hash=self._policy.policy_hash,
                 )
@@ -233,7 +237,15 @@ class PostgresEgressLedger:
 
         await _require_unsealed(connection, request)
 
-        replay = await _find_replay(connection, request, policy_hash, idempotency_key)
+        replay = await _find_replay(
+            connection,
+            request,
+            policy_hash,
+            idempotency_key,
+            corpus_ledger_id=locked_corpus.corpus_ledger_id,
+            usage=usage,
+            corpus_usage=locked_corpus.usage,
+        )
         if replay is not None:
             return replay
 
@@ -304,6 +316,7 @@ async def _rebind_policy(
     connection: psycopg.AsyncConnection[Any],
     corpus_manifest_id: str,
     *,
+    expected_ledger_id: str,
     expected_policy_hash: str,
     new_policy_hash: str,
 ) -> PolicyRebindResult:
@@ -326,19 +339,23 @@ async def _rebind_policy(
     active_ledger_id = str(head[0])
     active = await (
         await connection.execute(
-            "SELECT policy_hash, corpus_usage, predecessor_ledger_id "
+            "SELECT corpus_manifest_id, policy_hash, corpus_usage, "
+            "unique_excerpts, unique_tokens, unique_bytes, predecessor_ledger_id "
             "FROM egress_corpus_ledger WHERE corpus_ledger_id = %s FOR UPDATE",
             (active_ledger_id,),
         )
     ).fetchone()
-    if active is None or active[1] is None:
+    if active is None:
         raise PolicyRebindConflict()
 
-    active_policy_hash = str(active[0])
-    active_usage = CorpusUsage.model_validate(active[1])
-    predecessor_ledger_id = None if active[2] is None else str(active[2])
+    active_policy_hash = str(active[1])
+    active_usage = _reconciled_corpus_usage(corpus_manifest_id, active[:6])
+    predecessor_ledger_id = None if active[6] is None else str(active[6])
 
-    if active_policy_hash == expected_policy_hash == new_policy_hash:
+    if (
+        active_ledger_id == expected_ledger_id
+        and active_policy_hash == expected_policy_hash == new_policy_hash
+    ):
         return _policy_rebind_result(
             corpus_manifest_id,
             predecessor_ledger_id=active_ledger_id,
@@ -349,34 +366,40 @@ async def _rebind_policy(
             rebound=False,
         )
 
-    if active_policy_hash != expected_policy_hash:
-        if active_policy_hash != new_policy_hash or predecessor_ledger_id is None:
+    if active_ledger_id != expected_ledger_id:
+        if (
+            active_policy_hash != new_policy_hash
+            or predecessor_ledger_id != expected_ledger_id
+        ):
             raise PolicyRebindConflict()
         predecessor = await (
             await connection.execute(
-                "SELECT policy_hash, corpus_usage FROM egress_corpus_ledger "
+                "SELECT corpus_manifest_id, policy_hash, corpus_usage, "
+                "unique_excerpts, unique_tokens, unique_bytes "
+                "FROM egress_corpus_ledger "
                 "WHERE corpus_ledger_id = %s AND corpus_manifest_id = %s",
-                (predecessor_ledger_id, corpus_manifest_id),
+                (expected_ledger_id, corpus_manifest_id),
             )
         ).fetchone()
-        if predecessor is None or predecessor[1] is None:
+        if predecessor is None:
             raise PolicyRebindConflict()
-        predecessor_usage = CorpusUsage.model_validate(predecessor[1])
-        if (
-            str(predecessor[0]) != expected_policy_hash
-            or predecessor_usage.policy_hash != expected_policy_hash
-            or predecessor_usage.corpus_manifest_id != corpus_manifest_id
-        ):
+        predecessor_usage = _reconciled_corpus_usage(
+            corpus_manifest_id, predecessor
+        )
+        if predecessor_usage.policy_hash != expected_policy_hash:
             raise PolicyRebindConflict()
         return _policy_rebind_result(
             corpus_manifest_id,
-            predecessor_ledger_id=predecessor_ledger_id,
+            predecessor_ledger_id=expected_ledger_id,
             successor_ledger_id=active_ledger_id,
             old_policy_hash=expected_policy_hash,
             new_policy_hash=active_policy_hash,
             usage=predecessor_usage,
             rebound=False,
         )
+
+    if active_policy_hash != expected_policy_hash:
+        raise PolicyRebindConflict()
 
     successor_usage = successor_corpus_usage(active_usage, new_policy_hash)
     successor_ledger_id = str(uuid.uuid4())
@@ -440,6 +463,41 @@ def _policy_rebind_result(
     )
 
 
+def _reconciled_corpus_usage(
+    requested_corpus_manifest_id: str,
+    row: tuple[Any, ...],
+) -> CorpusUsage:
+    """Validate the JSON snapshot against every normalized ledger column.
+
+    The normalized columns are independently useful for operations and reports,
+    while the JSON model drives cap arithmetic. Treating either representation
+    as authoritative when they disagree could silently raise a cap, so every
+    consumer refuses with one public code and no validation details.
+    """
+    (
+        row_corpus_manifest_id,
+        row_policy_hash,
+        raw_usage,
+        row_unique_excerpts,
+        row_unique_tokens,
+        row_unique_bytes,
+    ) = row
+    try:
+        usage = CorpusUsage.model_validate(raw_usage)
+    except (ValidationError, TypeError, ValueError):
+        raise LedgerIntegrityError() from None
+    if (
+        str(row_corpus_manifest_id) != requested_corpus_manifest_id
+        or usage.corpus_manifest_id != requested_corpus_manifest_id
+        or str(row_policy_hash) != usage.policy_hash
+        or row_unique_excerpts != len(usage.disclosure_ids)
+        or row_unique_tokens != usage.unique_tokens
+        or row_unique_bytes != usage.unique_bytes
+    ):
+        raise LedgerIntegrityError()
+    return usage
+
+
 async def _lock_corpus(
     connection: psycopg.AsyncConnection[Any],
     corpus_manifest_id: str,
@@ -467,6 +525,10 @@ async def _lock_corpus(
 
     corpus_ledger_id = str(uuid.uuid4()) if head[0] is None else str(head[0])
     if head[0] is None:
+        empty_usage = CorpusUsage(
+            corpus_manifest_id=corpus_manifest_id,
+            policy_hash=policy_hash,
+        )
         await connection.execute(
             """
             INSERT INTO egress_corpus_ledger (
@@ -474,7 +536,12 @@ async def _lock_corpus(
                 unique_excerpts, unique_tokens, unique_bytes
             ) VALUES (%s, %s, %s, %s, 0, 0, 0)
             """,
-            (corpus_ledger_id, corpus_manifest_id, policy_hash, "null"),
+            (
+                corpus_ledger_id,
+                corpus_manifest_id,
+                policy_hash,
+                empty_usage.model_dump_json(),
+            ),
         )
         await connection.execute(
             """
@@ -487,14 +554,16 @@ async def _lock_corpus(
 
     epoch = await (
         await connection.execute(
-            "SELECT corpus_usage FROM egress_corpus_ledger "
+            "SELECT corpus_manifest_id, policy_hash, corpus_usage, "
+            "unique_excerpts, unique_tokens, unique_bytes "
+            "FROM egress_corpus_ledger "
             "WHERE corpus_ledger_id = %s FOR UPDATE",
             (corpus_ledger_id,),
         )
     ).fetchone()
     if epoch is None:
         raise LedgerUnavailable("active corpus ledger epoch is unavailable")
-    usage = None if epoch[0] is None else CorpusUsage.model_validate(epoch[0])
+    usage = _reconciled_corpus_usage(corpus_manifest_id, epoch)
     return _LockedCorpus(corpus_ledger_id=corpus_ledger_id, usage=usage)
 
 
@@ -637,6 +706,10 @@ async def _find_replay(
     request: ReservationRequest,
     policy_hash: str,
     idempotency_key: str,
+    *,
+    corpus_ledger_id: str,
+    usage: UsageSnapshot | None,
+    corpus_usage: CorpusUsage | None,
 ) -> Reservation | None:
     """Return the stored reservation for a repeated key, without re-applying caps.
 
@@ -646,12 +719,9 @@ async def _find_replay(
     row = await (
         await connection.execute(
             """
-            SELECT r.reservation_id, r.state, e.usage_snapshot, c.corpus_usage
+            SELECT r.reservation_id, r.state, r.corpus_manifest_id,
+                   r.corpus_ledger_id
             FROM egress_reservation r
-            JOIN egress_evaluation_root e
-              ON e.evaluation_root_id = r.evaluation_root_id
-            JOIN egress_corpus_ledger c
-              ON c.corpus_ledger_id = r.corpus_ledger_id
             WHERE r.evaluation_root_id = %s AND r.run_id = %s
               AND r.policy_hash = %s AND r.idempotency_key = %s
             """,
@@ -665,7 +735,14 @@ async def _find_replay(
     ).fetchone()
     if row is None:
         return None
-    reservation_id, state, usage_snapshot, corpus_usage = row
+    reservation_id, state, stored_corpus_manifest_id, stored_corpus_ledger_id = row
+    if (
+        str(stored_corpus_manifest_id) != request.version.corpus_manifest_id
+        or str(stored_corpus_ledger_id) != corpus_ledger_id
+        or usage is None
+        or corpus_usage is None
+    ):
+        raise LedgerIntegrityError()
     return Reservation(
         reservation_id=str(reservation_id),
         idempotency_key=idempotency_key,
@@ -675,8 +752,8 @@ async def _find_replay(
         corpus_manifest_id=request.version.corpus_manifest_id,
         route=request.route,
         state=ReservationState(state),
-        usage=UsageSnapshot.model_validate(usage_snapshot),
-        corpus_usage=CorpusUsage.model_validate(corpus_usage),
+        usage=usage,
+        corpus_usage=corpus_usage,
         replayed=True,
     )
 

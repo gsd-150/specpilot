@@ -32,15 +32,13 @@ ALTER TABLE egress_corpus_ledger
 
 ALTER TABLE egress_corpus_ledger
     ADD CONSTRAINT egress_corpus_ledger_pkey PRIMARY KEY (corpus_ledger_id),
-    ADD CONSTRAINT egress_corpus_ledger_corpus_policy_key
-        UNIQUE (corpus_manifest_id, policy_hash),
     ADD CONSTRAINT egress_corpus_ledger_corpus_epoch_key
         UNIQUE (corpus_manifest_id, corpus_ledger_id),
     ADD CONSTRAINT egress_corpus_ledger_predecessor_key
         UNIQUE (predecessor_ledger_id),
     ADD CONSTRAINT egress_corpus_ledger_predecessor_fkey
-        FOREIGN KEY (predecessor_ledger_id)
-        REFERENCES egress_corpus_ledger (corpus_ledger_id);
+        FOREIGN KEY (corpus_manifest_id, predecessor_ledger_id)
+        REFERENCES egress_corpus_ledger (corpus_manifest_id, corpus_ledger_id);
 
 CREATE TABLE egress_corpus_ledger_head (
     corpus_manifest_id text PRIMARY KEY

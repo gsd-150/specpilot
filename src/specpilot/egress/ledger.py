@@ -38,6 +38,13 @@ class LedgerUnavailable(LedgerError):
         super().__init__(code, message)
 
 
+class LedgerIntegrityError(LedgerError):
+    """Persisted ledger representations disagree, so no state can be trusted."""
+
+    def __init__(self, message: str = "egress ledger integrity check failed") -> None:
+        super().__init__("ledger_integrity_error", message)
+
+
 class ReservationAmbiguous(LedgerError):
     """A reservation's committed state is unknown, so it must be treated as spent.
 
