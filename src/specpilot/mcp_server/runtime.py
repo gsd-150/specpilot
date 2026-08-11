@@ -30,11 +30,21 @@ from specpilot.retrieval.bm25 import TOKENIZER_VERSION, Bm25Index, Bm25Parameter
 from specpilot.retrieval.local import LocalCorpus
 from specpilot.retrieval.protocol import locator_for_unit
 
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+LOOPBACK_HOSTS = (
+    "127.0.0.1",
+    "localhost",
+    "[::1]",
+    "127.0.0.1:8080",
+    "localhost:8080",
+    "[::1]:8080",
+)
 LOOPBACK_ORIGINS = (
     "http://127.0.0.1",
     "http://localhost",
     "http://[::1]",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "http://[::1]:8080",
 )
 _ExactIdentity = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 

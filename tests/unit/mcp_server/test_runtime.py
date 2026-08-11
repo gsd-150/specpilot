@@ -5,6 +5,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 from uvicorn.importer import import_from_string
 
@@ -17,6 +19,7 @@ from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
 from specpilot.mcp_server.app import create_runtime_app
+from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.runtime import _RuntimeBm25SearchBackend, load_runtime_config
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.local import LocalCorpus
@@ -127,7 +130,8 @@ def test_runtime_search_backend_never_returns_an_unrequested_document(
     assert {hit.locator.document_id for hit in hits} == {"ietf-rfc-9999"}
 
 
-def test_runtime_factory_builds_services_from_verified_frozen_artifacts(
+@pytest.mark.anyio
+async def test_runtime_factory_builds_services_and_serves_real_mcp_protocol(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -186,14 +190,36 @@ def test_runtime_factory_builds_services_from_verified_frozen_artifacts(
     )
 
     app = create_runtime_app()
-    with TestClient(app, base_url="http://127.0.0.1") as client:
-        health = client.get("/health")
-        mcp_route = client.post(
-            "/mcp",
-            headers={"content-type": "application/json"},
-            json={},
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as http_client,
+        StreamableMcpClient(
+            "http://127.0.0.1:8080/mcp", http_client=http_client
+        ) as mcp_client,
+    ):
+        health = await http_client.get("/health")
+        listed = await mcp_client.list_tools()
+        result = await mcp_client.call_tool(
+            "get_toc",
+            {
+                "corpus_manifest_id": corpus_manifest.manifest_id,
+                "document_id": "ietf-rfc-9999",
+                "limit": 2,
+            },
         )
 
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
-    assert mcp_route.status_code != 404
+    assert {tool.name for tool in listed.tools} == {
+        "search_clauses",
+        "get_clause",
+        "get_toc",
+        "expand_references",
+        "lookup_term",
+    }
+    assert result.isError is False
+    assert result.structuredContent is not None
+    assert 1 <= len(result.structuredContent["nodes"]) <= 2

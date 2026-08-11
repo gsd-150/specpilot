@@ -29,11 +29,21 @@ from specpilot.mcp_server.contracts import (
 )
 from specpilot.mcp_server.services import McpToolServices
 
-_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_LOOPBACK_HOSTS = (
+    "127.0.0.1",
+    "localhost",
+    "[::1]",
+    "127.0.0.1:8080",
+    "localhost:8080",
+    "[::1]:8080",
+)
 _LOOPBACK_ORIGINS = (
     "http://127.0.0.1",
     "http://localhost",
     "http://[::1]",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "http://[::1]:8080",
 )
 TOOL_NAMES = frozenset(
     {"search_clauses", "get_clause", "get_toc", "expand_references", "lookup_term"}
@@ -100,6 +110,9 @@ class _ValidatedTool(Tool):
 
         try:
             result = await self.fn(request)
+            if convert_result:
+                return self.fn_metadata.convert_result(result)
+            return result
         except McpToolError as error:
             raise ToolError(str(error)) from error
         except Exception:
@@ -109,10 +122,6 @@ class _ValidatedTool(Tool):
                 "Retry after the local tool service is available.",
             )
             raise ToolError(str(public_error)) from public_error
-
-        if convert_result:
-            return self.fn_metadata.convert_result(result)
-        return result
 
 
 def _validated_tool(

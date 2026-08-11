@@ -57,12 +57,39 @@ async def test_server_registers_the_five_typed_read_only_tools() -> None:
         "127.0.0.1",
         "localhost",
         "[::1]",
+        "127.0.0.1:8080",
+        "localhost:8080",
+        "[::1]:8080",
     ]
     assert server.settings.transport_security.allowed_origins == [
         "http://127.0.0.1",
         "http://localhost",
         "http://[::1]",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://[::1]:8080",
     ]
+
+
+@pytest.mark.parametrize(
+    "host",
+    ("127.0.0.1:8080", "localhost:8080", "[::1]:8080"),
+)
+def test_default_deployed_loopback_identities_are_exactly_allowed(
+    host: str,
+) -> None:
+    services = cast(McpToolServices, Mock(spec=McpToolServices))
+
+    with TestClient(
+        create_app(services), base_url="http://127.0.0.1:8080"
+    ) as client:
+        accepted = client.post(
+            "/mcp",
+            headers={"host": host, "content-type": "application/json"},
+            json={},
+        )
+
+    assert accepted.status_code != 421
 
 
 def test_explicit_compose_identity_is_accepted_without_weakening_defaults() -> None:

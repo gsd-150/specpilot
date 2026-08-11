@@ -331,6 +331,235 @@ async def test_malformed_envelope_and_unexpected_tool_errors_never_reach_logs(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("body", "forbidden_values"),
+    [
+        (
+            b'{"jsonrpc":"2.0", bad-secret-invalid-json '
+            b'/private/invalid-json-path',
+            ("bad-secret-invalid-json", "/private/invalid-json-path"),
+        ),
+        (
+            b'[{"jsonrpc":"2.0","id":1,"method":"tools/list",'
+            b'"params":{"value":"secret-batch /private/batch-path"}}]',
+            ("secret-batch", "/private/batch-path"),
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":2,"method":"secret/unknown",'
+            b'"params":{"path":"/private/unknown-path"}}',
+            ("secret/unknown", "/private/unknown-path"),
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":22,"method":'
+            b'{"secret":"secret-method /private/method-path"},"params":{}}',
+            ("secret-method", "/private/method-path"),
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":3,"method":"tools/list",'
+            b'"params":["secret-list-params /private/list-path"]}',
+            ("secret-list-params", "/private/list-path"),
+        ),
+        (
+            b'{"jsonrpc":"2.0","method":"notifications/initialized",'
+            b'"params":["secret-notification /private/note-path"]}',
+            ("secret-notification", "/private/note-path"),
+        ),
+    ],
+)
+async def test_every_invalid_jsonrpc_envelope_is_sanitized_before_sdk_logging(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+    forbidden_values: tuple[str, ...],
+) -> None:
+    app = create_app(_fixture_services(tmp_path))
+    caplog.set_level(logging.DEBUG)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+    ):
+        response = await client.post(
+            "/mcp",
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            content=body,
+    )
+
+    assert response.status_code == 400
+    for forbidden in forbidden_values:
+        assert forbidden not in response.text
+        assert forbidden not in caplog.text
+    assert "validation error" not in response.text.lower()
+    assert "validation error" not in caplog.text.lower()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_unknown_tool_echoes_string_id_but_rejects_null_and_boolean_ids(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_fixture_services(tmp_path))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+    ):
+        responses = []
+        for request_id in ("request-7", None, True):
+            responses.append(
+                await client.post(
+                    "/mcp",
+                    headers={
+                        "accept": "application/json, text/event-stream",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/call",
+                        "params": {"name": "missing", "arguments": {}},
+                    },
+                )
+            )
+
+    assert responses[0].status_code == 200
+    assert responses[0].json()["id"] == "request-7"
+    assert [response.status_code for response in responses[1:]] == [400, 400]
+    assert all(response.json()["id"] is None for response in responses[1:])
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_malformed_tool_result_conversion_is_closed_and_sanitized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = Mock(spec=McpToolServices)
+    services.get_toc.return_value = {
+        "nodes": [{"secret": "secret-result /private/result-path"}]
+    }
+    caplog.set_level(logging.DEBUG)
+
+    async with _mcp_asgi_client(cast(McpToolServices, services)) as client:
+        result = await client.call_tool(
+            "get_toc",
+            {
+                "corpus_manifest_id": FIXTURE_CORPUS_ID,
+                "document_id": FIXTURE_DOCUMENT_ID,
+                "limit": 2,
+            },
+        )
+
+    result_text = result.content[0].text
+    assert result.isError is True
+    assert '"code":"backend_unavailable"' in result_text
+    assert "secret-result" not in result_text
+    assert "/private/result-path" not in result_text
+    assert "secret-result" not in caplog.text
+    assert "/private/result-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_body_limit_stops_receiving_before_oversized_body_is_buffered(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(_fixture_services(tmp_path))
+    chunks = [b"x" * (1024 * 1024) for _ in range(5)]
+    chunks.append(b"secret-unread-tail /private/unread-tail")
+    received = 0
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal received
+        chunk = chunks[received]
+        received += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": received < len(chunks),
+        }
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    caplog.set_level(logging.DEBUG)
+    async with app.router.lifespan_context(app):
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/mcp",
+                "raw_path": b"/mcp",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"127.0.0.1"),
+                    (b"content-type", b"application/json"),
+                    (b"accept", b"application/json, text/event-stream"),
+                ],
+                "client": ("127.0.0.1", 1234),
+                "server": ("127.0.0.1", 8080),
+            },
+            receive,
+            send,
+        )
+
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    wire = b"".join(
+        cast(bytes, message.get("body", b""))
+        for message in sent
+        if message["type"] == "http.response.body"
+    ).decode()
+    assert start["status"] == 413
+    assert received == 5
+    assert "secret-unread-tail" not in wire
+    assert "/private/unread-tail" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_normal_chunked_jsonrpc_request_remains_supported(tmp_path: Path) -> None:
+    app = create_app(_fixture_services(tmp_path))
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b'{"jsonrpc":"2.0","id":"chunked-1","method":"tools/list",'
+        yield b'"params":{}}'
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+    ):
+        response = await client.post(
+            "/mcp",
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            content=chunks(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "chunked-1"
+    assert len(response.json()["result"]["tools"]) == 5
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_streamable_client_rejects_overlapping_context_entry(
     tmp_path: Path,
 ) -> None:
