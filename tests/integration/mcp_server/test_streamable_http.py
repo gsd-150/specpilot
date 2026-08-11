@@ -10,12 +10,13 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
 from specpilot.corpus.tool_metadata import build_rfc_tool_metadata
 from specpilot.ingestion.rfc import load_verified_rfc
-from specpilot.mcp_server.app import create_app
+from specpilot.mcp_server.app import _SanitizedJsonRpcBoundary, create_app
 from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.services import McpToolServices, SearchBackendHit
 from specpilot.retrieval.bm25 import Bm25Index
@@ -88,6 +89,24 @@ async def _mcp_asgi_client(
         ) as client,
     ):
         yield client
+
+
+async def _raw_protocol_request(app: FastAPI, body: bytes) -> httpx.Response:
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+    ):
+        return await client.post(
+            "/mcp",
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            content=body,
+        )
 
 
 @pytest.mark.integration
@@ -298,7 +317,9 @@ async def test_malformed_envelope_and_unexpected_tool_errors_never_reach_logs(
             },
         )
 
-    assert malformed.status_code == 400
+    assert malformed.status_code == 200
+    assert malformed.json()["id"] == 9
+    assert malformed.json()["error"]["code"] == -32602
     assert "secret-envelope-name" not in malformed.text
     assert "/private/secret-envelope-path" not in malformed.text
     assert "secret-envelope-name" not in caplog.text
@@ -331,49 +352,200 @@ async def test_malformed_envelope_and_unexpected_tool_errors_never_reach_logs(
 
 @pytest.mark.integration
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("body", "forbidden_values"),
-    [
-        (
-            b'{"jsonrpc":"2.0", bad-secret-invalid-json '
-            b'/private/invalid-json-path',
-            ("bad-secret-invalid-json", "/private/invalid-json-path"),
-        ),
-        (
-            b'[{"jsonrpc":"2.0","id":1,"method":"tools/list",'
-            b'"params":{"value":"secret-batch /private/batch-path"}}]',
-            ("secret-batch", "/private/batch-path"),
-        ),
-        (
-            b'{"jsonrpc":"2.0","id":2,"method":"secret/unknown",'
-            b'"params":{"path":"/private/unknown-path"}}',
-            ("secret/unknown", "/private/unknown-path"),
-        ),
-        (
-            b'{"jsonrpc":"2.0","id":22,"method":'
-            b'{"secret":"secret-method /private/method-path"},"params":{}}',
-            ("secret-method", "/private/method-path"),
-        ),
-        (
-            b'{"jsonrpc":"2.0","id":3,"method":"tools/list",'
-            b'"params":["secret-list-params /private/list-path"]}',
-            ("secret-list-params", "/private/list-path"),
-        ),
-        (
-            b'{"jsonrpc":"2.0","method":"notifications/initialized",'
-            b'"params":["secret-notification /private/note-path"]}',
-            ("secret-notification", "/private/note-path"),
-        ),
-    ],
-)
-async def test_every_invalid_jsonrpc_envelope_is_sanitized_before_sdk_logging(
+async def test_invalid_json_returns_sanitized_parse_error(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
-    body: bytes,
-    forbidden_values: tuple[str, ...],
 ) -> None:
     app = create_app(_fixture_services(tmp_path))
     caplog.set_level(logging.DEBUG)
+    response = await _raw_protocol_request(
+        app,
+        b'{"jsonrpc":"2.0", secret-parse /private/parse-path',
+    )
+
+    assert response.status_code == 400
+    assert response.json()["id"] is None
+    assert response.json()["error"]["code"] == -32700
+    assert response.json()["error"]["message"] == "Parse error"
+    assert "secret-parse" not in response.text
+    assert "/private/parse-path" not in response.text
+    assert "secret-parse" not in caplog.text
+    assert "/private/parse-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]',
+        b'{"jsonrpc":"2.0","id":null,"method":"tools/list"}',
+        b'{"jsonrpc":"2.0","id":true,"method":"tools/list"}',
+        b'{"jsonrpc":"1.0","id":7,"method":"tools/list"}',
+    ],
+)
+async def test_invalid_envelope_without_valid_request_id_returns_invalid_request(
+    tmp_path: Path,
+    body: bytes,
+) -> None:
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 400
+    assert response.json()["id"] is None
+    assert response.json()["error"] == {
+        "code": -32600,
+        "message": "Invalid Request",
+        "data": "",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("body", "request_id"),
+    [
+        (
+            b'{"jsonrpc":"2.0","id":"unknown-7","method":'
+            b'"secret/unknown /private/unknown-path","params":{}}',
+            "unknown-7",
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":8,"method":'
+            b'"secret/unknown /private/unknown-path","params":{}}',
+            8,
+        ),
+    ],
+)
+async def test_unknown_request_method_returns_sanitized_method_not_found(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+    request_id: str | int,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == request_id
+    assert response.json()["error"]["code"] == -32601
+    assert response.json()["error"]["message"] == "Method not found"
+    assert "secret/unknown" not in response.text
+    assert "/private/unknown-path" not in response.text
+    assert "secret/unknown" not in caplog.text
+    assert "/private/unknown-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("body", "request_id"),
+    [
+        (
+            b'{"jsonrpc":"2.0","id":"params-9","method":"tools/list",'
+            b'"params":["secret-params /private/params-path"]}',
+            "params-9",
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":10,"method":"tools/list",'
+            b'"params":["secret-params /private/params-path"]}',
+            10,
+        ),
+    ],
+)
+async def test_known_method_with_invalid_params_preserves_id_without_leaking(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+    request_id: str | int,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == request_id
+    assert response.json()["error"]["code"] == -32602
+    assert response.json()["error"]["message"] == "Invalid params"
+    assert "secret-params" not in response.text
+    assert "/private/params-path" not in response.text
+    assert "secret-params" not in caplog.text
+    assert "/private/params-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            b'{"jsonrpc":"2.0","method":'
+            b'"secret/notification /private/notification-path","params":{}}'
+        ),
+        (
+            b'{"jsonrpc":"2.0","method":"notifications/initialized",'
+            b'"params":["secret-notification /private/note-path"]}'
+        ),
+    ],
+)
+async def test_unknown_or_malformed_notification_has_no_response_or_log_leak(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 202
+    assert response.content == b""
+    assert "secret" not in caplog.text
+    assert "/private/" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            b'{"jsonrpc":"2.0","id":"secret-response '
+            b'/private/response-path","result":{"ok":true}}'
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":"secret-error /private/error-path",'
+            b'"error":{"code":-32000,"message":"caller error"}}'
+        ),
+    ],
+)
+async def test_unsolicited_response_or_error_is_invalid_without_id_or_log_leak(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 400
+    assert response.json()["id"] is None
+    assert response.json()["error"]["code"] == -32600
+    assert "secret-" not in response.text
+    assert "/private/" not in response.text
+    assert "secret-" not in caplog.text
+    assert "/private/" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_valid_notification_and_request_still_reach_sdk(tmp_path: Path) -> None:
+    app = create_app(_fixture_services(tmp_path))
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -381,21 +553,34 @@ async def test_every_invalid_jsonrpc_envelope_is_sanitized_before_sdk_logging(
             base_url="http://127.0.0.1",
         ) as client,
     ):
-        response = await client.post(
+        notification = await client.post(
             "/mcp",
             headers={
                 "accept": "application/json, text/event-stream",
                 "content-type": "application/json",
             },
-            content=body,
-    )
+            content=(
+                b'{"jsonrpc":"2.0","method":"notifications/initialized",'
+                b'"params":{}}'
+            ),
+        )
+        request = await client.post(
+            "/mcp",
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            content=(
+                b'{"jsonrpc":"2.0","id":"valid-list",'
+                b'"method":"tools/list","params":{}}'
+            ),
+        )
 
-    assert response.status_code == 400
-    for forbidden in forbidden_values:
-        assert forbidden not in response.text
-        assert forbidden not in caplog.text
-    assert "validation error" not in response.text.lower()
-    assert "validation error" not in caplog.text.lower()
+    assert notification.status_code == 202
+    assert notification.content == b""
+    assert request.status_code == 200
+    assert request.json()["id"] == "valid-list"
+    assert len(request.json()["result"]["tools"]) == 5
 
 
 @pytest.mark.integration
@@ -433,6 +618,10 @@ async def test_unknown_tool_echoes_string_id_but_rejects_null_and_boolean_ids(
     assert responses[0].json()["id"] == "request-7"
     assert [response.status_code for response in responses[1:]] == [400, 400]
     assert all(response.json()["id"] is None for response in responses[1:])
+    assert all(
+        response.json()["error"]["code"] == -32600
+        for response in responses[1:]
+    )
 
 
 @pytest.mark.integration
@@ -526,6 +715,63 @@ async def test_body_limit_stops_receiving_before_oversized_body_is_buffered(
     assert received == 5
     assert "secret-unread-tail" not in wire
     assert "/private/unread-tail" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_incomplete_body_disconnect_is_replayed_without_parsing() -> None:
+    incoming = iter(
+        (
+            {
+                "type": "http.request",
+                "body": b'{"jsonrpc":"2.0",',
+                "more_body": True,
+            },
+            {"type": "http.disconnect"},
+        )
+    )
+    downstream_messages: list[dict[str, object]] = []
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return next(incoming)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive_downstream, send_downstream) -> None:
+        del scope, send_downstream
+        downstream_messages.append(await receive_downstream())
+        downstream_messages.append(await receive_downstream())
+
+    boundary = _SanitizedJsonRpcBoundary(downstream)
+    await boundary(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/mcp",
+            "raw_path": b"/mcp",
+            "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("127.0.0.1", 8080),
+        },
+        receive,
+        send,
+    )
+
+    assert sent == []
+    assert downstream_messages == [
+        {
+            "type": "http.request",
+            "body": b'{"jsonrpc":"2.0",',
+            "more_body": True,
+        },
+        {"type": "http.disconnect"},
+    ]
 
 
 @pytest.mark.integration

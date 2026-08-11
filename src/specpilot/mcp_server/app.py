@@ -10,13 +10,19 @@ from typing import Any, cast
 from fastapi import FastAPI
 from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
 from mcp.types import (
+    INVALID_PARAMS,
+    INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    PARSE_ERROR,
     ClientNotification,
     ClientRequest,
+    JSONRPCError,
     JSONRPCMessage,
     JSONRPCNotification,
     JSONRPCRequest,
+    JSONRPCResponse,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -29,6 +35,24 @@ from specpilot.mcp_server.runtime import (
 )
 from specpilot.mcp_server.server import TOOL_NAMES, create_mcp_server
 from specpilot.mcp_server.services import McpToolServices
+
+
+def _sdk_union_methods(model: type[BaseModel]) -> frozenset[str]:
+    """Derive supported method names from the installed SDK's public schema."""
+    schema = model.model_json_schema()
+    definitions = cast(dict[str, dict[str, Any]], schema["$defs"])
+    variants = cast(list[dict[str, str]], schema["anyOf"])
+    methods: set[str] = set()
+    for variant in variants:
+        definition_name = variant["$ref"].rsplit("/", maxsplit=1)[-1]
+        method_schema = cast(
+            dict[str, str], definitions[definition_name]["properties"]["method"]
+        )
+        methods.add(method_schema["const"])
+    return frozenset(methods)
+
+
+_CLIENT_REQUEST_METHODS = _sdk_union_methods(ClientRequest)
 
 
 class _SanitizedJsonRpcBoundary:
@@ -90,13 +114,36 @@ class _SanitizedJsonRpcBoundary:
                 body_complete = True
                 break
 
-        try:
-            payload = json.loads(received_body)
-            envelope = JSONRPCMessage.model_validate(payload)
-            _validate_client_message(payload, envelope)
-        except (UnicodeDecodeError, ValueError, ValidationError):
-            await _invalid_envelope_response()(scope, receive, send)
+        # Freeze once, then relinquish each full representation before the SDK
+        # receives the replayed bytes. The closure drops its reference on read.
+        raw_body = bytes(received_body)
+        del received_body
+        if not body_complete:
+            await _call_with_replayed_body(
+                self._app,
+                scope,
+                receive,
+                send,
+                raw_body,
+                body_complete=False,
+                trailing_message=trailing_message,
+            )
             return
+        try:
+            payload = json.loads(raw_body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            await _jsonrpc_error_response(
+                status_code=400,
+                code=PARSE_ERROR,
+                message="Parse error",
+            )(scope, receive, send)
+            return
+
+        envelope, validation_response = _validate_client_message(payload)
+        if validation_response is not None:
+            await validation_response(scope, receive, send)
+            return
+        assert envelope is not None
 
         if (
             isinstance(payload, dict)
@@ -108,22 +155,47 @@ class _SanitizedJsonRpcBoundary:
                 await _unknown_tool_response(envelope.root.id)(scope, receive, send)
                 return
 
-        replayed = False
+        del payload, envelope
+        await _call_with_replayed_body(
+            self._app,
+            scope,
+            receive,
+            send,
+            raw_body,
+            body_complete=True,
+            trailing_message=trailing_message,
+        )
 
-        async def replay() -> Message:
-            nonlocal replayed
-            if not replayed:
-                replayed = True
-                return {
-                    "type": "http.request",
-                    "body": bytes(received_body),
-                    "more_body": not body_complete,
-                }
-            if trailing_message is not None:
-                return trailing_message
-            return await receive()
 
-        await self._app(scope, replay, send)
+async def _call_with_replayed_body(
+    app: ASGIApp,
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    raw_body: bytes,
+    *,
+    body_complete: bool,
+    trailing_message: Message | None,
+) -> None:
+    """Replay one frozen body and relinquish it as downstream receives it."""
+    replay_body: bytes | None = raw_body
+    del raw_body
+
+    async def replay() -> Message:
+        nonlocal replay_body
+        if replay_body is not None:
+            body = replay_body
+            replay_body = None
+            return {
+                "type": "http.request",
+                "body": body,
+                "more_body": not body_complete,
+            }
+        if trailing_message is not None:
+            return trailing_message
+        return await receive()
+
+    await app(scope, replay, send)
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -136,31 +208,101 @@ def _content_length(scope: Scope) -> int | None:
     return None
 
 
-def _validate_client_message(payload: object, message: JSONRPCMessage) -> None:
-    if isinstance(payload, dict) and "id" in payload:
-        request_id = payload["id"]
-        if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
-            raise ValueError("invalid JSON-RPC id")
-    dumped = message.root.model_dump(by_alias=True, mode="json", exclude_none=True)
-    if isinstance(message.root, JSONRPCRequest):
+def _validate_client_message(
+    payload: object,
+) -> tuple[JSONRPCMessage | None, Response | None]:
+    """Classify with SDK types without retaining or serializing diagnostics."""
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        return None, _invalid_request_response()
+
+    if "id" not in payload:
+        if "method" not in payload:
+            return None, _invalid_request_response()
+        try:
+            envelope = JSONRPCMessage.model_validate(payload)
+            if not isinstance(envelope.root, JSONRPCNotification):
+                return None, _invalid_request_response()
+            dumped = envelope.root.model_dump(
+                by_alias=True, mode="json", exclude_none=True
+            )
+            ClientNotification.model_validate(dumped)
+        except ValidationError:
+            return None, _notification_accepted_response()
+        return envelope, None
+
+    request_id = payload["id"]
+    if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
+        return None, _invalid_request_response()
+
+    try:
+        envelope = JSONRPCMessage.model_validate(payload)
+    except ValidationError:
+        return None, _request_validation_error(payload, request_id)
+    if isinstance(envelope.root, JSONRPCResponse | JSONRPCError):
+        return None, _invalid_request_response()
+    if not isinstance(envelope.root, JSONRPCRequest):
+        return None, _invalid_request_response()
+
+    dumped = envelope.root.model_dump(by_alias=True, mode="json", exclude_none=True)
+    try:
         ClientRequest.model_validate(dumped)
-    elif isinstance(message.root, JSONRPCNotification):
-        ClientNotification.model_validate(dumped)
+    except ValidationError:
+        return None, _request_validation_error(payload, request_id)
+    return envelope, None
 
 
-def _invalid_envelope_response() -> JSONResponse:
+def _request_validation_error(
+    payload: dict[str, Any], request_id: str | int
+) -> JSONResponse:
+    method = payload.get("method")
+    if isinstance(method, str) and method in _CLIENT_REQUEST_METHODS:
+        return _jsonrpc_error_response(
+            status_code=200,
+            code=INVALID_PARAMS,
+            message="Invalid params",
+            request_id=request_id,
+        )
+    if isinstance(method, str):
+        return _jsonrpc_error_response(
+            status_code=200,
+            code=METHOD_NOT_FOUND,
+            message="Method not found",
+            request_id=request_id,
+        )
+    return _invalid_request_response()
+
+
+def _jsonrpc_error_response(
+    *,
+    status_code: int,
+    code: int,
+    message: str,
+    request_id: str | int | None = None,
+) -> JSONResponse:
     return JSONResponse(
-        status_code=400,
+        status_code=status_code,
         content={
             "jsonrpc": "2.0",
-            "id": None,
+            "id": request_id,
             "error": {
-                "code": -32602,
-                "message": "Invalid request parameters",
+                "code": code,
+                "message": message,
                 "data": "",
             },
         },
     )
+
+
+def _invalid_request_response() -> JSONResponse:
+    return _jsonrpc_error_response(
+        status_code=400,
+        code=INVALID_REQUEST,
+        message="Invalid Request",
+    )
+
+
+def _notification_accepted_response() -> Response:
+    return Response(status_code=202, media_type="application/json")
 
 
 def _body_too_large_response() -> Response:
