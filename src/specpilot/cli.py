@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import time
+import uuid
 from collections.abc import Sequence
 from contextlib import redirect_stderr, suppress
 from dataclasses import dataclass
@@ -2625,6 +2626,7 @@ def _egress_rebind_policy(arguments: argparse.Namespace) -> int:
 
 async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
     from specpilot.egress.ledger import (
+        LedgerIntegrityError,
         LedgerUnavailable,
         PolicyRebindAmbiguous,
         PolicyRebindConflict,
@@ -2645,11 +2647,12 @@ async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
     try:
         result = await ledger.rebind_policy(
             arguments.corpus_manifest_id,
+            expected_ledger_id=arguments.expected_ledger_id,
             expected_policy_hash=arguments.expected_policy_hash,
         )
     except PolicyRebindConflict as error:
         return _refuse(error.code, EXIT_REFUSED)
-    except (PolicyRebindAmbiguous, LedgerUnavailable) as error:
+    except (PolicyRebindAmbiguous, LedgerIntegrityError, LedgerUnavailable) as error:
         return _refuse(error.code, EXIT_IO)
     return _emit(
         {
@@ -2872,6 +2875,7 @@ def _parser() -> argparse.ArgumentParser:
     rebind.add_argument(
         "--corpus-manifest-id", type=_sha256_argument, required=True
     )
+    rebind.add_argument("--expected-ledger-id", type=_uuid_argument, required=True)
     rebind.add_argument(
         "--expected-policy-hash", type=_sha256_argument, required=True
     )
@@ -3139,6 +3143,13 @@ def _sha256_argument(value: str) -> str:
     return value
 
 
+def _uuid_argument(value: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except (AttributeError, ValueError):
+        raise argparse.ArgumentTypeError("invalid UUID identifier") from None
+
+
 def _collection_name_argument(value: str) -> str:
     if _COLLECTION_NAME_ARGUMENT.fullmatch(value) is None:
         raise argparse.ArgumentTypeError("invalid collection name")
@@ -3161,7 +3172,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         ["corpus", "freeze"],
         ["corpus", "verify"],
     )
-    if is_corpus_manifest_command:
+    is_egress_rebind_command = raw_arguments[:2] == ["egress", "rebind-policy"]
+    sanitized_usage_code = (
+        "invalid_corpus_manifest_arguments"
+        if is_corpus_manifest_command
+        else (
+            "invalid_egress_rebind_policy_arguments"
+            if is_egress_rebind_command
+            else None
+        )
+    )
+    if sanitized_usage_code is not None:
         # These commands may receive restricted local paths. Argparse's default
         # diagnostics interpolate the rejected value, so consume them and emit
         # the same stable, aggregate-only usage code as the handlers.
@@ -3174,7 +3195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise
                 parse_failed = True
         if parse_failed:
-            return _refuse("invalid_corpus_manifest_arguments", EXIT_USAGE)
+            return _refuse(sanitized_usage_code, EXIT_USAGE)
     else:
         arguments = _parser().parse_args(raw_arguments)
     handler: Any = arguments.handler
