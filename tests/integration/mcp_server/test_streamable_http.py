@@ -375,6 +375,37 @@ async def test_invalid_json_returns_sanitized_parse_error(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_bounded_oversized_numeric_token_returns_sanitized_parse_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    body = (
+        b'{"jsonrpc":"2.0","id":'
+        + (b"9" * 5_000)
+        + b',"method":"tools/list","params":{"context":'
+        + b'"secret-big-number /private/big-number-path"}}'
+    )
+    assert len(body) < 4 * 1024 * 1024
+    caplog.set_level(logging.DEBUG)
+
+    response = await _raw_protocol_request(
+        create_app(_fixture_services(tmp_path)), body
+    )
+
+    assert response.status_code == 400
+    assert response.json()["id"] is None
+    assert response.json()["error"]["code"] == -32700
+    assert response.json()["error"]["message"] == "Parse error"
+    assert "9999999999" not in response.text
+    assert "secret-big-number" not in response.text
+    assert "/private/big-number-path" not in response.text
+    assert "9999999999" not in caplog.text
+    assert "secret-big-number" not in caplog.text
+    assert "/private/big-number-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "body",
     [

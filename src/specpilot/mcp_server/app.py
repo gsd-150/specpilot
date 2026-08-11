@@ -131,7 +131,7 @@ class _SanitizedJsonRpcBoundary:
             return
         try:
             payload = json.loads(raw_body)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, ValueError):
             await _jsonrpc_error_response(
                 status_code=400,
                 code=PARSE_ERROR,
