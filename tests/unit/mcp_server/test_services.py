@@ -198,6 +198,89 @@ def test_reference_and_term_services_return_only_bounded_clause_ids(
     assert "RETRY" not in definitions.model_dump_json()
 
 
+def test_reference_expansion_rejects_a_table_id_without_leaking_it(
+    tool_services: McpToolServices,
+) -> None:
+    table = next(unit for unit in tool_services.corpus.units() if unit.kind == "table")
+
+    with pytest.raises(McpToolError) as caught:
+        tool_services.expand_references(
+            ExpandReferencesRequest(
+                corpus_manifest_id=CORPUS_ID,
+                document_id=DOCUMENT_ID,
+                clause_ids=(table.unit_id,),
+            )
+        )
+
+    assert caught.value.code == "invalid_reference"
+    assert caught.value.field == "clause_ids"
+    assert caught.value.__cause__ is None
+    assert table.unit_id not in str(caught.value)
+
+
+def test_reference_expansion_does_not_guess_a_cross_document_target(
+    tmp_path: Path,
+) -> None:
+    source_path = rfc_factory.write(
+        tmp_path,
+        "source.xml",
+        """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9998" version="3">
+  <front><title>Source</title><date month="08" year="2026"/></front>
+  <middle><section anchor="one"><name>One</name>
+    <t pn="section-1-1">See <xref target="foreign"
+      derivedContent="the other document"/>.</t>
+  </section></middle>
+</rfc>
+""",
+    )
+    target_path = rfc_factory.write(
+        tmp_path,
+        "target.xml",
+        """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9997" version="3">
+  <front><title>Target</title><date month="08" year="2026"/></front>
+  <middle><section anchor="foreign"><name>Foreign</name>
+    <t pn="section-1-1">Foreign target.</t>
+  </section></middle>
+</rfc>
+""",
+    )
+    documents = (
+        (load_verified_rfc(source_path, RfcLimits()), ClauseLimits()),
+        (load_verified_rfc(target_path, RfcLimits()), ClauseLimits()),
+    )
+    corpus = LocalCorpus.load(documents, RfcLimits())
+    metadata = build_rfc_tool_metadata(
+        corpus_manifest_id=CORPUS_ID,
+        documents=documents,
+        units=corpus.units(),
+        rfc_limits=RfcLimits(),
+    )
+    services = McpToolServices(
+        corpus=corpus,
+        search_backend=Bm25SearchBackend(corpus),
+        tool_metadata=metadata,
+    )
+    source = next(
+        unit for unit in corpus.units() if unit.document_id == "ietf-rfc-9998"
+    )
+
+    with pytest.raises(McpToolError) as caught:
+        services.expand_references(
+            ExpandReferencesRequest(
+                corpus_manifest_id=CORPUS_ID,
+                document_id="ietf-rfc-9998",
+                clause_ids=(source.unit_id,),
+            )
+        )
+
+    assert caught.value.code == "invalid_reference"
+    assert caught.value.__cause__ is None
+    assert source.unit_id not in str(caught.value)
+    assert "foreign" not in str(caught.value).lower()
+
+
 @pytest.mark.parametrize(
     "tool_request",
     [

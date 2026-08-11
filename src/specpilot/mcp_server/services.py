@@ -170,7 +170,13 @@ class McpToolServices:
         source_ids = set(request.clause_ids)
         expanded: list[str] = []
         for clause_id in request.clause_ids:
-            self._scoped_clause(request.document_id, clause_id)
+            source = self._scoped_clause(request.document_id, clause_id)
+            if source.kind != CLAUSE_KIND:
+                raise McpToolError(
+                    McpToolErrorCode.INVALID_REFERENCE,
+                    "clause_ids",
+                    "Choose a clause with resolved local references.",
+                ) from None
             try:
                 candidates = self.tool_metadata.expand(clause_id, limit=3)
             except InvalidToolReferenceError:

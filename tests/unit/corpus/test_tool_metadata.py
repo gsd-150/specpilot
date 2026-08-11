@@ -9,6 +9,8 @@ from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
 from specpilot.corpus.tool_metadata import (
     TOOL_METADATA_VERSION,
+    InvalidToolReferenceError,
+    RfcToolMetadata,
     ToolMetadataIntegrityError,
     build_rfc_tool_metadata,
 )
@@ -84,6 +86,22 @@ def _by_text(corpus: LocalCorpus) -> dict[str, str]:
     return {unit.text: unit.unit_id for unit in corpus.units() if unit.kind == "clause"}
 
 
+def _metadata_from_xml(
+    tmp_path: Path, xml: str
+) -> tuple[LocalCorpus, RfcToolMetadata]:
+    path = rfc_factory.write(tmp_path, "references.xml", xml)
+    verified = load_verified_rfc(path, RfcLimits())
+    documents = ((verified, ClauseLimits()),)
+    corpus = LocalCorpus.load(documents, RfcLimits())
+    metadata = build_rfc_tool_metadata(
+        corpus_manifest_id=CORPUS_ID,
+        documents=documents,
+        units=corpus.units(),
+        rfc_limits=RfcLimits(),
+    )
+    return corpus, metadata
+
+
 def test_sidecar_uses_exact_xml_provenance_and_has_a_canonical_hash(
     metadata_fixture,
 ) -> None:
@@ -129,3 +147,59 @@ def test_sidecar_refuses_a_changed_hash(metadata_fixture) -> None:
 
     with pytest.raises(ToolMetadataIntegrityError):
         changed.verify_integrity()
+
+
+def test_one_target_node_with_equal_anchor_and_pn_is_not_ambiguous(
+    tmp_path: Path,
+) -> None:
+    corpus, metadata = _metadata_from_xml(
+        tmp_path,
+        """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9998" version="3">
+  <front><title>Same node</title><date month="08" year="2026"/></front>
+  <middle>
+    <section anchor="one"><name>One</name>
+      <t pn="section-1-1">Source <xref target="shared"
+        derivedContent="Section 2"/>.</t>
+    </section>
+    <section anchor="two"><name>Two</name>
+      <t anchor="shared" pn="shared">Exact target.</t>
+    </section>
+  </middle>
+</rfc>
+""",
+    )
+    clause_ids = _by_text(corpus)
+
+    assert metadata.expand(clause_ids["Source Section 2."], limit=3) == (
+        clause_ids["Exact target."],
+    )
+
+
+def test_two_distinct_nodes_with_one_identifier_remain_ambiguous(
+    tmp_path: Path,
+) -> None:
+    corpus, metadata = _metadata_from_xml(
+        tmp_path,
+        """<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9998" version="3">
+  <front><title>Distinct nodes</title><date month="08" year="2026"/></front>
+  <middle>
+    <section anchor="one"><name>One</name>
+      <t pn="section-1-1">Source <xref target="shared"
+        derivedContent="ambiguous"/>.</t>
+    </section>
+    <section anchor="two"><name>Two</name>
+      <t anchor="shared" pn="section-2-1">First target.</t>
+    </section>
+    <section anchor="three"><name>Three</name>
+      <t slugifiedName="shared" pn="section-3-1">Second target.</t>
+    </section>
+  </middle>
+</rfc>
+""",
+    )
+    source_id = _by_text(corpus)["Source ambiguous."]
+
+    with pytest.raises(InvalidToolReferenceError, match="invalid reference"):
+        metadata.expand(source_id, limit=3)

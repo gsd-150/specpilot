@@ -161,7 +161,9 @@ def _target_registry(root: Element) -> dict[str, list[tuple[str, Element]]]:
         for attribute in _IDENTIFIER_ATTRIBUTES:
             value = element.get(attribute)
             if value:
-                targets.setdefault(value, []).append((kind, element))
+                registrations = targets.setdefault(value, [])
+                if all(registered is not element for _, registered in registrations):
+                    registrations.append((kind, element))
     return targets
 
 
