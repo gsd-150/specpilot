@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -363,6 +364,180 @@ async def test_identical_rebind_retry_returns_the_same_successor(
     assert retry.rebound is False
     assert retry.predecessor_ledger_id == first.predecessor_ledger_id
     assert retry.successor_ledger_id == first.successor_ledger_id
+
+
+@pytest.mark.anyio
+async def test_concurrent_identical_rebinds_name_one_successor_epoch(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    old_policy = fixture_policy()
+    new_policy = old_policy.model_copy(update={"toc_per_run": 25})
+    request = reservation_for(distinct_excerpt(1))
+    await _ledger(clean_ledger, old_policy).check_and_reserve(
+        request,
+        FixtureTokenCounter(),
+        idempotency_key="concurrent-identical-seed",
+    )
+    book = _ledger(clean_ledger, new_policy)
+
+    first, second = await asyncio.gather(
+        book.rebind_policy(
+            request.version.corpus_manifest_id,
+            expected_policy_hash=old_policy.policy_hash,
+        ),
+        book.rebind_policy(
+            request.version.corpus_manifest_id,
+            expected_policy_hash=old_policy.policy_hash,
+        ),
+    )
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        count = await (
+            await connection.execute(
+                "SELECT count(*) FROM egress_corpus_ledger "
+                "WHERE corpus_manifest_id = %s",
+                (request.version.corpus_manifest_id,),
+            )
+        ).fetchone()
+
+    assert count is not None and count[0] == 2
+    assert {first.rebound, second.rebound} == {False, True}
+    assert first.predecessor_ledger_id == second.predecessor_ledger_id
+    assert first.successor_ledger_id == second.successor_ledger_id
+
+
+@pytest.mark.anyio
+async def test_concurrent_reservation_is_copied_or_refused_after_head_moves(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    old_policy = fixture_policy()
+    new_policy = old_policy.model_copy(update={"toc_per_run": 25})
+    first_request = reservation_for(distinct_excerpt(1))
+    second_request = reservation_for(distinct_excerpt(2)).model_copy(
+        update={"evaluation_root_id": "concurrent-case-2", "run_id": "run-2"}
+    )
+    second_id = second_request.disclosures[0].disclosure_id
+    old_book = _ledger(clean_ledger, old_policy)
+    await old_book.check_and_reserve(
+        first_request,
+        FixtureTokenCounter(),
+        idempotency_key="concurrent-reservation-seed",
+    )
+
+    reservation_or_error, rebind_or_error = await asyncio.gather(
+        old_book.check_and_reserve(
+            second_request,
+            FixtureTokenCounter(),
+            idempotency_key="concurrent-reservation-racer",
+        ),
+        _ledger(clean_ledger, new_policy).rebind_policy(
+            first_request.version.corpus_manifest_id,
+            expected_policy_hash=old_policy.policy_hash,
+        ),
+        return_exceptions=True,
+    )
+
+    assert not isinstance(rebind_or_error, BaseException), rebind_or_error
+    result = rebind_or_error
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        predecessor = await (
+            await connection.execute(
+                "SELECT corpus_usage FROM egress_corpus_ledger "
+                "WHERE corpus_ledger_id = %s",
+                (result.predecessor_ledger_id,),
+            )
+        ).fetchone()
+        successor = await (
+            await connection.execute(
+                "SELECT corpus_usage FROM egress_corpus_ledger "
+                "WHERE corpus_ledger_id = %s",
+                (result.successor_ledger_id,),
+            )
+        ).fetchone()
+        reservation_rows = await (
+            await connection.execute(
+                "SELECT corpus_ledger_id FROM egress_reservation "
+                "WHERE idempotency_key = %s",
+                ("concurrent-reservation-racer",),
+            )
+        ).fetchall()
+
+    assert predecessor is not None and successor is not None
+    predecessor_ids = predecessor[0]["disclosure_ids"]
+    successor_ids = successor[0]["disclosure_ids"]
+    if isinstance(reservation_or_error, BaseException):
+        assert isinstance(reservation_or_error, EgressPolicyViolation)
+        assert reservation_or_error.code == "policy_snapshot_mismatch"
+        assert reservation_rows == []
+        assert second_id not in predecessor_ids
+        assert second_id not in successor_ids
+        assert result.inherited_unique_excerpts == 1
+    else:
+        assert len(reservation_rows) == 1
+        assert str(reservation_rows[0][0]) == result.predecessor_ledger_id
+        assert second_id in predecessor_ids
+        assert second_id in successor_ids
+        assert result.inherited_unique_excerpts == 2
+
+
+@pytest.mark.anyio
+async def test_concurrent_different_rebinds_allow_one_successor_per_predecessor(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    old_policy = fixture_policy()
+    first_new_policy = old_policy.model_copy(update={"toc_per_run": 25})
+    second_new_policy = old_policy.model_copy(update={"toc_per_run": 23})
+    request = reservation_for(distinct_excerpt(1))
+    await _ledger(clean_ledger, old_policy).check_and_reserve(
+        request,
+        FixtureTokenCounter(),
+        idempotency_key="concurrent-different-seed",
+    )
+
+    outcomes = await asyncio.gather(
+        _ledger(clean_ledger, first_new_policy).rebind_policy(
+            request.version.corpus_manifest_id,
+            expected_policy_hash=old_policy.policy_hash,
+        ),
+        _ledger(clean_ledger, second_new_policy).rebind_policy(
+            request.version.corpus_manifest_id,
+            expected_policy_hash=old_policy.policy_hash,
+        ),
+        return_exceptions=True,
+    )
+
+    winners = [
+        outcome for outcome in outcomes if not isinstance(outcome, BaseException)
+    ]
+    losers = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    assert isinstance(losers[0], PolicyRebindConflict)
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        duplicate_successors = await (
+            await connection.execute(
+                "SELECT predecessor_ledger_id FROM egress_corpus_ledger "
+                "WHERE predecessor_ledger_id IS NOT NULL "
+                "GROUP BY predecessor_ledger_id HAVING count(*) > 1"
+            )
+        ).fetchall()
+        count = await (
+            await connection.execute(
+                "SELECT count(*) FROM egress_corpus_ledger "
+                "WHERE corpus_manifest_id = %s",
+                (request.version.corpus_manifest_id,),
+            )
+        ).fetchone()
+
+    assert duplicate_successors == []
+    assert count is not None and count[0] == 2
 
 
 @pytest.mark.anyio

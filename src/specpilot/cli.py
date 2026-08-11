@@ -2619,6 +2619,48 @@ def _route_smoke(arguments: argparse.Namespace) -> int:
     return asyncio.run(_route_smoke_async(arguments))
 
 
+def _egress_rebind_policy(arguments: argparse.Namespace) -> int:
+    return asyncio.run(_egress_rebind_policy_async(arguments))
+
+
+async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
+    from specpilot.egress.ledger import (
+        LedgerUnavailable,
+        PolicyRebindAmbiguous,
+        PolicyRebindConflict,
+    )
+    from specpilot.egress.postgres import PostgresEgressLedger
+
+    policy = EgressPolicy.load(arguments.policy)
+    ledger = PostgresEgressLedger(
+        arguments.ledger_dsn,
+        policy=policy,
+        manifests=ManifestStore(arguments.manifest_dir),
+    )
+    try:
+        result = await ledger.rebind_policy(
+            arguments.corpus_manifest_id,
+            expected_policy_hash=arguments.expected_policy_hash,
+        )
+    except PolicyRebindConflict as error:
+        return _refuse(error.code, EXIT_REFUSED)
+    except (PolicyRebindAmbiguous, LedgerUnavailable) as error:
+        return _refuse(error.code, EXIT_IO)
+    return _emit(
+        {
+            "status": "rebound" if result.rebound else "unchanged",
+            "corpus_manifest_id": result.corpus_manifest_id,
+            "predecessor_ledger_id": result.predecessor_ledger_id,
+            "successor_ledger_id": result.successor_ledger_id,
+            "old_policy_hash": result.old_policy_hash,
+            "new_policy_hash": result.new_policy_hash,
+            "inherited_unique_excerpts": result.inherited_unique_excerpts,
+            "inherited_unique_tokens": result.inherited_unique_tokens,
+            "inherited_unique_bytes": result.inherited_unique_bytes,
+        }
+    )
+
+
 async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     from specpilot.egress.ledger import LedgerError
     from specpilot.egress.postgres import PostgresEgressLedger
@@ -2817,6 +2859,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     smoke = egress.add_parser("envelope-smoke")
     smoke.set_defaults(handler=_envelope_smoke)
+
+    rebind = egress.add_parser("rebind-policy")
+    rebind.add_argument("--ledger-dsn", required=True)
+    rebind.add_argument("--manifest-dir", type=Path, required=True)
+    rebind.add_argument("--policy", type=Path, default=None)
+    rebind.add_argument(
+        "--corpus-manifest-id", type=_sha256_argument, required=True
+    )
+    rebind.add_argument(
+        "--expected-policy-hash", type=_sha256_argument, required=True
+    )
+    rebind.set_defaults(handler=_egress_rebind_policy)
 
     provider = commands.add_parser("provider").add_subparsers(
         dest="command", required=True
