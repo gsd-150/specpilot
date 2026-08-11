@@ -854,7 +854,10 @@ Consequences worth naming rather than absorbing:
   accounting for a corpus after a cap change is a deliberate act, not a
   migration to run quietly.
 
-#### Task 11 (open): a corpus ledger bound to one policy has no way to be rebound
+#### Task 11 resolved: a corpus ledger can be rebound without erasing history
+
+The incident and rationale below are preserved because they explain why the
+successor path is explicit rather than an automatic mismatch recovery.
 
 Changing the caps made the corpus ledger row for `1abafff7…` unusable —
 `policy_snapshot_mismatch`, which is correct. Deleting it is refused too:
@@ -880,6 +883,39 @@ readable and attributable to the policy they were accumulated under.
 Until that exists, a cap change on a corpus with recorded usage requires
 rebuilding the ledger database, which is acceptable only because every row in it
 today is from this session's own failed test sends.
+
+Resolved on the Task 11 branch by migration
+`003_egress_ledger_policy_successor.sql` and the operator command
+`specpilot egress rebind-policy`. The migration gives each corpus ledger row an
+epoch ID, retains immutable predecessor links, and binds reservations and
+evaluation roots to the exact epoch that admitted them. Rebind copies the full
+corpus and per-document usage snapshot to one successor, moves the head under an
+expected-policy compare-and-swap guard, and leaves ordinary reservation
+mismatches fail-closed. Lower caps take effect on later reservations; they do
+not erase inherited accounting.
+
+Fresh focused verification on 2026-08-11 used:
+
+```bash
+SPECPILOT_TEST_DSN=<fresh-throwaway-dsn> .venv/bin/python -m pytest \
+  tests/integration/cli/test_egress_rebind_policy.py \
+  tests/integration/egress/test_postgres_policy_successor.py \
+  tests/integration/egress/test_postgres_reservation.py::test_ledger_stores_no_query_claim_or_excerpt_text \
+  -q
+```
+
+Result: **18 passed**. Release verification independently produced
+`make check`: **1,067 passed, 2 skipped** after clean Ruff and strict mypy;
+`make integration-db` on a fresh PostgreSQL database: **43 passed, 17 skipped**,
+with `-rs` confirming every skip was Qdrant-only and none was caused by a
+missing DSN; and `make fixture-smoke` on a second fresh database: **5 passed, 4
+deselected**, using only the fake provider. The wheel built, reinstalled, and
+the installed-package check repeated **1,067 passed, 2 skipped**.
+
+Implementation history: `e731ec3` (successor contracts), `767f2b8` (migration
+003 and epoch-bound reservations), `55a99fe` (transactional rebind), `594dcd5`
+(stable inherited totals on retry), `3d34198` (operator CLI and concurrency
+proof), and `6c9fa4b` (sanitized policy loading).
 
 #### First live answers — the refusal works, the citation identifier does not
 

@@ -125,7 +125,10 @@ cannot support.
 
 ### Ledger
 
-`specpilot_live`, migrations 001 and 002 applied. Corpus-level disclosure so far:
+`specpilot_live`, migrations 001 and 002 applied. It was not modified during
+Task 11 verification. The branch adds migration
+`003_egress_ledger_policy_successor.sql`; apply it through the normal migration
+process before using the new operator command. Corpus-level disclosure so far:
 **11 excerpts / 4,269 bytes of RFC 9110** against per-document caps of
 314 / 76,113. The licence premise has plenty of headroom and the accounting
 survives across evaluation roots.
@@ -161,14 +164,24 @@ the half the job title names.
    *Also worth saying plainly:* ~37,000 lines of work exists in one directory on
    one disk, with no backup and no link to show anyone.
 
-2. **Task 11 (open) — a corpus ledger bound to one policy has no way to be
-   rebound.** Changing caps makes the ledger row unusable
+2. **Task 11 (resolved on the branch) — a corpus ledger bound to one policy had
+   no way to be rebound.** Changing caps made the ledger row unusable
    (`policy_snapshot_mismatch`, correct) and the row cannot be deleted either
    (foreign key from `egress_reservation`, also correct). Together, a dead end.
-   The fix matches what the project does everywhere else: an immutable successor
-   row carrying the new `policy_hash` and a pointer to the one it supersedes.
+   That incident remains the rationale for the fix: migration 003 and
+   `specpilot egress rebind-policy` now create an immutable successor carrying
+   the new `policy_hash`, inherited corpus and per-document usage, and a pointer
+   to the epoch it supersedes. Ordinary mismatches still fail closed.
    *This is not theoretical* — it constrained a real decision on 2026-08-11 by
    ruling out renaming any policy field.
+
+   Fresh branch evidence: the focused CLI/successor/no-plaintext command passed
+   **18 tests**; `make check` passed **1,067** unit tests with **2 skipped** after
+   clean Ruff and strict mypy; `make integration-db` passed **43** with **17
+   Qdrant-only skips** and no missing-DSN skip; and separate-database
+   `make fixture-smoke` passed **5** with **4 deselected**, using no real
+   provider route. Commits: `e731ec3`, `767f2b8`, `55a99fe`, `594dcd5`,
+   `3d34198`, `6c9fa4b`.
 
 3. **No rule for requirements that span consecutive paragraphs.** The one known
    instance is *closed*: the §8.2.3 pooling completeness audit on 2026-08-09
@@ -249,10 +262,14 @@ provenance chains, three-layer manifests, gold protocols, disclosure limits — 
 squarely Knowledge Management, which is your field and not a generic CS
 candidate's.
 
-### 3. Task 11 — the corpus ledger successor row
+### 3. Task 11 completed — the corpus ledger successor row
 
-Small, well specified above, and it removes a constraint that has already
-distorted one decision. Do it before the next cap or policy change, not after.
+Implemented by migration `003_egress_ledger_policy_successor.sql` and
+`.venv/bin/python -m specpilot.cli egress rebind-policy`. The operator must name
+the expected active policy hash, and a completed retry safely reports
+`unchanged`. After success, use a new evaluation-root ID; old roots remain bound
+to their original epoch. A tighter successor policy blocks later reservations
+instead of deleting the inherited audit trail.
 
 ### 4. W3 — MCP tools, FastAPI L1 API, trace page
 

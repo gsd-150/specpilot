@@ -28,6 +28,34 @@ filename order, so reusing one you migrated by hand hides a missing migration.
 still report "passed". A run that proves anything sets both
 `SPECPILOT_TEST_DSN` and `SPECPILOT_TEST_QDRANT_URL`.
 
+## Rebinding a corpus ledger to a successor policy
+
+Apply migration `003_egress_ledger_policy_successor.sql` through the normal
+migration process before using the operator command. Then run:
+
+```bash
+.venv/bin/python -m specpilot.cli egress rebind-policy \
+  --ledger-dsn <ledger-dsn> \
+  --manifest-dir <source-manifest-dir> \
+  --policy <new-policy.json> \
+  --corpus-manifest-id <corpus-manifest-sha256> \
+  --expected-policy-hash <active-policy-sha256>
+```
+
+This is the only deliberate policy-successor path. An ordinary reservation
+under a different policy still fails closed with `policy_snapshot_mismatch`;
+it never rebinds automatically. `--expected-policy-hash` is a compare-and-swap
+guard against moving a head other than the one the operator inspected.
+
+A successful rebind preserves the predecessor and creates an immutable
+successor that inherits the complete corpus and per-document usage snapshot.
+Use a new `evaluation_root_id` for the first reservation under that successor:
+an old root remains bound to its original ledger epoch. A response with status
+`unchanged` is a safe retry result naming the already-active successor. If the
+new policy has lower caps than the inherited totals, the successor is still
+recorded; later reservations are refused rather than history being deleted or
+rewritten.
+
 ## Running the stack
 
 Nothing in `compose.yaml` publishes a host port. Reaching the API needs the demo
