@@ -39,6 +39,7 @@ from specpilot.contracts.egress import (
     EgressPayload,
     JudgePayload,
     L1OnlinePayload,
+    L1PlanPayload,
     L2AtomicClaimPayload,
     L2DesignPayload,
 )
@@ -170,6 +171,8 @@ class HttpChatAdapter:
         await self._client.aclose()
 
     async def send(self, projected_payload: EgressPayload) -> ProviderResponse:
+        if isinstance(projected_payload, L1PlanPayload):
+            raise ProviderError("planning_not_implemented")
         body: dict[str, Any] = {
             "model": self.endpoint.model_id,
             "messages": _render_messages(projected_payload),
@@ -293,12 +296,16 @@ _ATTRIBUTION = (
 
 def _system_prompt(payload: EgressPayload) -> str:
     """The judge scores; everything else answers under the citation contract."""
+    if isinstance(payload, L1PlanPayload):
+        raise ProviderError("planning_not_implemented")
     if isinstance(payload, JudgePayload):
         return _SYSTEM_PROMPT
     return f"{_SYSTEM_PROMPT}\n\n{REPLY_INSTRUCTIONS}"
 
 
 def _render_user(payload: EgressPayload) -> str:
+    if isinstance(payload, L1PlanPayload):
+        raise ProviderError("planning_not_implemented")
     lines: list[str] = []
     if not isinstance(payload, JudgePayload):
         lines.append(

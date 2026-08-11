@@ -31,6 +31,7 @@ from specpilot.providers.transport import (
 )
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_manifest_provenance import unstored_authorized_manifest
+from tests.unit.egress.test_planning_projection import planning_request
 from tests.unit.egress.test_policy_projection import (
     NOW,
     egress_request,
@@ -172,6 +173,16 @@ async def test_happy_path_sends_once_and_records_one_attempt() -> None:
     assert len(ledger.attempts) == 1
     assert ledger.attempts[0].outcome is AttemptOutcome.SUCCEEDED
     assert response.content.startswith("fixture answer")
+
+
+async def test_fake_provider_refuses_unrendered_planning_payload() -> None:
+    provider = FakeProvider()
+
+    with pytest.raises(ProviderError) as caught:
+        await provider.send(planning_request(query="When may a sender retry?").payload)
+
+    assert caught.value.public_error_code == "planning_not_implemented"
+    assert provider.call_count == 0
 
 
 async def test_the_attempt_records_the_request_not_the_cap_figure() -> None:

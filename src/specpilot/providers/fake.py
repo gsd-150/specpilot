@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from specpilot.contracts.egress import EgressPayload, JudgePayload
+from specpilot.contracts.egress import EgressPayload, JudgePayload, L1PlanPayload
 from specpilot.providers.base import (
     ProviderError,
     ProviderResponse,
@@ -50,6 +50,8 @@ class FakeProvider:
         return len(self.calls)
 
     async def send(self, projected_payload: EgressPayload) -> ProviderResponse:
+        if isinstance(projected_payload, L1PlanPayload):
+            raise ProviderError("planning_not_implemented")
         self.calls.append(projected_payload)
         if self._fail_with is not None:
             raise ProviderError(self._fail_with)
@@ -78,6 +80,8 @@ class FakeProvider:
 
 def _deterministic_content(payload: EgressPayload) -> str:
     """Derive a stable answer from the payload so fixture runs are reproducible."""
+    if isinstance(payload, L1PlanPayload):
+        raise ProviderError("planning_not_implemented")
     excerpts = (
         payload.gold_excerpts
         if isinstance(payload, JudgePayload)

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from specpilot.contracts.egress import (
     EgressRequest,
+    EgressStage,
     EvidenceExcerpt,
     JudgePayload,
     L1OnlinePayload,
@@ -143,6 +144,19 @@ def test_version_metadata_carries_source_and_corpus_identity() -> None:
 
     assert version.source_manifest_id == "a" * 64
     assert version.corpus_manifest_id == "b" * 64
+
+
+def test_planning_policy_allows_only_l1_plan_and_prices_its_query() -> None:
+    policy = fixture_policy()
+
+    snapshot = policy.snapshot(
+        task_level=TaskLevel.L1.value,
+        payload_kind="l1_plan",
+        document_id=FIXTURE_DOCUMENT,
+    )
+
+    assert policy.stage_payload_allowlist[EgressStage.PLANNING.value] == ("l1_plan",)
+    assert snapshot.projected_text_tokens == 1024
 
 
 def excerpt(

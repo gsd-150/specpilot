@@ -14,8 +14,10 @@ from specpilot.contracts.egress import (
     DisclosureFact,
     EgressRequest,
     EgressStage,
+    EvidenceExcerpt,
     JudgePayload,
     L1OnlinePayload,
+    L1PlanPayload,
     L2AtomicClaimPayload,
     L2DesignPayload,
     ReservationOutcome,
@@ -193,11 +195,7 @@ class EgressPolicyEnforcer:
             if projected_count > snapshot.projected_text_tokens:
                 _reject("projected_text_tokens_exceeded", "projected text is too large")
 
-        excerpts = (
-            payload.gold_excerpts
-            if isinstance(payload, JudgePayload)
-            else payload.evidence_excerpts
-        )
+        excerpts = _payload_excerpts(payload)
         disclosures: list[DisclosureFact] = []
         transmitted_tokens = 0
         transmitted_bytes = 0
@@ -226,7 +224,11 @@ class EgressPolicyEnforcer:
             transmitted_tokens += token_count
             transmitted_bytes += byte_count
 
-        toc_nodes = () if isinstance(payload, JudgePayload) else payload.toc_nodes
+        toc_nodes = (
+            ()
+            if isinstance(payload, (JudgePayload, L1PlanPayload))
+            else payload.toc_nodes
+        )
         if len(toc_nodes) > snapshot.toc_per_call:
             _reject("toc_call_exceeded", "TOC per-call cap exceeded")
         claim_id = (
@@ -756,9 +758,13 @@ def _check_transmitted_cap(
 
 
 def _payload_task_level(
-    payload: L1OnlinePayload | L2DesignPayload | L2AtomicClaimPayload | JudgePayload,
+    payload: L1OnlinePayload
+    | L1PlanPayload
+    | L2DesignPayload
+    | L2AtomicClaimPayload
+    | JudgePayload,
 ) -> TaskLevel | None:
-    if isinstance(payload, L1OnlinePayload):
+    if isinstance(payload, (L1OnlinePayload, L1PlanPayload)):
         return TaskLevel.L1
     if isinstance(payload, JudgePayload):
         return None
@@ -786,11 +792,7 @@ def _validate_version_binding(request: EgressRequest) -> None:
             "payload_version_mismatch",
             "online payload version metadata does not match request metadata",
         )
-    excerpts = (
-        payload.gold_excerpts
-        if isinstance(payload, JudgePayload)
-        else payload.evidence_excerpts
-    )
+    excerpts = _payload_excerpts(payload)
     if any(
         item.corpus_manifest_id != version.corpus_manifest_id for item in excerpts
     ):
@@ -800,10 +802,28 @@ def _validate_version_binding(request: EgressRequest) -> None:
         )
 
 
+def _payload_excerpts(
+    payload: L1OnlinePayload
+    | L1PlanPayload
+    | L2DesignPayload
+    | L2AtomicClaimPayload
+    | JudgePayload,
+) -> tuple[EvidenceExcerpt, ...]:
+    if isinstance(payload, JudgePayload):
+        return payload.gold_excerpts
+    if isinstance(payload, L1PlanPayload):
+        return ()
+    return payload.evidence_excerpts
+
+
 def _projected_text(
-    payload: L1OnlinePayload | L2DesignPayload | L2AtomicClaimPayload | JudgePayload,
+    payload: L1OnlinePayload
+    | L1PlanPayload
+    | L2DesignPayload
+    | L2AtomicClaimPayload
+    | JudgePayload,
 ) -> str | None:
-    if isinstance(payload, L1OnlinePayload):
+    if isinstance(payload, (L1OnlinePayload, L1PlanPayload)):
         return payload.query
     if isinstance(payload, L2DesignPayload):
         return payload.design_description

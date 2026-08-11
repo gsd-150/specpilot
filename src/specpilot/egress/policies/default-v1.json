@@ -47,6 +47,7 @@
     "tokens": 40960
   },
   "l1_query_tokens": 1024,
+  "l1_plan_tokens": 1024,
   "l1_root_transmitted": {
     "bytes": 245760,
     "excerpts": 0,
@@ -86,6 +87,9 @@
   "max_l2_claims_per_run": 3,
   "schema_version": "egress-policy/v1",
   "stage_payload_allowlist": {
+    "planning": [
+      "l1_plan"
+    ],
     "compliance": [
       "l1_query",
       "l2_design",

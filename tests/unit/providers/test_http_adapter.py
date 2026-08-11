@@ -22,8 +22,10 @@ from specpilot.providers.http import (
     HttpChatAdapter,
     ProviderCredentialMissing,
     ProviderEndpoint,
+    _system_prompt,
     resolve_credential,
 )
+from tests.unit.egress.test_planning_projection import planning_request
 from tests.unit.egress.test_policy_projection import l1_payload
 
 pytestmark = pytest.mark.anyio
@@ -92,6 +94,26 @@ async def test_a_successful_call_returns_only_allowlisted_response_facts() -> No
     assert response.metadata.prompt_tokens == 41
     assert response.metadata.completion_tokens == 7
     assert response.metadata.finish_reason == "stop"
+
+
+async def test_planning_payload_is_refused_before_an_http_request() -> None:
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured)
+
+    with pytest.raises(ProviderError) as caught:
+        await adapter.send(planning_request(query="When may a sender retry?").payload)
+
+    assert caught.value.public_error_code == "planning_not_implemented"
+    assert captured == []
+
+
+def test_planning_payload_is_refused_before_the_answer_prompt_renders() -> None:
+    payload = planning_request(query="When may a sender retry?").payload
+
+    with pytest.raises(ProviderError) as caught:
+        _system_prompt(payload)
+
+    assert caught.value.public_error_code == "planning_not_implemented"
 
 
 async def test_the_request_carries_the_key_and_the_payload_and_nothing_else() -> None:
