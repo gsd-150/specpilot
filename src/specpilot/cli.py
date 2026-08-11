@@ -2631,7 +2631,12 @@ async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
     )
     from specpilot.egress.postgres import PostgresEgressLedger
 
-    policy = EgressPolicy.load(arguments.policy)
+    try:
+        policy = EgressPolicy.load(arguments.policy)
+    except OSError:
+        return _refuse("egress_policy_unavailable", EXIT_IO)
+    except (ValidationError, ValueError):
+        return _refuse("invalid_egress_policy", EXIT_USAGE)
     ledger = PostgresEgressLedger(
         arguments.ledger_dsn,
         policy=policy,

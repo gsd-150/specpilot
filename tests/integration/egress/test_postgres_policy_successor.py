@@ -420,6 +420,7 @@ async def test_concurrent_reservation_is_copied_or_refused_after_head_moves(
     second_request = reservation_for(distinct_excerpt(2)).model_copy(
         update={"evaluation_root_id": "concurrent-case-2", "run_id": "run-2"}
     )
+    first_id = first_request.disclosures[0].disclosure_id
     second_id = second_request.disclosures[0].disclosure_id
     old_book = _ledger(clean_ledger, old_policy)
     await old_book.check_and_reserve(
@@ -446,14 +447,16 @@ async def test_concurrent_reservation_is_copied_or_refused_after_head_moves(
     async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
         predecessor = await (
             await connection.execute(
-                "SELECT corpus_usage FROM egress_corpus_ledger "
+                "SELECT corpus_usage, unique_excerpts, unique_tokens, unique_bytes "
+                "FROM egress_corpus_ledger "
                 "WHERE corpus_ledger_id = %s",
                 (result.predecessor_ledger_id,),
             )
         ).fetchone()
         successor = await (
             await connection.execute(
-                "SELECT corpus_usage FROM egress_corpus_ledger "
+                "SELECT corpus_usage, unique_excerpts, unique_tokens, unique_bytes "
+                "FROM egress_corpus_ledger "
                 "WHERE corpus_ledger_id = %s",
                 (result.successor_ledger_id,),
             )
@@ -467,21 +470,51 @@ async def test_concurrent_reservation_is_copied_or_refused_after_head_moves(
         ).fetchall()
 
     assert predecessor is not None and successor is not None
-    predecessor_ids = predecessor[0]["disclosure_ids"]
-    successor_ids = successor[0]["disclosure_ids"]
     if isinstance(reservation_or_error, BaseException):
         assert isinstance(reservation_or_error, EgressPolicyViolation)
         assert reservation_or_error.code == "policy_snapshot_mismatch"
         assert reservation_rows == []
-        assert second_id not in predecessor_ids
-        assert second_id not in successor_ids
-        assert result.inherited_unique_excerpts == 1
+        expected_ids = [first_id]
+        expected_totals = (1, 2, 16)
     else:
         assert len(reservation_rows) == 1
         assert str(reservation_rows[0][0]) == result.predecessor_ledger_id
-        assert second_id in predecessor_ids
-        assert second_id in successor_ids
-        assert result.inherited_unique_excerpts == 2
+        expected_ids = [first_id, second_id]
+        expected_totals = (2, 4, 32)
+
+    expected_document_usage = [
+        {
+            "document_id": FIXTURE_DOCUMENT,
+            "disclosure_ids": expected_ids,
+            "unique_tokens": expected_totals[1],
+            "unique_bytes": expected_totals[2],
+        }
+    ]
+    predecessor_usage = predecessor[0]
+    successor_usage = successor[0]
+    assert predecessor_usage["corpus_manifest_id"] == (
+        first_request.version.corpus_manifest_id
+    )
+    assert successor_usage["corpus_manifest_id"] == (
+        first_request.version.corpus_manifest_id
+    )
+    assert predecessor_usage["policy_hash"] == old_policy.policy_hash
+    assert successor_usage["policy_hash"] == new_policy.policy_hash
+    assert predecessor_usage["disclosure_ids"] == expected_ids
+    assert successor_usage["disclosure_ids"] == expected_ids
+    assert predecessor_usage["unique_tokens"] == expected_totals[1]
+    assert successor_usage["unique_tokens"] == expected_totals[1]
+    assert predecessor_usage["unique_bytes"] == expected_totals[2]
+    assert successor_usage["unique_bytes"] == expected_totals[2]
+    assert predecessor_usage["document_usage"] == expected_document_usage
+    assert successor_usage["document_usage"] == expected_document_usage
+    assert predecessor[1:] == expected_totals
+    assert successor[1:] == expected_totals
+    assert (
+        result.inherited_unique_excerpts,
+        result.inherited_unique_tokens,
+        result.inherited_unique_bytes,
+    ) == expected_totals
 
 
 @pytest.mark.anyio

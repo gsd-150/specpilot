@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from specpilot.cli import EXIT_IO, EXIT_REFUSED, main
+from specpilot.cli import EXIT_IO, EXIT_REFUSED, EXIT_USAGE, main
 from specpilot.egress.ledger import PolicyRebindAmbiguous
 from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
@@ -171,3 +171,73 @@ def test_rebind_policy_ambiguous_commit_prints_only_the_stable_io_code(
     assert code == EXIT_IO
     assert captured.out == ""
     assert captured.err == "policy_rebind_ambiguous\n"
+
+
+def test_rebind_policy_unreadable_policy_hides_the_local_path_and_skips_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_sentinel = "private-policy-path-sentinel"
+    missing_policy = tmp_path / f"{path_sentinel}.json"
+
+    def fail_if_database_is_constructed(*args: object, **kwargs: object) -> None:
+        raise AssertionError("database was constructed before policy loading finished")
+
+    monkeypatch.setattr(
+        "specpilot.egress.postgres.PostgresEgressLedger",
+        fail_if_database_is_constructed,
+    )
+
+    code = main(
+        _rebind_arguments(
+            "postgresql://database-must-not-be-contacted",
+            tmp_path,
+            missing_policy,
+            "c" * 64,
+            "d" * 64,
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert code == EXIT_IO
+    assert captured.out == ""
+    assert captured.err == "egress_policy_unavailable\n"
+    assert path_sentinel not in captured.out + captured.err
+
+
+def test_rebind_policy_invalid_policy_hides_input_and_skips_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content_sentinel = "private-policy-content-sentinel"
+    invalid_policy = tmp_path / "invalid-policy.json"
+    invalid_policy.write_text(
+        json.dumps({"private_field": content_sentinel}),
+        encoding="utf-8",
+    )
+
+    def fail_if_database_is_constructed(*args: object, **kwargs: object) -> None:
+        raise AssertionError("database was constructed before policy loading finished")
+
+    monkeypatch.setattr(
+        "specpilot.egress.postgres.PostgresEgressLedger",
+        fail_if_database_is_constructed,
+    )
+
+    code = main(
+        _rebind_arguments(
+            "postgresql://database-must-not-be-contacted",
+            tmp_path,
+            invalid_policy,
+            "c" * 64,
+            "d" * 64,
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert code == EXIT_USAGE
+    assert captured.out == ""
+    assert captured.err == "invalid_egress_policy\n"
+    assert content_sentinel not in captured.out + captured.err
