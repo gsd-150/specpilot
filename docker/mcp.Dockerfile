@@ -21,5 +21,5 @@ EXPOSE 8080
 
 # Bound to all interfaces inside the container only; Compose decides whether the
 # port is published, and only the demo profile does.
-CMD ["python", "-m", "uvicorn", "--factory", "specpilot.mcp_server.app:create_app", \
+CMD ["python", "-m", "uvicorn", "--factory", "specpilot.mcp_server.app:create_runtime_app", \
      "--host", "0.0.0.0", "--port", "8080"]

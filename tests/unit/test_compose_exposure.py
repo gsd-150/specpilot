@@ -61,3 +61,18 @@ def test_internal_services_are_on_an_internal_network() -> None:
         block = text[text.index(f"  {service}") :]
         block = block[: block.index("\n\n")]
         assert "networks: [internal]" in block, f"{service} left the internal network"
+
+
+def test_mcp_service_declares_only_exact_internal_transport_identities() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    block = text[text.index("  mcp:") : text.index("\n\n  api:")]
+
+    assert (
+        "SPECPILOT_MCP_ALLOWED_HOSTS_JSON: "
+        "'[\"127.0.0.1:8080\",\"mcp:8080\"]'"
+    ) in block
+    assert (
+        "SPECPILOT_MCP_ALLOWED_ORIGINS_JSON: "
+        "'[\"http://127.0.0.1:8080\",\"http://mcp:8080\"]'"
+    ) in block
+    assert ":*" not in block

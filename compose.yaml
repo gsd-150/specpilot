@@ -10,8 +10,9 @@
 # the base service's `profiles` list. The invariant is now textual and easy to
 # check: no `ports:` key appears anywhere below.
 #
-# W0 status: api and mcp are health skeletons. Neither serves an L1 or L2
-# capability yet; the five MCP tools arrive in W3.
+# W3 status: MCP serves the five local tools only when explicit frozen-artifact
+# inputs validate; otherwise its health endpoint stays unavailable. The API is
+# still a health skeleton until the later W3 slice owns browser-facing runs.
 
 name: specpilot
 
@@ -63,6 +64,13 @@ services:
       dockerfile: docker/mcp.Dockerfile
     profiles: ["demo", "real"]
     networks: [internal]
+    environment:
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR:-}
+      SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID:-}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR:-}
+      SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON:-[]}
+      SPECPILOT_MCP_ALLOWED_HOSTS_JSON: '["127.0.0.1:8080","mcp:8080"]'
+      SPECPILOT_MCP_ALLOWED_ORIGINS_JSON: '["http://127.0.0.1:8080","http://mcp:8080"]'
     depends_on:
       postgres:
         condition: service_healthy

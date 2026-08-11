@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -154,15 +157,28 @@ async def test_all_tools_round_trip_over_real_streamable_http_protocol(
         results = [await client.call_tool(name, arguments) for name, arguments in calls]
 
     assert all(result.isError is False for result in results)
-    assert all(result.structuredContent is not None for result in results)
+    search, clause, toc, references, term = (
+        result.structuredContent for result in results
+    )
+    assert search is not None and 1 <= len(search["hits"]) <= 5
+    assert all("text" not in hit for hit in search["hits"])
+    assert clause is not None and clause["clause_id"] == expandable.unit_id
+    assert clause["document_id"] == FIXTURE_DOCUMENT_ID
+    assert clause["text"].startswith("A sender")
+    assert toc is not None and len(toc["nodes"]) == 2
+    assert references is not None and 1 <= len(references["clause_ids"]) <= 3
+    assert expandable.unit_id not in references["clause_ids"]
+    assert term is not None and len(term["definition_clause_ids"]) == 2
 
 
 @pytest.mark.integration
 @pytest.mark.anyio
 async def test_validation_and_service_errors_are_stable_and_sanitized(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     services = _fixture_services(tmp_path)
+    caplog.set_level(logging.DEBUG)
 
     async with _mcp_asgi_client(services) as client:
         invalid = await client.call_tool(
@@ -194,10 +210,27 @@ async def test_validation_and_service_errors_are_stable_and_sanitized(
                 "limit": 5,
             },
         )
+        extra = await client.call_tool(
+            "search_clauses",
+            {
+                "query": "retry",
+                "corpus_manifest_id": FIXTURE_CORPUS_ID,
+                "document_ids": [FIXTURE_DOCUMENT_ID],
+                "normative_levels": [],
+                "limit": 5,
+                "unexpected_secret": "secret-extra-value",
+            },
+        )
+        unknown = await client.call_tool(
+            "unknown_secret_tool",
+            {"unexpected_secret": "secret-unknown-value"},
+        )
 
     invalid_text = invalid.content[0].text
     closed_text = closed.content[0].text
     missing_text = missing.content[0].text
+    extra_text = extra.content[0].text
+    unknown_text = unknown.content[0].text
     assert invalid.isError is True
     assert closed.isError is True
     assert '"code":"invalid_argument"' in invalid_text
@@ -212,3 +245,107 @@ async def test_validation_and_service_errors_are_stable_and_sanitized(
     assert '"field":"arguments"' in missing_text
     assert "secret-missing-field-query" not in missing_text
     assert "validation error" not in missing_text.lower()
+    assert extra.isError is True
+    assert '"code":"invalid_argument"' in extra_text
+    assert '"field":"arguments"' in extra_text
+    assert "secret-extra-value" not in extra_text
+    assert unknown.isError is True
+    assert '"code":"invalid_argument"' in unknown_text
+    assert '"field":"tool"' in unknown_text
+    assert "unknown_secret_tool" not in unknown_text
+    assert "secret-unknown-value" not in unknown_text
+    server_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if not record.name.startswith("mcp.client.")
+    )
+    assert "unknown_secret_tool" not in server_logs
+    assert "secret-unknown-value" not in server_logs
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_malformed_envelope_and_unexpected_tool_errors_never_reach_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = _fixture_services(tmp_path)
+    app = create_app(services)
+    transport = httpx.ASGITransport(app=app)
+    caplog.set_level(logging.DEBUG)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1",
+        ) as http_client,
+    ):
+        malformed = await http_client.post(
+            "/mcp",
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": {"bad": "secret-envelope-name"},
+                    "arguments": ["/private/secret-envelope-path"],
+                },
+            },
+        )
+
+    assert malformed.status_code == 400
+    assert "secret-envelope-name" not in malformed.text
+    assert "/private/secret-envelope-path" not in malformed.text
+    assert "secret-envelope-name" not in caplog.text
+    assert "/private/secret-envelope-path" not in caplog.text
+    assert "validation error" not in caplog.text.lower()
+
+    exploding = Mock(spec=McpToolServices)
+    exploding.get_toc.side_effect = RuntimeError(
+        "secret-tool-failure /private/secret-tool-path"
+    )
+    caplog.clear()
+    async with _mcp_asgi_client(cast(McpToolServices, exploding)) as client:
+        failed = await client.call_tool(
+            "get_toc",
+            {
+                "corpus_manifest_id": FIXTURE_CORPUS_ID,
+                "document_id": FIXTURE_DOCUMENT_ID,
+                "limit": 2,
+            },
+        )
+
+    failed_text = failed.content[0].text
+    assert failed.isError is True
+    assert '"code":"backend_unavailable"' in failed_text
+    assert "secret-tool-failure" not in failed_text
+    assert "/private/secret-tool-path" not in failed_text
+    assert "secret-tool-failure" not in caplog.text
+    assert "/private/secret-tool-path" not in caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_streamable_client_rejects_overlapping_context_entry(
+    tmp_path: Path,
+) -> None:
+    services = _fixture_services(tmp_path)
+    app = create_app(services)
+    transport = httpx.ASGITransport(app=app)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1",
+        ) as http_client,
+        StreamableMcpClient(
+            "http://127.0.0.1/mcp", http_client=http_client
+        ) as client,
+    ):
+        with pytest.raises(RuntimeError, match="already active"):
+            await client.__aenter__()

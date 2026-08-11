@@ -30,10 +30,22 @@ async def test_server_registers_the_five_typed_read_only_tools() -> None:
         "query",
         "corpus_manifest_id",
         "document_ids",
-        "normative_levels",
         "limit",
     ]
-    assert schemas["search_clauses"]["properties"]["limit"]["type"] == "integer"
+    assert schemas["search_clauses"]["additionalProperties"] is False
+    assert schemas["search_clauses"]["properties"]["query"]["minLength"] == 1
+    assert schemas["search_clauses"]["properties"]["query"]["maxLength"] == 4096
+    assert schemas["search_clauses"]["properties"]["document_ids"]["minItems"] == 1
+    assert schemas["search_clauses"]["properties"]["document_ids"]["maxItems"] == 12
+    assert schemas["search_clauses"]["properties"]["normative_levels"][
+        "maxItems"
+    ] == 5
+    assert schemas["search_clauses"]["properties"]["limit"] == {
+        "maximum": 20,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer",
+    }
     assert schemas["expand_references"]["properties"]["clause_ids"]["type"] == (
         "array"
     )
@@ -43,20 +55,53 @@ async def test_server_registers_the_five_typed_read_only_tools() -> None:
     assert server.settings.transport_security.enable_dns_rebinding_protection is True
     assert server.settings.transport_security.allowed_hosts == [
         "127.0.0.1",
-        "127.0.0.1:*",
         "localhost",
-        "localhost:*",
         "[::1]",
-        "[::1]:*",
     ]
     assert server.settings.transport_security.allowed_origins == [
         "http://127.0.0.1",
-        "http://127.0.0.1:*",
         "http://localhost",
-        "http://localhost:*",
         "http://[::1]",
-        "http://[::1]:*",
     ]
+
+
+def test_explicit_compose_identity_is_accepted_without_weakening_defaults() -> None:
+    services = cast(McpToolServices, Mock(spec=McpToolServices))
+
+    app = create_app(
+        services,
+        allowed_hosts=("127.0.0.1:8080", "mcp:8080"),
+        allowed_origins=("http://127.0.0.1:8080", "http://mcp:8080"),
+    )
+    with TestClient(app, base_url="http://mcp:8080") as client:
+        accepted = client.post(
+            "/mcp",
+            headers={"host": "mcp:8080", "content-type": "application/json"},
+            json={},
+        )
+        hostile = client.post(
+            "/mcp",
+            headers={
+                "host": "mcp:8080",
+                "origin": "http://attacker.example",
+                "content-type": "application/json",
+            },
+            json={},
+        )
+
+    assert accepted.status_code != 421
+    assert hostile.status_code == 403
+
+
+def test_transport_identity_configuration_rejects_wildcards() -> None:
+    services = cast(McpToolServices, Mock(spec=McpToolServices))
+
+    with pytest.raises(ValueError, match="exact"):
+        create_app(
+            services,
+            allowed_hosts=("mcp:*",),
+            allowed_origins=("http://mcp:8080",),
+        )
 
 
 def test_host_app_serves_health_and_rejects_non_loopback_mcp_hosts() -> None:

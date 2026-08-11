@@ -49,7 +49,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
-    "ignore::pydantic_settings.sources.utils.IncompleteFieldDefinitionWarning",
+    "ignore:^Field 'lifespan' has an incomplete definition.*:pydantic_settings.sources.utils.IncompleteFieldDefinitionWarning:pydantic_settings\\.sources\\.utils$",
     "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [

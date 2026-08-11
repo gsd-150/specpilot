@@ -31,8 +31,12 @@ class StreamableMcpClient:
         self._http_client = http_client
         self._exit_stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        self._entering = False
 
     async def __aenter__(self) -> Self:
+        if self._entering or self._exit_stack is not None:
+            raise RuntimeError("StreamableMcpClient is already active")
+        self._entering = True
         stack = AsyncExitStack()
         try:
             read_stream, write_stream, _ = await stack.enter_async_context(
@@ -49,6 +53,8 @@ class StreamableMcpClient:
         except BaseException:
             await stack.aclose()
             raise
+        finally:
+            self._entering = False
         self._exit_stack = stack
         self._session = session
         return self
