@@ -262,7 +262,7 @@ provenance chains, three-layer manifests, gold protocols, disclosure limits — 
 squarely Knowledge Management, which is your field and not a generic CS
 candidate's.
 
-### 3. Task 11 completed — the corpus ledger successor row
+### 3. Task 11 implementation completed on the branch — the corpus ledger successor row
 
 Implemented by migration `003_egress_ledger_policy_successor.sql` and
 `.venv/bin/python -m specpilot.cli egress rebind-policy`. The operator must name

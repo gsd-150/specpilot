@@ -880,9 +880,9 @@ a deliberate cap change should write a successor row carrying the new
 `policy_hash` and a pointer to the one it supersedes, leaving the old totals
 readable and attributable to the policy they were accumulated under.
 
-Until that exists, a cap change on a corpus with recorded usage requires
-rebuilding the ledger database, which is acceptable only because every row in it
-today is from this session's own failed test sends.
+Before this implementation, a cap change on a corpus with recorded usage
+required rebuilding the ledger database, which was acceptable only because
+every row in it at that point was from this session's own failed test sends.
 
 Resolved on the Task 11 branch by migration
 `003_egress_ledger_policy_successor.sql` and the operator command
