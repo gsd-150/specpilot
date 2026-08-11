@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from specpilot.contracts.egress import EgressRequest
 from specpilot.egress.enforcer import EgressPolicyEnforcer
@@ -36,6 +37,33 @@ class NoAdapterForRoute(LedgerError):
 # cannot express it. What bounds the disclosure in that case is the reservation,
 # which was already committed and is never refunded on error.
 _NOTHING_MEASURED = RequestSize(request_tokens=0, request_bytes=0)
+
+
+@dataclass(frozen=True, slots=True)
+class TransportReceipt:
+    """The complete, sanitized result of one policy-bound provider attempt."""
+
+    response: ProviderResponse
+    reservation_id: str
+    replayed: bool
+    request_size: RequestSize
+
+
+class ProviderAttemptError(Exception):
+    """A recorded provider failure with reservation identity and no raw cause."""
+
+    __slots__ = ("public_error_code", "replayed", "reservation_id")
+
+    def __init__(
+        self,
+        public_error_code: str,
+        reservation_id: str,
+        replayed: bool,
+    ) -> None:
+        self.public_error_code = public_error_code
+        self.reservation_id = reservation_id
+        self.replayed = replayed
+        super().__init__(public_error_code)
 
 
 class PolicyBoundTransport:
@@ -73,7 +101,7 @@ class PolicyBoundTransport:
         request: EgressRequest,
         *,
         idempotency_key: str,
-    ) -> ProviderResponse:
+    ) -> TransportReceipt:
         adapter = self.__adapters.get((request.route.provider_id, request.model_id))
         if adapter is None:
             raise NoAdapterForRoute()
@@ -103,8 +131,12 @@ class PolicyBoundTransport:
                 duration_ms=_elapsed_ms(started),
                 public_error_code=error.public_error_code,
             )
-            raise
-        except Exception as error:
+            raise ProviderAttemptError(
+                error.public_error_code,
+                reservation.reservation_id,
+                reservation.replayed,
+            ) from None
+        except Exception:
             # An unclassified adapter fault: it is not known whether anything
             # left the machine, so this is recorded and re-raised, never retried
             # transparently.
@@ -116,19 +148,29 @@ class PolicyBoundTransport:
                 duration_ms=_elapsed_ms(started),
                 public_error_code="provider_unclassified_error",
             )
-            raise ProviderError("provider_unclassified_error") from error
+            raise ProviderAttemptError(
+                "provider_unclassified_error",
+                reservation.reservation_id,
+                reservation.replayed,
+            ) from None
 
+        request_size = RequestSize(
+            request_tokens=response.metadata.prompt_tokens,
+            request_bytes=response.metadata.request_bytes,
+        )
         await self.__record(
             reservation.reservation_id,
             request,
-            RequestSize(
-                request_tokens=response.metadata.prompt_tokens,
-                request_bytes=response.metadata.request_bytes,
-            ),
+            request_size,
             AttemptOutcome.SUCCEEDED,
             duration_ms=_elapsed_ms(started),
         )
-        return response
+        return TransportReceipt(
+            response=response,
+            reservation_id=reservation.reservation_id,
+            replayed=reservation.replayed,
+            request_size=request_size,
+        )
 
     async def __record(
         self,
@@ -164,4 +206,9 @@ def _elapsed_ms(started: float) -> int:
     return max(int((time.monotonic() - started) * 1000), 0)
 
 
-__all__ = ["NoAdapterForRoute", "PolicyBoundTransport"]
+__all__ = [
+    "NoAdapterForRoute",
+    "PolicyBoundTransport",
+    "ProviderAttemptError",
+    "TransportReceipt",
+]

@@ -7,9 +7,8 @@ from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
 from specpilot.egress.postgres import PostgresEgressLedger
-from specpilot.providers.base import ProviderError
 from specpilot.providers.fake import FakeProvider
-from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.providers.transport import PolicyBoundTransport, ProviderAttemptError
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt
 from tests.unit.egress.test_policy_projection import (
     NOW,
@@ -88,15 +87,15 @@ async def test_a_retry_under_a_new_key_is_charged_transmitted_usage_again(
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 2
 
 
-async def test_a_replayed_key_does_not_reach_the_provider_twice(
+async def test_a_replayed_key_reuses_reservation_identity_and_reports_replay(
     clean_ledger: str,
 ) -> None:
     provider = FakeProvider()
     line = transport(clean_ledger, provider)
     request = request_with(distinct_excerpt(1))
 
-    await line.send(request, idempotency_key="evidence-1")
-    await line.send(request, idempotency_key="evidence-1")
+    first = await line.send(request, idempotency_key="evidence-1")
+    replay = await line.send(request, idempotency_key="evidence-1")
 
     usage = await scalar(
         clean_ledger, "SELECT usage_snapshot FROM egress_evaluation_root"
@@ -106,6 +105,11 @@ async def test_a_replayed_key_does_not_reach_the_provider_twice(
         "the replay reused the reservation, so no second charge"
     )
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
+    assert first.replayed is False
+    assert replay.replayed is True
+    assert replay.reservation_id == first.reservation_id
+    assert provider.call_count == 2
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 2
 
 
 async def test_a_fallback_provider_records_a_second_route_disclosure(
@@ -147,8 +151,13 @@ async def test_a_known_provider_failure_is_recorded_and_does_not_seal(
     provider = FakeProvider(fail_with="provider_timeout")
     line = transport(clean_ledger, provider)
 
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderAttemptError) as caught:
         await line.send(request_with(distinct_excerpt(1)), idempotency_key="evidence-1")
+
+    assert caught.value.reservation_id == str(
+        await scalar(clean_ledger, "SELECT reservation_id FROM egress_reservation")
+    )
+    assert caught.value.replayed is False
 
     assert (
         await scalar(clean_ledger, "SELECT public_error_code FROM egress_attempt")

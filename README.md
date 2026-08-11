@@ -28,6 +28,21 @@ filename order, so reusing one you migrated by hand hides a missing migration.
 still report "passed". A run that proves anything sets both
 `SPECPILOT_TEST_DSN` and `SPECPILOT_TEST_QDRANT_URL`.
 
+## Enabling ledger-bound planning
+
+Migration 004 adds only the closed `planning` value to the reservation stage
+constraint. It preserves populated ledgers and does not authorize or rebind a
+corpus policy epoch. Apply the checked-out artifact explicitly before enabling
+the planner:
+
+```bash
+psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 \
+  -f migrations/004_egress_planning_stage.sql
+```
+
+The packaged policy change still requires the explicit successor/rebind flow
+below. Neither migration nor policy rebinding is automatic.
+
 ## Rebinding a corpus ledger to a successor policy
 
 Migration 003 is a separate, versioned operations artifact from the repository

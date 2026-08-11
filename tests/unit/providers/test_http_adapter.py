@@ -96,24 +96,44 @@ async def test_a_successful_call_returns_only_allowlisted_response_facts() -> No
     assert response.metadata.finish_reason == "stop"
 
 
-async def test_planning_payload_is_refused_before_an_http_request() -> None:
+async def test_planning_payload_sends_source_free_catalog_json() -> None:
     captured: list[httpx.Request] = []
     adapter = adapter_returning(ok_body(), capture=captured)
-
-    with pytest.raises(ProviderError) as caught:
-        await adapter.send(planning_request(query="When may a sender retry?").payload)
-
-    assert caught.value.public_error_code == "planning_not_implemented"
-    assert captured == []
-
-
-def test_planning_payload_is_refused_before_the_answer_prompt_renders() -> None:
     payload = planning_request(query="When may a sender retry?").payload
 
-    with pytest.raises(ProviderError) as caught:
-        _system_prompt(payload)
+    await adapter.send(payload)
 
-    assert caught.value.public_error_code == "planning_not_implemented"
+    messages = json.loads(captured[0].content)["messages"]
+    system = next(
+        message["content"] for message in messages if message["role"] == "system"
+    )
+    user = next(message["content"] for message in messages if message["role"] == "user")
+    rendered = json.loads(user)
+    assert rendered == payload.model_dump(mode="json")
+    assert payload.query not in system
+    assert "excerpt" not in user.lower()
+    assert "candidate" not in user.lower()
+    assert "disclosure" not in user.lower()
+
+
+async def test_planning_never_uses_native_provider_tool_calls() -> None:
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured, probe_tools=True)
+
+    await adapter.send(planning_request(query="When may a sender retry?").payload)
+
+    body = json.loads(captured[0].content)
+    assert "tools" not in body
+
+
+def test_planning_payload_uses_the_formal_json_only_contract() -> None:
+    payload = planning_request(query="When may a sender retry?").payload
+
+    system = _system_prompt(payload)
+
+    assert "JSON object" in system
+    assert "JSON content only" in system
+    assert "citations" not in system
 
 
 async def test_the_request_carries_the_key_and_the_payload_and_nothing_else() -> None:

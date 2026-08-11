@@ -1606,6 +1606,7 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
         ProviderCredentialMissing,
         resolve_credential,
     )
+    from specpilot.providers.transport import PolicyBoundTransport
 
     try:
         corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
@@ -1714,13 +1715,17 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
     except ProviderCredentialMissing:
         return _refuse("provider_credential_missing", EXIT_USAGE)
     adapter = HttpChatAdapter(endpoint, api_key=key)
+    transport = PolicyBoundTransport(
+        enforcer=enforcer,
+        ledger=ledger,
+        adapters=(cast(Any, adapter),),
+    )
     try:
         outcome = await run_answer(
             arguments.question,
             evidence,
-            enforcer=enforcer,
-            ledger=ledger,
-            adapter=adapter,
+            transport=transport,
+            model_id=endpoint.model_id,
             source_manifest=authorized,
             corpus_manifest_id=corpus_manifest.manifest_id,
             evaluation_root_id=arguments.evaluation_root_id,
@@ -2672,9 +2677,11 @@ async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
 async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     from specpilot.egress.ledger import LedgerError
     from specpilot.egress.postgres import PostgresEgressLedger
-    from specpilot.providers.base import ProviderError
     from specpilot.providers.fake import FakeProvider
-    from specpilot.providers.transport import PolicyBoundTransport
+    from specpilot.providers.transport import (
+        PolicyBoundTransport,
+        ProviderAttemptError,
+    )
 
     # --route must actually change the route. A judge smoke that quietly
     # exercises the online chain is false evidence for the go/no-go checklist.
@@ -2763,12 +2770,12 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
         )
     )
     try:
-        response = await transport.send(request, idempotency_key="route-smoke-1")
+        receipt = await transport.send(request, idempotency_key="route-smoke-1")
     except EgressPolicyViolation as error:
         return _refuse(f"refused:{error.code}")
     except LedgerError as error:
         return _refuse(f"blocked:{error.code}")
-    except ProviderError as error:
+    except ProviderAttemptError as error:
         return _refuse(f"blocked:{error.public_error_code}")
     finally:
         aclose = getattr(provider, "aclose", None)
@@ -2781,10 +2788,10 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
             "route": arguments.route,
             "provider_use": manifest.provider_route_binding.use.value,
             "adapter": "live" if live else "fixture",
-            "provider_id": response.provider_id,
-            "model_id": response.model_id,
-            "finish_reason": response.metadata.finish_reason,
-            "tool_call_count": response.metadata.tool_call_count,
+            "provider_id": receipt.response.provider_id,
+            "model_id": receipt.response.model_id,
+            "finish_reason": receipt.response.metadata.finish_reason,
+            "tool_call_count": receipt.response.metadata.tool_call_count,
             # Priced by the caps: source text only. Deliberately NOT placed
             # beside prompt_tokens, which covers the whole prompt including the
             # system message and the tool schema. Comparing those two reads as
@@ -2793,14 +2800,15 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
             # These three are like for like. A byte-level BPE cannot emit more
             # tokens than the request has bytes, so the bound is checked here
             # against a live route rather than asserted from construction.
-            "request_bytes": response.metadata.request_bytes,
-            "provider_prompt_tokens": response.metadata.prompt_tokens,
+            "request_bytes": receipt.response.metadata.request_bytes,
+            "provider_prompt_tokens": receipt.response.metadata.prompt_tokens,
             "token_upper_bound_held": (
-                response.metadata.prompt_tokens <= response.metadata.request_bytes
+                receipt.response.metadata.prompt_tokens
+                <= receipt.response.metadata.request_bytes
             ),
             "discloses": "synthetic-fixture-spec only",
             "proves": (
-                _live_findings(response)
+                _live_findings(receipt.response)
                 if live
                 else "transport, enforcer and ledger are wired and policy-bound"
             ),

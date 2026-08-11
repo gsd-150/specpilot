@@ -72,6 +72,12 @@ _SYSTEM_PROMPT = (
     "If they do not support an answer, say so."
 )
 
+_PLANNING_SYSTEM_PROMPT = (
+    "Return exactly one JSON object matching the supplied bounded ToolPlan "
+    "contract. Use only the five listed tools, prior-step references, and the "
+    "supplied corpus and document identifiers. Return JSON content only."
+)
+
 _STATUS_CODES = {
     401: "provider_unauthorized",
     403: "provider_unauthorized",
@@ -171,14 +177,12 @@ class HttpChatAdapter:
         await self._client.aclose()
 
     async def send(self, projected_payload: EgressPayload) -> ProviderResponse:
-        if isinstance(projected_payload, L1PlanPayload):
-            raise ProviderError("planning_not_implemented")
         body: dict[str, Any] = {
             "model": self.endpoint.model_id,
             "messages": _render_messages(projected_payload),
             "temperature": 0,
         }
-        if self._probe_tools:
+        if self._probe_tools and not isinstance(projected_payload, L1PlanPayload):
             body["tools"] = [PROBE_TOOL]
 
         # Serialized here rather than left to httpx, so the byte count recorded
@@ -297,7 +301,7 @@ _ATTRIBUTION = (
 def _system_prompt(payload: EgressPayload) -> str:
     """The judge scores; everything else answers under the citation contract."""
     if isinstance(payload, L1PlanPayload):
-        raise ProviderError("planning_not_implemented")
+        return _PLANNING_SYSTEM_PROMPT
     if isinstance(payload, JudgePayload):
         return _SYSTEM_PROMPT
     return f"{_SYSTEM_PROMPT}\n\n{REPLY_INSTRUCTIONS}"
@@ -305,7 +309,7 @@ def _system_prompt(payload: EgressPayload) -> str:
 
 def _render_user(payload: EgressPayload) -> str:
     if isinstance(payload, L1PlanPayload):
-        raise ProviderError("planning_not_implemented")
+        return payload.model_dump_json()
     lines: list[str] = []
     if not isinstance(payload, JudgePayload):
         lines.append(

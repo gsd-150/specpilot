@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from specpilot.agents.contracts import ToolPlan
 from specpilot.contracts.egress import (
     CorpusUsage,
     EgressRequest,
@@ -23,11 +24,12 @@ from specpilot.egress.ledger import (
     ReservationState,
     RunSealed,
 )
-from specpilot.providers.base import ProviderError
 from specpilot.providers.fake import FakeProvider
 from specpilot.providers.transport import (
     NoAdapterForRoute,
     PolicyBoundTransport,
+    ProviderAttemptError,
+    TransportReceipt,
 )
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_manifest_provenance import unstored_authorized_manifest
@@ -164,7 +166,7 @@ async def assert_no_send(request: EgressRequest, expected: type[Exception], **kw
 
 
 async def test_happy_path_sends_once_and_records_one_attempt() -> None:
-    provider, ledger, response = await send(
+    provider, ledger, receipt = await send(
         egress_request(payload=l1_payload(evidence_excerpts=(distinct_excerpt(1),)))
     )
 
@@ -172,17 +174,24 @@ async def test_happy_path_sends_once_and_records_one_attempt() -> None:
     assert len(ledger.reserved) == 1
     assert len(ledger.attempts) == 1
     assert ledger.attempts[0].outcome is AttemptOutcome.SUCCEEDED
-    assert response.content.startswith("fixture answer")
+    assert isinstance(receipt, TransportReceipt)
+    assert receipt.response.content.startswith("fixture answer")
+    assert receipt.reservation_id == "res-1"
+    assert receipt.replayed is False
+    assert receipt.request_size == ledger.attempts[0].request_size
 
 
-async def test_fake_provider_refuses_unrendered_planning_payload() -> None:
+async def test_fake_provider_returns_a_content_json_planning_reply() -> None:
     provider = FakeProvider()
 
-    with pytest.raises(ProviderError) as caught:
-        await provider.send(planning_request(query="When may a sender retry?").payload)
+    response = await provider.send(
+        planning_request(query="When may a sender retry?").payload
+    )
 
-    assert caught.value.public_error_code == "planning_not_implemented"
-    assert provider.call_count == 0
+    parsed = ToolPlan.model_validate_json(response.content)
+    assert parsed.plan_id == "fixture-plan"
+    assert [step.step_id for step in parsed.steps] == ["search", "read"]
+    assert provider.call_count == 1
 
 
 async def test_the_attempt_records_the_request_not_the_cap_figure() -> None:
@@ -195,14 +204,14 @@ async def test_the_attempt_records_the_request_not_the_cap_figure() -> None:
     whichever one you happened to produce.
     """
     excerpt = distinct_excerpt(1)
-    _, ledger, response = await send(
+    _, ledger, receipt = await send(
         egress_request(payload=l1_payload(evidence_excerpts=(excerpt,)))
     )
 
     recorded = ledger.attempts[0].request_size
 
-    assert recorded.request_bytes == response.metadata.request_bytes
-    assert recorded.request_tokens == response.metadata.prompt_tokens
+    assert recorded.request_bytes == receipt.response.metadata.request_bytes
+    assert recorded.request_tokens == receipt.response.metadata.prompt_tokens
     # The distinction is only worth a column if the two numbers differ: the
     # request carries the whole payload, the cap prices the quoted text alone.
     assert recorded.request_bytes > len(excerpt.quote.encode("utf-8"))
@@ -299,15 +308,40 @@ async def test_a_known_provider_failure_records_a_failed_attempt() -> None:
     ledger = StubLedger()
     line = transport(provider, ledger)
 
-    with pytest.raises(ProviderError) as caught:
+    with pytest.raises(ProviderAttemptError) as caught:
         await line.send(egress_request(), idempotency_key="key-1")
     assert caught.value.public_error_code == "provider_timeout"
+    assert caught.value.reservation_id == "res-1"
+    assert caught.value.replayed is False
+    assert str(caught.value) == "provider_timeout"
 
     assert provider.call_count == 1
     assert len(ledger.attempts) == 1
     assert ledger.attempts[0].outcome is AttemptOutcome.FAILED_KNOWN
     assert ledger.attempts[0].public_error_code == "provider_timeout"
     assert ledger.sealed == [], "a known failure is reconciled, not sealed"
+
+
+async def test_an_unclassified_adapter_failure_carries_no_raw_exception() -> None:
+    marker = "secret-provider-body /private/provider-path"
+
+    class LeakyProvider(FakeProvider):
+        async def send(self, projected_payload: object):
+            self.calls.append(projected_payload)  # type: ignore[arg-type]
+            raise RuntimeError(marker)
+
+    provider = LeakyProvider()
+    ledger = StubLedger()
+    line = transport(provider, ledger)
+
+    with pytest.raises(ProviderAttemptError) as caught:
+        await line.send(egress_request(), idempotency_key="key-1")
+
+    assert caught.value.public_error_code == "provider_unclassified_error"
+    assert caught.value.__cause__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert ledger.attempts[0].public_error_code == "provider_unclassified_error"
 
 
 async def test_unrecordable_attempt_seals_the_run() -> None:
