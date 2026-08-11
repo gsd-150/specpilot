@@ -23,11 +23,15 @@ from specpilot.egress.ledger import (
     Attempt,
     AttemptOutcome,
     LedgerUnavailable,
+    PolicyRebindAmbiguous,
+    PolicyRebindConflict,
+    PolicyRebindResult,
     RequestSize,
     Reservation,
     ReservationAmbiguous,
     ReservationState,
     RunSealed,
+    successor_corpus_usage,
 )
 from specpilot.egress.policy import EgressPolicy
 
@@ -92,6 +96,29 @@ class PostgresEgressLedger:
             # knowable from here, so the caller must not send and must not
             # reuse this key until the state is reconciled.
             raise ReservationAmbiguous() from error
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
+
+    async def rebind_policy(
+        self,
+        corpus_manifest_id: str,
+        *,
+        expected_policy_hash: str,
+    ) -> PolicyRebindResult:
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                await _record_policy(connection, self._policy, self._policy.policy_hash)
+                return await _rebind_policy(
+                    connection,
+                    corpus_manifest_id,
+                    expected_policy_hash=expected_policy_hash,
+                    new_policy_hash=self._policy.policy_hash,
+                )
+        except PolicyRebindConflict:
+            raise
+        except psycopg.OperationalError as error:
+            raise PolicyRebindAmbiguous() from error
         except psycopg.Error as error:
             raise LedgerUnavailable() from error
 
@@ -270,6 +297,139 @@ async def _record_policy(
         "INSERT INTO egress_policy_snapshot (policy_hash, schema_version) "
         "VALUES (%s, %s) ON CONFLICT (policy_hash) DO NOTHING",
         (policy_hash, policy.schema_version),
+    )
+
+
+async def _rebind_policy(
+    connection: psycopg.AsyncConnection[Any],
+    corpus_manifest_id: str,
+    *,
+    expected_policy_hash: str,
+    new_policy_hash: str,
+) -> PolicyRebindResult:
+    """Move one locked corpus head to an auditable successor epoch.
+
+    Copying usage deliberately does not ask the new policy whether the inherited
+    totals fit. The enforcer owns cap arithmetic and will refuse the next
+    reservation if a tighter policy is already spent at either corpus scope.
+    """
+    head = await (
+        await connection.execute(
+            "SELECT corpus_ledger_id FROM egress_corpus_ledger_head "
+            "WHERE corpus_manifest_id = %s FOR UPDATE",
+            (corpus_manifest_id,),
+        )
+    ).fetchone()
+    if head is None or head[0] is None:
+        raise PolicyRebindConflict()
+
+    active_ledger_id = str(head[0])
+    active = await (
+        await connection.execute(
+            "SELECT policy_hash, corpus_usage, predecessor_ledger_id "
+            "FROM egress_corpus_ledger WHERE corpus_ledger_id = %s FOR UPDATE",
+            (active_ledger_id,),
+        )
+    ).fetchone()
+    if active is None or active[1] is None:
+        raise PolicyRebindConflict()
+
+    active_policy_hash = str(active[0])
+    active_usage = CorpusUsage.model_validate(active[1])
+    predecessor_ledger_id = None if active[2] is None else str(active[2])
+
+    if active_policy_hash == expected_policy_hash == new_policy_hash:
+        return _policy_rebind_result(
+            corpus_manifest_id,
+            predecessor_ledger_id=active_ledger_id,
+            successor_ledger_id=active_ledger_id,
+            old_policy_hash=active_policy_hash,
+            new_policy_hash=active_policy_hash,
+            usage=active_usage,
+            rebound=False,
+        )
+
+    if active_policy_hash != expected_policy_hash:
+        if active_policy_hash != new_policy_hash or predecessor_ledger_id is None:
+            raise PolicyRebindConflict()
+        predecessor = await (
+            await connection.execute(
+                "SELECT policy_hash FROM egress_corpus_ledger "
+                "WHERE corpus_ledger_id = %s AND corpus_manifest_id = %s",
+                (predecessor_ledger_id, corpus_manifest_id),
+            )
+        ).fetchone()
+        if predecessor is None or str(predecessor[0]) != expected_policy_hash:
+            raise PolicyRebindConflict()
+        return _policy_rebind_result(
+            corpus_manifest_id,
+            predecessor_ledger_id=predecessor_ledger_id,
+            successor_ledger_id=active_ledger_id,
+            old_policy_hash=expected_policy_hash,
+            new_policy_hash=active_policy_hash,
+            usage=active_usage,
+            rebound=False,
+        )
+
+    successor_usage = successor_corpus_usage(active_usage, new_policy_hash)
+    successor_ledger_id = str(uuid.uuid4())
+    await connection.execute(
+        """
+        INSERT INTO egress_corpus_ledger (
+            corpus_ledger_id, corpus_manifest_id, policy_hash, corpus_usage,
+            unique_excerpts, unique_tokens, unique_bytes, predecessor_ledger_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            successor_ledger_id,
+            corpus_manifest_id,
+            new_policy_hash,
+            successor_usage.model_dump_json(),
+            len(successor_usage.disclosure_ids),
+            successor_usage.unique_tokens,
+            successor_usage.unique_bytes,
+            active_ledger_id,
+        ),
+    )
+    updated = await connection.execute(
+        "UPDATE egress_corpus_ledger_head "
+        "SET corpus_ledger_id = %s, updated_at = now() "
+        "WHERE corpus_manifest_id = %s AND corpus_ledger_id = %s",
+        (successor_ledger_id, corpus_manifest_id, active_ledger_id),
+    )
+    if updated.rowcount != 1:
+        raise PolicyRebindConflict()
+    return _policy_rebind_result(
+        corpus_manifest_id,
+        predecessor_ledger_id=active_ledger_id,
+        successor_ledger_id=successor_ledger_id,
+        old_policy_hash=active_policy_hash,
+        new_policy_hash=new_policy_hash,
+        usage=successor_usage,
+        rebound=True,
+    )
+
+
+def _policy_rebind_result(
+    corpus_manifest_id: str,
+    *,
+    predecessor_ledger_id: str,
+    successor_ledger_id: str,
+    old_policy_hash: str,
+    new_policy_hash: str,
+    usage: CorpusUsage,
+    rebound: bool,
+) -> PolicyRebindResult:
+    return PolicyRebindResult(
+        corpus_manifest_id=corpus_manifest_id,
+        predecessor_ledger_id=predecessor_ledger_id,
+        successor_ledger_id=successor_ledger_id,
+        old_policy_hash=old_policy_hash,
+        new_policy_hash=new_policy_hash,
+        inherited_unique_excerpts=len(usage.disclosure_ids),
+        inherited_unique_tokens=usage.unique_tokens,
+        inherited_unique_bytes=usage.unique_bytes,
+        rebound=rebound,
     )
 
 
