@@ -72,6 +72,40 @@ class RunSealed(LedgerError):
         super().__init__(code, message)
 
 
+class PolicyRebindConflict(LedgerError):
+    def __init__(self, message: str = "corpus policy binding changed") -> None:
+        super().__init__("corpus_policy_rebind_conflict", message)
+
+
+class PolicyRebindAmbiguous(LedgerError):
+    def __init__(self, message: str = "policy rebind outcome is unknown") -> None:
+        super().__init__("policy_rebind_ambiguous", message)
+
+
+class PolicyRebindResult(_FrozenModel):
+    schema_version: Literal["egress-policy-rebind/v1"] = "egress-policy-rebind/v1"
+    corpus_manifest_id: Sha256
+    predecessor_ledger_id: Identifier
+    successor_ledger_id: Identifier
+    old_policy_hash: Sha256
+    new_policy_hash: Sha256
+    inherited_unique_excerpts: Annotated[int, Field(ge=0)]
+    inherited_unique_tokens: Annotated[int, Field(ge=0)]
+    inherited_unique_bytes: Annotated[int, Field(ge=0)]
+    rebound: bool = True
+
+
+def successor_corpus_usage(
+    existing: CorpusUsage,
+    new_policy_hash: str,
+) -> CorpusUsage:
+    if existing.policy_hash == new_policy_hash:
+        raise ValueError("successor requires a different policy hash")
+    return CorpusUsage.model_validate(
+        {**existing.model_dump(mode="python"), "policy_hash": new_policy_hash}
+    )
+
+
 class ReservationState(StrEnum):
     RESERVED = "reserved"
     SENDING = "sending"
