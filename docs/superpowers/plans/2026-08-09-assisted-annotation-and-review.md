@@ -890,11 +890,14 @@ Resolved on the Task 11 branch by migration
 epoch ID, retains immutable predecessor links, and binds reservations and
 evaluation roots to the exact epoch that admitted them. Rebind copies the full
 corpus and per-document usage snapshot to one successor, moves the head under an
-expected-policy compare-and-swap guard, and leaves ordinary reservation
-mismatches fail-closed. Lower caps take effect on later reservations; they do
-not erase inherited accounting.
+authoritative expected-ledger-UUID plus secondary expected-policy-hash
+compare-and-swap guard, and leaves ordinary reservation mismatches fail-closed.
+A retry is unchanged only when the active epoch directly supersedes that exact
+UUID under the requested new policy; hash alone is never retry identity.
+Repeated policy hashes are legal, so A→B→A creates three distinct epochs. Lower
+caps take effect on later reservations; they do not erase inherited accounting.
 
-Fresh focused verification on 2026-08-11 used:
+Fresh final verification on 2026-08-11 used:
 
 ```bash
 SPECPILOT_TEST_DSN=<fresh-throwaway-dsn> .venv/bin/python -m pytest \
@@ -904,18 +907,18 @@ SPECPILOT_TEST_DSN=<fresh-throwaway-dsn> .venv/bin/python -m pytest \
   -q
 ```
 
-Result: **18 passed**. Release verification independently produced
-`make check`: **1,067 passed, 2 skipped** after clean Ruff and strict mypy;
-`make integration-db` on a fresh PostgreSQL database: **43 passed, 17 skipped**,
-with `-rs` confirming every skip was Qdrant-only and none was caused by a
-missing DSN; and `make fixture-smoke` on a second fresh database: **5 passed, 4
-deselected**, using only the fake provider. The wheel built, reinstalled, and
-the installed-package check repeated **1,067 passed, 2 skipped**.
+Result: **50 passed**. Release verification independently produced `make check`:
+**1,067 passed, 2 restricted-fixture skips** after clean Ruff and strict mypy;
+`make integration-db` on a fresh PostgreSQL database with an empty disposable
+Qdrant URL: **92 passed, zero skipped**; `make integration-qdrant`: **17 passed,
+zero skipped**; and `make fixture-smoke` on a second fresh database: **5 passed,
+4 deselected**, using only the fake provider. The wheel and sdist built, the
+wheel installed into an isolated environment, its UUID-aware rebind signature
+and CLI help were verified, and neither package archive contained migrations.
 
-Implementation history: `e731ec3` (successor contracts), `767f2b8` (migration
-003 and epoch-bound reservations), `55a99fe` (transactional rebind), `594dcd5`
-(stable inherited totals on retry), `3d34198` (operator CLI and concurrency
-proof), and `6c9fa4b` (sanitized policy loading).
+Final-fix implementation history: `1ca294e` (UUID CAS, accounting integrity,
+lineage, migration, and forced contention) and `120ca97` (UUID CLI contract and
+sanitized parsing). Earlier implementation history remains in the branch log.
 
 #### First live answers — the refusal works, the citation identifier does not
 

@@ -127,8 +127,11 @@ cannot support.
 
 `specpilot_live`, migrations 001 and 002 applied. It was not modified during
 Task 11 verification. The branch adds migration
-`003_egress_ledger_policy_successor.sql`; apply it through the normal migration
-process before using the new operator command. Corpus-level disclosure so far:
+`003_egress_ledger_policy_successor.sql` as a separate versioned operations
+artifact from the repository checkout; the current wheel/API image does not
+contain it. Apply the matching checked-out artifact with the exact `psql`
+command under Task 11 below before using the new operator command. Corpus-level
+disclosure so far:
 **11 excerpts / 4,269 bytes of RFC 9110** against per-document caps of
 314 / 76,113. The licence premise has plenty of headroom and the accounting
 survives across evaluation roots.
@@ -175,13 +178,14 @@ the half the job title names.
    *This is not theoretical* — it constrained a real decision on 2026-08-11 by
    ruling out renaming any policy field.
 
-   Fresh branch evidence: the focused CLI/successor/no-plaintext command passed
-   **18 tests**; `make check` passed **1,067** unit tests with **2 skipped** after
-   clean Ruff and strict mypy; `make integration-db` passed **43** with **17
-   Qdrant-only skips** and no missing-DSN skip; and separate-database
-   `make fixture-smoke` passed **5** with **4 deselected**, using no real
-   provider route. Commits: `e731ec3`, `767f2b8`, `55a99fe`, `594dcd5`,
-   `3d34198`, `6c9fa4b`.
+   Fresh final branch evidence: the focused CLI/successor/no-plaintext command
+   passed **50 tests**; `make check` passed **1,067** unit tests with **2
+   restricted-fixture skips** after clean Ruff and strict mypy;
+   `make integration-db` passed **92 tests with zero skips** against fresh
+   PostgreSQL plus an empty disposable Qdrant; `make integration-qdrant` passed
+   **17 tests with zero skips**; and separate-database `make fixture-smoke`
+   passed **5** with **4 deselected**, using no real provider route. Final-fix
+   commits: `1ca294e`, `120ca97`.
 
 3. **No rule for requirements that span consecutive paragraphs.** The one known
    instance is *closed*: the §8.2.3 pooling completeness audit on 2026-08-09
@@ -266,10 +270,18 @@ candidate's.
 
 Implemented by migration `003_egress_ledger_policy_successor.sql` and
 `.venv/bin/python -m specpilot.cli egress rebind-policy`. The operator must name
-the expected active policy hash, and a completed retry safely reports
-`unchanged`. After success, use a new evaluation-root ID; old roots remain bound
-to their original epoch. A tighter successor policy blocks later reservations
-instead of deleting the inherited audit trail.
+both the exact active ledger UUID and its policy hash. The UUID is authoritative;
+hash alone never identifies a completed retry, which is `unchanged` only when
+the active epoch directly supersedes that exact UUID under the requested new
+policy. A→B→A is legal and creates three distinct epochs. After success, use a
+new evaluation-root ID; old roots remain bound to their original epoch. A
+tighter successor policy blocks later reservations instead of deleting the
+inherited audit trail.
+
+Migration 003 is a separate versioned operations artifact from the repository
+checkout; the current wheel/API image contains no migrations. Apply it from the
+matching checkout with
+`psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f migrations/003_egress_ledger_policy_successor.sql`.
 
 ### 4. W3 — MCP tools, FastAPI L1 API, trace page
 

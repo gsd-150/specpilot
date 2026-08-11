@@ -30,8 +30,17 @@ still report "passed". A run that proves anything sets both
 
 ## Rebinding a corpus ledger to a successor policy
 
-Apply migration `003_egress_ledger_policy_successor.sql` through the normal
-migration process before using the operator command. Then run:
+Migration 003 is a separate, versioned operations artifact from the repository
+checkout. The current wheel and API image do not contain migrations. From the
+repository root, apply the exact checked-out artifact before deploying or using
+the operator command:
+
+```bash
+psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 \
+  -f migrations/003_egress_ledger_policy_successor.sql
+```
+
+Then run:
 
 ```bash
 .venv/bin/python -m specpilot.cli egress rebind-policy \
@@ -39,22 +48,27 @@ migration process before using the operator command. Then run:
   --manifest-dir <source-manifest-dir> \
   --policy <new-policy.json> \
   --corpus-manifest-id <corpus-manifest-sha256> \
+  --expected-ledger-id <active-ledger-uuid> \
   --expected-policy-hash <active-policy-sha256>
 ```
 
 This is the only deliberate policy-successor path. An ordinary reservation
 under a different policy still fails closed with `policy_snapshot_mismatch`;
-it never rebinds automatically. `--expected-policy-hash` is a compare-and-swap
-guard against moving a head other than the one the operator inspected.
+it never rebinds automatically. `--expected-ledger-id` is the authoritative
+compare-and-swap identity, and `--expected-policy-hash` is a secondary guard;
+both must match the active epoch before a successor can be created.
 
 A successful rebind preserves the predecessor and creates an immutable
 successor that inherits the complete corpus and per-document usage snapshot.
 Use a new `evaluation_root_id` for the first reservation under that successor:
 an old root remains bound to its original ledger epoch. A response with status
-`unchanged` is a safe retry result naming the already-active successor. If the
-new policy has lower caps than the inherited totals, the successor is still
-recorded; later reservations are refused rather than history being deleted or
-rewritten.
+`unchanged` is a safe retry result only when the active epoch directly
+supersedes that exact expected ledger UUID under the requested new policy (or
+when the exact expected epoch already has that policy). A hash alone never
+identifies a retry. Repeated policy hashes remain legal, so A→B→A creates three
+distinct ledger epochs. If the new policy has lower caps than the inherited
+totals, the successor is still recorded; later reservations are refused rather
+than history being deleted or rewritten.
 
 ## Running the stack
 

@@ -39,10 +39,11 @@ normal fail-closed boundary or destroying audit history.
 
 ### Composite identity only
 
-Keying ledger rows by `(corpus_manifest_id, policy_hash)` would preserve old
-rows, but would not say which policy is active. Selecting the newest timestamp
-would turn clock ordering into an authorization decision and would make
-concurrent successors ambiguous.
+Keying ledger rows by `(corpus_manifest_id, policy_hash)` would preserve one row
+per policy, but it would conflate distinct bindings when a corpus legitimately
+returns to a prior policy (A→B→A). It also would not say which policy is active.
+Selecting the newest timestamp would turn clock ordering into an authorization
+decision and would make concurrent successors ambiguous.
 
 ### Mutable `is_current` on the ledger row
 
@@ -68,11 +69,17 @@ The table gains:
 
 - `corpus_ledger_id uuid`, the primary key;
 - `predecessor_ledger_id uuid null`, a self-reference;
-- a uniqueness constraint on `(corpus_manifest_id, policy_hash)`;
 - a uniqueness constraint on `(corpus_manifest_id, corpus_ledger_id)`, used by
   composite foreign keys so a ledger ID cannot be paired with another corpus;
 - a uniqueness constraint on `predecessor_ledger_id` when it is non-null, so one
-  epoch cannot acquire two direct successors.
+  epoch cannot acquire two direct successors;
+- a composite predecessor foreign key on
+  `(corpus_manifest_id, predecessor_ledger_id)`, so lineage cannot cross corpus
+  boundaries.
+
+Policy hashes are deliberately not unique within a corpus. A policy may return
+after intervening epochs, so A→B→A is represented by three distinct UUID-keyed
+epochs rather than conflating the two A bindings.
 
 `corpus_manifest_id`, `policy_hash`, the JSON usage snapshot, normalized totals,
 and timestamps remain. Existing rows receive IDs during migration and have no
@@ -135,6 +142,7 @@ a second lock graph.
 `PostgresEgressLedger.rebind_policy` accepts:
 
 - `corpus_manifest_id`;
+- `expected_ledger_id`, the authoritative compare-and-swap identity;
 - `expected_policy_hash`;
 - the ledger instance's configured policy as the requested new policy.
 
@@ -143,6 +151,7 @@ The CLI exposes it as:
 ```text
 specpilot egress rebind-policy \
   --corpus-manifest-id <sha256> \
+  --expected-ledger-id <uuid> \
   --expected-policy-hash <sha256>
 ```
 
@@ -154,8 +163,10 @@ Inside one transaction the operation:
 
 1. records the new policy snapshot;
 2. locks the corpus head and active epoch;
-3. verifies the active hash equals `expected_policy_hash`;
-4. copies and validates `CorpusUsage`;
+3. verifies the active UUID and hash equal `expected_ledger_id` and
+   `expected_policy_hash`;
+4. reconciles the row corpus, policy hash, normalized excerpt/token/byte
+   totals, and typed `CorpusUsage` representation;
 5. changes only the copied usage's `policy_hash`;
 6. inserts a successor with the complete inherited snapshot and normalized
    totals;
@@ -168,13 +179,15 @@ disclosure content, credentials, or local paths.
 ## Failure and retry semantics
 
 - No ledger for the corpus: reject; rebind is not an implicit initializer.
-- Active hash equals both the expected and new hashes: return the active binding
-  as an idempotent no-op.
-- Active hash equals the expected hash and differs from the new hash: create the
-  successor.
-- Active hash differs from the expected hash, but the active row is the unique
-  successor of that expected predecessor under the requested new hash: return
-  that successor as a completed retry.
+- Active UUID and hash equal the expected UUID and hash, and the new hash is
+  unchanged: return the active binding as an idempotent no-op.
+- Active UUID and hash equal the expected UUID and hash, and the new hash
+  differs: create the successor.
+- Active UUID differs from the expected UUID, but the active row directly
+  supersedes that exact expected UUID and has the requested new hash: validate
+  the predecessor and return the active row as a completed retry.
+- Matching a policy hash without that direct UUID lineage never identifies a
+  retry, including after an A→B→A sequence.
 - Every other expected/active/new combination: reject with a stable conflict
   code and leave all rows unchanged.
 - The expected epoch already has another successor, or the head moved to an
@@ -234,9 +247,13 @@ PostgreSQL integration coverage will prove:
 - a cap below inherited usage rejects the next reservation;
 - route-disclosure history survives policy rotation;
 - old evaluation roots cannot cross the boundary;
-- wrong expected hashes and competing successors fail closed;
+- wrong or stale expected UUID/hash pairs and competing successors fail closed;
 - an identical retry returns the same successor;
-- concurrent reservation/rebind operations serialize without lost accounting;
+- forced reservation-before-rebind, rebind-before-reservation, and two-rebind
+  schedules serialize without lost accounting or branches;
+- malformed or inconsistent SQL/JSON corpus accounting fails with one stable
+  integrity code before reservation or rebind mutation;
+- cross-corpus predecessor lineage is rejected by the database;
 - migration of a populated v2 corpus-usage ledger preserves IDs, totals, and
   foreign-key validity.
 
@@ -248,8 +265,8 @@ already made to the workflow.
 
 On completion, Task 11 is marked closed in the assisted-annotation plan and the
 2026-08-11 handoff. The operator documentation records that policy edits require
-the explicit command, its expected-hash guard, the inherited-budget behavior,
-and the requirement for new evaluation-root IDs.
+the explicit command, its expected-UUID plus expected-hash guards, the
+inherited-budget behavior, and the requirement for new evaluation-root IDs.
 
 No real provider call, corpus content, policy relaxation, or new product depth
 is part of this task.

@@ -170,7 +170,13 @@ git commit -m "feat: define ledger policy successor contracts"
 
 - [ ] **Step 1: Write a failing populated-upgrade integration test**
 
-Create a unique temporary PostgreSQL schema, set `search_path` to it, apply only migrations `001` and `002`, insert one policy, corpus ledger, root, reservation, disclosure, and route-disclosure row, then apply migration `003`. Assert:
+Create a unique temporary PostgreSQL schema, set `search_path` to it, apply only
+migrations `001` and `002`, and insert one policy, corpus ledger, root,
+reservation, disclosure, and route-disclosure row. Build the JSON columns by
+serializing valid `CorpusUsage` and `UsageSnapshot` models, then apply migration
+`003`. Exercise the public rebind API with expected UUID/hash and make a new-root
+reservation. Assert inherited and extended totals, old/new epoch attribution,
+route audit preservation, and lineage:
 
 ```python
 assert migrated_ledger["predecessor_ledger_id"] is None
@@ -223,15 +229,13 @@ ALTER TABLE egress_corpus_ledger
 
 ALTER TABLE egress_corpus_ledger
     ADD CONSTRAINT egress_corpus_ledger_pkey PRIMARY KEY (corpus_ledger_id),
-    ADD CONSTRAINT egress_corpus_ledger_corpus_policy_key
-        UNIQUE (corpus_manifest_id, policy_hash),
     ADD CONSTRAINT egress_corpus_ledger_corpus_epoch_key
         UNIQUE (corpus_manifest_id, corpus_ledger_id),
     ADD CONSTRAINT egress_corpus_ledger_predecessor_key
         UNIQUE (predecessor_ledger_id),
     ADD CONSTRAINT egress_corpus_ledger_predecessor_fkey
-        FOREIGN KEY (predecessor_ledger_id)
-        REFERENCES egress_corpus_ledger (corpus_ledger_id);
+        FOREIGN KEY (corpus_manifest_id, predecessor_ledger_id)
+        REFERENCES egress_corpus_ledger (corpus_manifest_id, corpus_ledger_id);
 
 CREATE TABLE egress_corpus_ledger_head (
     corpus_manifest_id text PRIMARY KEY
@@ -350,7 +354,7 @@ git commit -m "feat: bind reservations to ledger policy epochs"
 
 **Interfaces:**
 - Consumes: `successor_corpus_usage`, `PolicyRebindResult`, `PolicyRebindConflict`, and `PolicyRebindAmbiguous` from Task 1.
-- Produces: `PostgresEgressLedger.rebind_policy(corpus_manifest_id: str, *, expected_policy_hash: str) -> PolicyRebindResult`.
+- Produces: `PostgresEgressLedger.rebind_policy(corpus_manifest_id: str, *, expected_ledger_id: str, expected_policy_hash: str) -> PolicyRebindResult`.
 
 - [ ] **Step 1: Write the failing end-to-end rebind test**
 
@@ -382,6 +386,7 @@ async def rebind_policy(
     self,
     corpus_manifest_id: str,
     *,
+    expected_ledger_id: str,
     expected_policy_hash: str,
 ) -> PolicyRebindResult:
     connection = await self._connect()
@@ -391,6 +396,7 @@ async def rebind_policy(
             return await _rebind_policy(
                 connection,
                 corpus_manifest_id,
+                expected_ledger_id=expected_ledger_id,
                 expected_policy_hash=expected_policy_hash,
                 new_policy_hash=self._policy.policy_hash,
             )
@@ -407,13 +413,15 @@ async def rebind_policy(
 The private function must:
 
 1. select the head `FOR UPDATE`; missing/null head raises `PolicyRebindConflict`;
-2. lock the active epoch by ID and read policy hash plus `corpus_usage`;
-3. when active, expected, and new hashes are all equal, return the active epoch
-   with `rebound=False` and both result IDs set to that epoch;
-4. when active differs from expected, return `rebound=False` only if the active
-   epoch has the new hash and directly supersedes an epoch with the expected
-   hash; otherwise raise conflict;
-5. when active equals expected and new differs, call `successor_corpus_usage`
+2. lock the active epoch by ID, reconcile its SQL columns with `CorpusUsage`,
+   and refuse malformed or inconsistent persisted accounting;
+3. when active UUID/hash equal the expected UUID/hash and the new hash is the
+   same, return the active epoch with `rebound=False`;
+4. when active UUID differs, return `rebound=False` only if the active epoch has
+   the new hash and directly supersedes that exact expected UUID, whose row also
+   reconciles and has the expected hash; otherwise raise conflict;
+5. when active UUID/hash equal the expected UUID/hash and new differs, call
+   `successor_corpus_usage`
    and generate one UUID;
 6. insert the successor with copied JSON and normalized totals;
 7. update the head using both corpus ID and old active ID in the predicate;
@@ -425,7 +433,11 @@ Build `PolicyRebindResult` from stored IDs and inherited totals. Do not validate
 
 Add focused tests proving:
 
-- wrong `expected_policy_hash` creates no row and moves no head;
+- wrong or stale `expected_ledger_id`/`expected_policy_hash` creates no row and
+  moves no head;
+- A→B→A creates three UUID-distinct epochs and a stale hash-only retry fails;
+- row/JSON corpus, policy, excerpt, token, byte, and malformed snapshots fail
+  with `ledger_integrity_error` before rebind or reservation mutation;
 - identical rebind retry returns the same successor ID;
 - rebind to the already-active policy returns `rebound is False`;
 - a successor under a cap below inherited per-document usage is created, but a new-root reservation fails with `corpus_document_unique_excerpts_exceeded`;
@@ -456,14 +468,21 @@ git commit -m "feat: add explicit ledger policy rebind"
 
 **Interfaces:**
 - Consumes: `PostgresEgressLedger.rebind_policy` from Task 3.
-- Produces: `specpilot egress rebind-policy --ledger-dsn --manifest-dir --corpus-manifest-id --expected-policy-hash [--policy]`.
+- Produces: `specpilot egress rebind-policy --ledger-dsn --manifest-dir --corpus-manifest-id --expected-ledger-id --expected-policy-hash [--policy]`.
 
 - [ ] **Step 1: Write failing concurrency tests**
 
-Use `asyncio.gather` to race:
+Hold the corpus head row in a controlled PostgreSQL transaction, identify each
+contender through `application_name`, and prove through `pg_stat_activity`, the
+blocked `egress_corpus_ledger_head ... FOR UPDATE` query, and blocking backend
+PIDs that it reached the held head lock. Pre-seed a shared requested policy
+snapshot when two identical rebinds would otherwise contend on that insert.
+Release with test events to force:
 
 1. two identical rebinds, asserting both results name one successor and the database contains exactly two epochs total;
-2. one new reservation under the old policy against one rebind, asserting either the reservation is included in the successor's inherited usage or it fails after the head moves—never committed only to the predecessor after the copy;
+2. reservation-before-rebind and rebind-before-reservation, asserting the first
+   is inherited and the second is refused—never committed only to the
+   predecessor after the copy;
 3. two different new policies against one expected predecessor, asserting exactly one succeeds and no ledger row has two successors.
 
 Treat only `PolicyRebindConflict` and the expected `EgressPolicyViolation` as valid loser outcomes; fail on database uniqueness errors leaking through.
@@ -489,6 +508,7 @@ code = main([
     "--manifest-dir", str(tmp_path / "manifests"),
     "--policy", str(policy_path),
     "--corpus-manifest-id", corpus_id,
+    "--expected-ledger-id", expected_ledger_id,
     "--expected-policy-hash", old_policy.policy_hash,
 ])
 ```
@@ -516,7 +536,8 @@ Also assert a wrong expected hash returns `EXIT_REFUSED`, empty stdout, and exac
 Add synchronous `_egress_rebind_policy` and async `_egress_rebind_policy_async` handlers. Load `EgressPolicy.load(arguments.policy)`, construct `ManifestStore(arguments.manifest_dir)` and `PostgresEgressLedger`, await `rebind_policy`, and map:
 
 - `PolicyRebindConflict` to `_refuse(error.code, EXIT_REFUSED)`;
-- `PolicyRebindAmbiguous` and `LedgerUnavailable` to `_refuse(error.code, EXIT_IO)`;
+- `PolicyRebindAmbiguous`, `LedgerIntegrityError`, and `LedgerUnavailable` to
+  `_refuse(error.code, EXIT_IO)`;
 - success to `_emit` with the exact sanitized fields above and status `rebound` or `unchanged` from `result.rebound`.
 
 Register arguments:
@@ -527,12 +548,16 @@ rebind.add_argument("--ledger-dsn", required=True)
 rebind.add_argument("--manifest-dir", type=Path, required=True)
 rebind.add_argument("--policy", type=Path, default=None)
 rebind.add_argument("--corpus-manifest-id", type=_sha256_argument, required=True)
+rebind.add_argument("--expected-ledger-id", type=_uuid_argument, required=True)
 rebind.add_argument("--expected-policy-hash", type=_sha256_argument, required=True)
 rebind.set_defaults(handler=_egress_rebind_policy)
 ```
 
-Register both hash arguments with the existing `_sha256_argument` argparse type,
-so malformed values fail as command-line usage before any database connection.
+Register both hash arguments with `_sha256_argument` and the ledger ID with
+`_uuid_argument`. Include this command in `main`'s sanitized argparse boundary
+so malformed, unknown, typo, extra, DSN, or path-bearing input yields one stable
+usage code before handler or database construction while `--help` remains
+successful.
 
 - [ ] **Step 6: Run CLI, concurrency, and no-plaintext tests**
 
@@ -565,10 +590,12 @@ git commit -m "feat: expose ledger policy rebind command"
 Add a README section with the exact command, explaining:
 
 - ordinary policy mismatch remains fail-closed;
-- `--expected-policy-hash` prevents rebinding the wrong head;
+- `--expected-ledger-id` is the authoritative CAS identity and
+  `--expected-policy-hash` is the secondary guard;
 - the successor inherits corpus and per-document usage;
 - a new evaluation-root ID is mandatory after success;
-- `unchanged` is a safe retry result;
+- `unchanged` is safe only for the exact expected UUID's direct successor under
+  the requested new policy; hash alone never identifies a retry;
 - lower new caps block later reservations rather than deleting history.
 
 - [ ] **Step 2: Update project plans only with verified facts**
@@ -581,13 +608,21 @@ Run: `make check`
 
 Expected: Ruff, strict mypy, and all unit tests pass.
 
-- [ ] **Step 4: Run fresh PostgreSQL integration verification**
+- [ ] **Step 4: Run fresh PostgreSQL and Qdrant zero-skip verification**
 
-Create or select a fresh throwaway database, export it only as `SPECPILOT_TEST_DSN`, then run:
+Create a fresh throwaway PostgreSQL database and an empty disposable local
+Qdrant fixture. Export both `SPECPILOT_TEST_DSN` and
+`SPECPILOT_TEST_QDRANT_URL`, then run the repository-wide integration target
+followed by the dedicated Qdrant target:
 
-Run: `make integration-db`
+```bash
+make integration-db
+make integration-qdrant
+```
 
-Expected: no skips caused by a missing DSN; all database, CLI, and provider-fixture integration tests pass.
+Expected: `make integration-db` passes all **92 tests with zero skips** and
+`make integration-qdrant` passes all **17 tests with zero skips**. Only
+synthetic test collections may exist, and every one is removed by the tests.
 
 - [ ] **Step 5: Run fixture smoke in a separate fresh database**
 
