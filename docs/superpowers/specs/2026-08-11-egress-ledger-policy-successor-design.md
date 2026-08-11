@@ -69,6 +69,8 @@ The table gains:
 - `corpus_ledger_id uuid`, the primary key;
 - `predecessor_ledger_id uuid null`, a self-reference;
 - a uniqueness constraint on `(corpus_manifest_id, policy_hash)`;
+- a uniqueness constraint on `(corpus_manifest_id, corpus_ledger_id)`, used by
+  composite foreign keys so a ledger ID cannot be paired with another corpus;
 - a uniqueness constraint on `predecessor_ledger_id` when it is non-null, so one
   epoch cannot acquire two direct successors.
 
@@ -88,6 +90,12 @@ A new table contains:
 - `corpus_manifest_id text primary key`;
 - `corpus_ledger_id uuid`, referencing the active ledger epoch;
 - `updated_at timestamptz`.
+
+The head uses a composite foreign key on
+`(corpus_manifest_id, corpus_ledger_id)`. Reservations and evaluation roots use
+the same composite reference. The database therefore enforces that every exact
+epoch attribution belongs to the corpus ID stored beside it; this invariant is
+not left to application code.
 
 One head is created for every migrated corpus row. Route-level disclosure facts
 remain corpus-global and reference this corpus identity rather than an arbitrary
@@ -160,12 +168,15 @@ disclosure content, credentials, or local paths.
 ## Failure and retry semantics
 
 - No ledger for the corpus: reject; rebind is not an implicit initializer.
-- Expected hash differs from the active hash: reject with a stable conflict
+- Active hash equals both the expected and new hashes: return the active binding
+  as an idempotent no-op.
+- Active hash equals the expected hash and differs from the new hash: create the
+  successor.
+- Active hash differs from the expected hash, but the active row is the unique
+  successor of that expected predecessor under the requested new hash: return
+  that successor as a completed retry.
+- Every other expected/active/new combination: reject with a stable conflict
   code and leave all rows unchanged.
-- New hash equals the active hash: return the active binding as an idempotent
-  no-op.
-- A retry finds that the active row is the unique successor of the expected
-  predecessor under the requested new hash: return that successor.
 - The expected epoch already has another successor, or the head moved to an
   unrelated epoch: reject as a conflict; never create a branch.
 - Database connectivity is lost before the outcome is known: return an
