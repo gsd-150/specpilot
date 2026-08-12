@@ -1,0 +1,280 @@
+from __future__ import annotations
+
+import importlib
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from pydantic import TypeAdapter, ValidationError
+
+
+def _contracts():  # type: ignore[no-untyped-def]
+    return importlib.import_module("specpilot.runs.contracts")
+
+
+def _tool_event(**updates: object) -> dict[str, object]:
+    event: dict[str, object] = {
+        "kind": "tool_finished",
+        "sequence": 1,
+        "step_id": "fetch-clause",
+        "tool": "get_clause",
+        "argument_keys": ("corpus_manifest_id", "document_id", "clauses"),
+        "result_count": 1,
+        "duration_ms": 2,
+        "retry_count": 0,
+        "error_code": None,
+    }
+    event.update(updates)
+    return event
+
+
+def test_run_status_is_the_exact_closed_state_machine_vocabulary() -> None:
+    contracts = _contracts()
+
+    assert {status.value for status in contracts.RunStatus} == {
+        "queued",
+        "running",
+        "answered",
+        "refused",
+        "egress_blocked",
+        "failed",
+        "interrupted",
+    }
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "query",
+        "question",
+        "excerpt",
+        "candidate_body",
+        "provider_response",
+        "credential",
+        "secret",
+        "local_path",
+        "Query",
+        "providerResponse",
+        "input_text",
+    ],
+)
+def test_tool_event_rejects_each_plaintext_or_disguised_extra_field(
+    forbidden_key: str,
+) -> None:
+    contracts = _contracts()
+
+    with pytest.raises(ValidationError, match=forbidden_key):
+        contracts.ToolFinishedEvent.model_validate(
+            _tool_event(**{forbidden_key: "must-not-persist"})
+        )
+
+
+def test_tool_event_keeps_argument_names_but_rejects_argument_values() -> None:
+    contracts = _contracts()
+
+    event = contracts.ToolFinishedEvent.model_validate(
+        _tool_event(argument_keys=("query", "corpus_manifest_id"))
+    )
+    assert event.argument_keys == ("query", "corpus_manifest_id")
+
+    with pytest.raises(ValidationError, match="argument_values"):
+        contracts.ToolFinishedEvent.model_validate(
+            _tool_event(argument_values={"query": "plaintext"})
+        )
+
+
+def test_run_event_union_is_discriminated_and_rejects_unknown_kinds() -> None:
+    contracts = _contracts()
+    adapter = TypeAdapter(contracts.RunEvent)
+
+    parsed = adapter.validate_python(_tool_event())
+    assert isinstance(parsed, contracts.ToolFinishedEvent)
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        adapter.validate_python({"kind": "debug_dump", "sequence": 2})
+
+
+def test_run_event_kind_allowlist_is_exact() -> None:
+    contracts = _contracts()
+
+    assert {kind.value for kind in contracts.RunEventKind} == {
+        "state_transition",
+        "plan_summary",
+        "agent_step",
+        "tool_finished",
+        "candidate_summary",
+        "evidence_summary",
+        "egress_summary",
+        "usage_summary",
+        "answer_outcome",
+        "verifier_summary",
+        "terminal",
+    }
+
+
+def test_trace_counts_durations_retries_and_sequences_are_bounded() -> None:
+    contracts = _contracts()
+
+    for field, invalid in (
+        ("sequence", 0),
+        ("result_count", -1),
+        ("duration_ms", 3_600_001),
+        ("retry_count", 2),
+    ):
+        with pytest.raises(ValidationError, match=field):
+            contracts.ToolFinishedEvent.model_validate(_tool_event(**{field: invalid}))
+
+
+def test_answer_outcome_keeps_provider_failure_distinct_from_verifier_refusal() -> None:
+    contracts = _contracts()
+
+    event = contracts.AnswerOutcomeEvent(
+        kind="answer_outcome",
+        sequence=8,
+        verdict="refused",
+        refusal_reason="evidence_insufficient",
+        provider_error="provider_timeout",
+        reservation_id=uuid.UUID("00000000-0000-0000-0000-000000000008"),
+        replayed=False,
+        parse_fault_code=None,
+    )
+
+    assert event.verdict.value == "refused"
+    assert event.refusal_reason == "evidence_insufficient"
+    assert event.provider_error == "provider_timeout"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("egress_blocked", "root_unique_excerpts_exceeded"),
+        ("egress_blocked", "excerpt_bytes_exceeded"),
+        ("egress_blocked", "policy_snapshot_mismatch"),
+        ("failed", "provider_timeout"),
+        ("refused", "evidence_insufficient"),
+        ("interrupted", "lease_expired"),
+    ],
+)
+def test_terminal_event_preserves_stable_status_reason_pairs(
+    status: str, reason: str
+) -> None:
+    contracts = _contracts()
+
+    event = contracts.TerminalEvent(
+        kind="terminal", sequence=9, status=status, reason=reason
+    )
+    assert event.status.value == status
+    assert event.reason == reason
+
+
+def test_answered_terminal_event_has_no_failure_or_refusal_reason() -> None:
+    contracts = _contracts()
+
+    event = contracts.TerminalEvent(
+        kind="terminal", sequence=9, status="answered", reason=None
+    )
+    assert event.reason is None
+
+
+def test_run_models_are_frozen_and_hide_owner_query_and_lease_from_view() -> None:
+    contracts = _contracts()
+    created = datetime(2026, 8, 12, 1, 2, tzinfo=UTC)
+    record = contracts.RunRecord(
+        run_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        request_id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+        session_id="session-a",
+        task_level="L1",
+        profile="fixture",
+        source_manifest_id="a" * 64,
+        corpus_manifest_id="b" * 64,
+        policy_hash="c" * 64,
+        configuration_hash="d" * 64,
+        prompt_id="l1-answer-v1",
+        prompt_hash="e" * 64,
+        provider_id="provider-a",
+        model_id="model-a",
+        query_hash="f" * 64,
+        status="queued",
+        terminal_reason=None,
+        created_at=created,
+        started_at=None,
+        completed_at=None,
+        lease_owner="queue-delivery",
+        lease_expires_at=created + timedelta(seconds=30),
+        last_heartbeat_at=None,
+    )
+    view = contracts.RunView(
+        run_id=record.run_id,
+        request_id=record.request_id,
+        task_level=record.task_level,
+        profile=record.profile,
+        corpus_manifest_id=record.corpus_manifest_id,
+        status=record.status,
+        reason=record.terminal_reason,
+        created_at=record.created_at,
+        started_at=record.started_at,
+        completed_at=record.completed_at,
+        events=(),
+    )
+
+    with pytest.raises(ValidationError, match="frozen"):
+        record.status = contracts.RunStatus.RUNNING
+    dumped = view.model_dump(mode="json")
+    assert set(dumped) == {
+        "run_id",
+        "request_id",
+        "task_level",
+        "profile",
+        "corpus_manifest_id",
+        "status",
+        "reason",
+        "created_at",
+        "started_at",
+        "completed_at",
+        "events",
+    }
+    assert "session_id" not in dumped
+    assert "query_hash" not in dumped
+    assert "lease_owner" not in dumped
+
+
+def test_run_record_rejects_incoherent_terminal_and_lease_timestamps() -> None:
+    contracts = _contracts()
+    created = datetime(2026, 8, 12, 1, 2, tzinfo=UTC)
+    common = {
+        "run_id": uuid.uuid4(),
+        "request_id": uuid.uuid4(),
+        "session_id": "session-a",
+        "task_level": "L1",
+        "profile": "fixture",
+        "source_manifest_id": "a" * 64,
+        "corpus_manifest_id": "b" * 64,
+        "policy_hash": "c" * 64,
+        "configuration_hash": "d" * 64,
+        "prompt_id": "l1-answer-v1",
+        "prompt_hash": "e" * 64,
+        "provider_id": "provider-a",
+        "model_id": "model-a",
+        "query_hash": "f" * 64,
+        "created_at": created,
+        "started_at": None,
+        "last_heartbeat_at": None,
+    }
+
+    with pytest.raises(ValidationError, match="terminal"):
+        contracts.RunRecord(
+            **common,
+            status="failed",
+            terminal_reason=None,
+            completed_at=created,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+    with pytest.raises(ValidationError, match="lease"):
+        contracts.RunRecord(
+            **common,
+            status="queued",
+            terminal_reason=None,
+            completed_at=None,
+            lease_owner=None,
+            lease_expires_at=None,
+        )

@@ -8,6 +8,8 @@ import pytest
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 _TABLES = (
+    "specpilot_run_event",
+    "specpilot_run",
     "egress_run_seal",
     "egress_attempt",
     "egress_route_disclosure",
