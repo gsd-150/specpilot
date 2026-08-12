@@ -41,7 +41,7 @@ export interface CreateRunRequest {
 
 export interface ChatAccepted { run_id: string; status: "queued" }
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-export interface ClientOptions { token?: string; fetcher?: Fetcher }
+export interface ClientOptions { token?: string; fetcher?: Fetcher; signal?: AbortSignal }
 
 // Python emits UUID JSON in canonical lowercase form and accepts every UUID
 // version/variant, including values whose version nibble is zero.
@@ -145,11 +145,11 @@ export function decodeRun(value: unknown): RunView {
   return view;
 }
 
-function init(token: string | undefined, method = "GET", body?: unknown): RequestInit {
+function init(token: string | undefined, method = "GET", body?: unknown, signal?: AbortSignal): RequestInit {
   const headers: Record<string, string> = {};
   if (token !== undefined) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return { method, credentials: "same-origin", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+  return { method, credentials: "same-origin", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }), ...(signal === undefined ? {} : { signal }) };
 }
 async function json(response: Response, operation: string): Promise<unknown> {
   if (!response.ok) throw new Error(`${operation} request failed (${response.status})`);
@@ -160,7 +160,7 @@ export async function getRun(runId: string, options: ClientOptions = {}): Promis
   if (!UUID_RE.test(runId)) throw new Error("invalid run id");
   const fetcher = options.fetcher ?? fetch;
   let response: Response;
-  try { response = await fetcher(`/runs/${encodeURIComponent(runId)}`, init(options.token)); } catch { throw new Error("run request unavailable"); }
+  try { response = await fetcher(`/runs/${encodeURIComponent(runId)}`, init(options.token, "GET", undefined, options.signal)); } catch { throw new Error("run request unavailable"); }
   return decodeRun(await json(response, "run"));
 }
 

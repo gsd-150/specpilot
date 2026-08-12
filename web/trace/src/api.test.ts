@@ -108,6 +108,23 @@ describe("HTTP client", () => {
     expect(JSON.stringify(fetcher.mock.calls)).not.toContain("?token");
   });
 
+  it("passes the caller's abort signal through by identity", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(run()), { status: 200 }));
+    await getRun(UUID, { fetcher, signal: controller.signal });
+    expect(fetcher).toHaveBeenCalledWith(
+      `/runs/${UUID}`,
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it("sanitizes abort failures", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new DOMException("credential secret", "AbortError"));
+    await expect(getRun(UUID, { fetcher, signal: new AbortController().signal }))
+      .rejects.toThrow("run request unavailable");
+    await expect(getRun(UUID, { fetcher })).rejects.not.toThrow("secret");
+  });
+
   it("rejects a non-UUID path identifier before fetching", async () => {
     const fetcher = vi.fn();
     await expect(getRun("../runs?token=secret", { fetcher })).rejects.toThrow("invalid run id");
