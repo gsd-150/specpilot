@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
-from specpilot.contracts.egress import EgressPayload, JudgePayload
+from specpilot.contracts.egress import (
+    EgressPayload,
+    JudgePayload,
+    L1OnlinePayload,
+    L1PlanPayload,
+)
 from specpilot.providers.base import (
     ProviderError,
     ProviderResponse,
@@ -35,10 +41,12 @@ class FakeProvider:
         model_id: str = "fixture-model-v1",
         *,
         fail_with: str | None = None,
+        reply: str | None = None,
     ) -> None:
         self.provider_id = provider_id
         self.model_id = model_id
         self._fail_with = fail_with
+        self.reply = reply
         self.calls: list[EgressPayload] = []
 
     @property
@@ -53,7 +61,11 @@ class FakeProvider:
         self.calls.append(projected_payload)
         if self._fail_with is not None:
             raise ProviderError(self._fail_with)
-        content = _deterministic_content(projected_payload)
+        content = (
+            self.reply
+            if self.reply is not None
+            else _deterministic_content(projected_payload)
+        )
         return ProviderResponse(
             provider_id=self.provider_id,
             model_id=self.model_id,
@@ -78,6 +90,59 @@ class FakeProvider:
 
 def _deterministic_content(payload: EgressPayload) -> str:
     """Derive a stable answer from the payload so fixture runs are reproducible."""
+    if isinstance(payload, L1PlanPayload):
+        return json.dumps(
+            {
+                "plan_id": "fixture-plan",
+                "steps": [
+                    {
+                        "step_id": "search",
+                        "tool": "search_clauses",
+                        "args": {
+                            "query": payload.query,
+                            "corpus_manifest_id": payload.version.corpus_manifest_id,
+                            "document_ids": [payload.version.document_id],
+                            "normative_levels": [],
+                            "limit": 5,
+                        },
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "read",
+                        "tool": "get_clause",
+                        "args": {
+                            "corpus_manifest_id": payload.version.corpus_manifest_id,
+                            "document_id": payload.version.document_id,
+                            "clauses": {
+                                "kind": "step_result",
+                                "step_id": "search",
+                                "take": 3,
+                            },
+                        },
+                        "depends_on": ["search"],
+                    },
+                ],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if isinstance(payload, L1OnlinePayload):
+        citations = (
+            [{"evidence_id": payload.evidence_excerpts[0].content_hash}]
+            if payload.evidence_excerpts
+            else []
+        )
+        return json.dumps(
+            {
+                "sufficient": bool(citations),
+                "answer": "The deterministic fixture supports the answer."
+                if citations
+                else None,
+                "citations": citations,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     excerpts = (
         payload.gold_excerpts
         if isinstance(payload, JudgePayload)

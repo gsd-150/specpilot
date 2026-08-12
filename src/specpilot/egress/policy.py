@@ -51,6 +51,7 @@ class EgressPolicy(_PolicyModel):
     toc_per_call: int
     toc_per_run: int
     l1_query_tokens: int
+    l1_plan_tokens: int
     l2_design_tokens: int
     max_l2_claims_per_run: int
 
@@ -84,6 +85,8 @@ class EgressPolicy(_PolicyModel):
         projected_text_tokens: int | None
         if payload_kind == "l1_query":
             projected_text_tokens = self.l1_query_tokens
+        elif payload_kind == "l1_plan":
+            projected_text_tokens = self.l1_plan_tokens
         elif payload_kind in {"l2_design", "l2_atomic_claim"}:
             projected_text_tokens = self.l2_design_tokens
         else:

@@ -21,9 +21,24 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22.12.0"
   SPECPILOT_PYTHON: python
 
 jobs:
+  frontend:
+    name: trace frontend tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/trace/package-lock.json
+      - run: npm --prefix web/trace ci
+      - run: npm --prefix web/trace test -- --run
+      - run: npm --prefix web/trace run build
+
   static:
     name: lint and types
     runs-on: ubuntu-latest
@@ -38,7 +53,7 @@ jobs:
       - run: python -m mypy src
 
   unit:
-    name: unit tests
+    name: unit and CLI tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +62,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests/unit -q
+      # CLI tests use only synthetic fixtures and need no service. Keeping them
+      # in this gate prevents gitignored operator state from hiding stale CLI
+      # assumptions on a developer machine.
+      - run: python -m pytest tests/unit tests/cli -q
 
   ledger:
     name: ledger and collection integration, fixture smoke
@@ -124,6 +142,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Compose deliberately has no deployment defaults for restricted artifact
+      # mounts. CI supplies empty disposable sources so configuration and image
+      # construction exercise the mount shape without real corpus material.
+      - name: create empty CI artifact mount sources
+        run: |
+          corpus_dir="$RUNNER_TEMP/specpilot-ci/corpus"
+          manifest_dir="$RUNNER_TEMP/specpilot-ci/manifests"
+          source_dir="$RUNNER_TEMP/specpilot-ci/sources"
+          mkdir -p \
+            "$corpus_dir" \
+            "$manifest_dir" \
+            "$source_dir"
+          {
+            echo "SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST=$corpus_dir"
+            echo "SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST=$manifest_dir"
+            echo "SPECPILOT_MCP_SOURCE_DATA_DIR_HOST=$source_dir"
+          } >> "$GITHUB_ENV"
       - run: docker compose --profile demo config
       - run: docker compose --profile real config
       # The base file must publish nothing; only the explicit demo override may.
@@ -143,6 +178,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/trace/package-lock.json
+      - run: npm --prefix web/trace ci
+      - run: npm --prefix web/trace test -- --run
+      - run: npm --prefix web/trace run build
       - run: python -m pip install --upgrade pip build
       - run: python -m build --wheel
       # Installed from a wheel into a clean directory, so a policy file that is
@@ -156,3 +199,39 @@ jobs:
             p = EgressPolicy.load(); \
             assert p.l2_root_transmitted.bytes == 475136, p; \
             print('packaged policy loaded')"
+
+  browser:
+    name: local fake-provider browser flow
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: specpilot
+          POSTGRES_PASSWORD: specpilot-ci-only
+          POSTGRES_DB: specpilot_w3_browser_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U specpilot -d specpilot_w3_browser_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      SPECPILOT_BROWSER_DSN: postgresql://specpilot:specpilot-ci-only@127.0.0.1:5432/specpilot_w3_browser_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/trace/package-lock.json
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]" uvicorn
+      - run: npm --prefix web/trace ci
+      - run: npm --prefix web/trace exec playwright install --with-deps chromium
+      - run: npm --prefix web/trace run build
+      - run: npm --prefix web/trace run test:browser

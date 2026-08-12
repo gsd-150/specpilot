@@ -31,6 +31,7 @@ from specpilot.corpus.clauses import ClauseLimits, iter_clause_texts
 from specpilot.egress.ledger import AttemptOutcome, RequestSize
 from specpilot.manifests.store import ManifestStore
 from specpilot.providers.base import ProviderError, ProviderResponse, ResponseMetadata
+from specpilot.providers.transport import PolicyBoundTransport, TransportReplayError
 from tests.helpers import rfc_factory
 from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
@@ -96,8 +97,8 @@ class FakeLedger:
 
 @dataclass
 class FakeEndpoint:
-    provider_id: str = "deepseek"
-    model_id: str = "deepseek-v4-flash"
+    provider_id: str = "provider-a"
+    model_id: str = "fixture-model-v1"
 
 
 @dataclass
@@ -110,6 +111,14 @@ class FakeAdapter:
     endpoint: FakeEndpoint = field(default_factory=FakeEndpoint)
 
     @property
+    def provider_id(self) -> str:
+        return self.endpoint.provider_id
+
+    @property
+    def model_id(self) -> str:
+        return self.endpoint.model_id
+
+    @property
     def token_counter(self) -> Any:
         """A property, because the real adapter's is one.
 
@@ -119,8 +128,8 @@ class FakeAdapter:
         """
 
         class _Counter:
-            provider_id = "deepseek"
-            model_id = "deepseek-v4-flash"
+            provider_id = "provider-a"
+            model_id = "fixture-model-v1"
 
             def count_tokens(self, text: str) -> int:
                 return len(text.encode("utf-8"))
@@ -133,8 +142,8 @@ class FakeAdapter:
         if self.error is not None:
             raise self.error
         return ProviderResponse(
-            provider_id="deepseek",
-            model_id="deepseek-v4-flash",
+            provider_id=self.provider_id,
+            model_id=self.model_id,
             content=self.content,
             metadata=ResponseMetadata(
                 prompt_tokens=120,
@@ -192,9 +201,12 @@ async def drive(source: Any, evidence: Any, adapter: FakeAdapter) -> Any:
     outcome = await run_answer(
         "Which paragraph exists?",
         built,
-        enforcer=FakeEnforcer(),
-        ledger=ledger,
-        adapter=adapter,
+        transport=PolicyBoundTransport(
+            enforcer=FakeEnforcer(),  # type: ignore[arg-type]
+            ledger=ledger,  # type: ignore[arg-type]
+            adapters=(adapter,),  # type: ignore[arg-type]
+        ),
+        model_id=adapter.endpoint.model_id,
         source_manifest=manifest,
         corpus_manifest_id=CORPUS,
         evaluation_root_id="slice-1",
@@ -288,6 +300,49 @@ async def test_a_failed_send_still_spends_the_reservation(
     assert ledger.attempts[0][0] is AttemptOutcome.FAILED_KNOWN
     assert outcome.provider_error == "provider_timeout"
     assert outcome.verified.verdict is AnswerVerdict.REFUSED
+    assert outcome.verified.refusal_reason is RefusalReason.EVIDENCE_INSUFFICIENT
+    assert outcome.verified.citation_faults == (), (
+        "provider failure is outcome data, never a citation-verifier fault"
+    )
+    assert outcome.reservation_id == "res-1"
+    assert outcome.replayed is False
+    assert outcome.request_size is None
+
+
+@pytest.mark.anyio
+async def test_closed_replay_is_not_mislabeled_as_evidence_insufficient(
+    source: Any, evidence: Any
+) -> None:
+    manifest, _ = source
+    built, _ = evidence
+
+    class ReplayLedger(FakeLedger):
+        async def check_and_reserve(
+            self, request: Any, counter: Any, *, idempotency_key: str
+        ) -> FakeReservation:
+            self.events.append("reserve")
+            return FakeReservation(replayed=True)
+
+    ledger = ReplayLedger()
+    adapter = FakeAdapter(content=reply([built[0].disclosed.content_hash]))
+    with pytest.raises(TransportReplayError):
+        await run_answer(
+            "Which paragraph exists?",
+            built,
+            transport=PolicyBoundTransport(
+                enforcer=FakeEnforcer(),  # type: ignore[arg-type]
+                ledger=ledger,  # type: ignore[arg-type]
+                adapters=(adapter,),  # type: ignore[arg-type]
+            ),
+            model_id=adapter.model_id,
+            source_manifest=manifest,
+            corpus_manifest_id=CORPUS,
+            evaluation_root_id="slice-1",
+            run_id="run-1",
+            idempotency_key="already-used",
+        )
+
+    assert ledger.events == ["reserve"]
 
 
 @pytest.mark.anyio
@@ -327,9 +382,12 @@ async def test_nothing_retrieved_means_nothing_reserved(source: Any) -> None:
     outcome = await run_answer(
         "Which paragraph exists?",
         [],
-        enforcer=FakeEnforcer(),
-        ledger=ledger,
-        adapter=FakeAdapter(),
+        transport=PolicyBoundTransport(
+            enforcer=FakeEnforcer(),  # type: ignore[arg-type]
+            ledger=ledger,  # type: ignore[arg-type]
+            adapters=(FakeAdapter(),),  # type: ignore[arg-type]
+        ),
+        model_id="fixture-model-v1",
         source_manifest=manifest,
         corpus_manifest_id=CORPUS,
         evaluation_root_id="slice-1",
@@ -350,12 +408,16 @@ async def test_the_request_is_priced_at_the_evidence_stage(
     built, _ = evidence
     enforcer = FakeEnforcer()
 
+    adapter = FakeAdapter(content=reply([built[0].disclosed.content_hash]))
     await run_answer(
         "Which paragraph exists?",
         built,
-        enforcer=enforcer,
-        ledger=FakeLedger(),
-        adapter=FakeAdapter(content=reply([built[0].disclosed.content_hash])),
+        transport=PolicyBoundTransport(
+            enforcer=enforcer,  # type: ignore[arg-type]
+            ledger=FakeLedger(),  # type: ignore[arg-type]
+            adapters=(adapter,),  # type: ignore[arg-type]
+        ),
+        model_id=adapter.model_id,
         source_manifest=manifest,
         corpus_manifest_id=CORPUS,
         evaluation_root_id="slice-1",

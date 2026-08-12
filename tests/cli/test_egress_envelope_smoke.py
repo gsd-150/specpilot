@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -154,14 +153,16 @@ def test_live_judge_names_its_own_variable(
 
 
 def test_a_live_route_can_only_ever_disclose_the_synthetic_document() -> None:
-    """The boundary that makes a live smoke safe to run before any assessment.
+    """The boundary that keeps a live smoke synthetic for every operator state.
 
     `--live` mints an authorized manifest so the transport has one, and that
     manifest names a real provider. What it cannot name is a real document: it
     is bound to `synthetic-fixture-spec`, the enforcer requires the request's
     `document_id` to equal the stored manifest's, and every excerpt must belong
     to the request's corpus manifest. Reaching RFC text needs a manifest for
-    `ietf-rfc-9110`, which this command has no path to create.
+    `ietf-rfc-9110`, which this command has no path to create or resolve. This
+    behavioural boundary remains true even when an operator has separately
+    authorized the real corpus in a gitignored manifest store.
     """
     from specpilot.cli import _fixture_manifest
 
@@ -170,24 +171,3 @@ def test_a_live_route_can_only_ever_disclose_the_synthetic_document() -> None:
     assert manifest.document_id == "synthetic-fixture-spec"
     assert manifest.provider_route_binding.provider_id == "deepseek"
     assert manifest.cloud_egress_authorized is True, "the fixture route is self-signed"
-
-
-def test_no_real_document_has_an_authorized_manifest_anywhere_in_the_repository(
-    tmp_path,
-) -> None:
-    """The other half: nothing has authorized the real corpus, and nothing can.
-
-    `manifest authorize` needs a completed assessment file, and the two frozen
-    RFCs use `source-manifest/v2`, for which no successor path exists at all.
-    """
-    from specpilot.contracts.manifests import RfcSourceManifest
-    from specpilot.manifests.store import ManifestStore
-
-    store = ManifestStore(Path("manifests/local/r0/source"))
-    for manifest_id in (
-        "af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691",
-        "3a752dd99f78398815252baa322e1ad0e9963ade5eb66dfe66e2861d8c2bede2",
-    ):
-        stored = store.read_source(manifest_id)
-        assert isinstance(stored, RfcSourceManifest)
-        assert stored.cloud_egress_authorized is False

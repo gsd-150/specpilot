@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+
 import psycopg
 import pytest
 
+import specpilot.providers.transport as transport_module
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
 from specpilot.egress.postgres import PostgresEgressLedger
-from specpilot.providers.base import ProviderError
 from specpilot.providers.fake import FakeProvider
-from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.providers.transport import (
+    PolicyBoundTransport,
+    ProviderAttemptError,
+)
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt
 from tests.unit.egress.test_policy_projection import (
     NOW,
@@ -88,15 +93,16 @@ async def test_a_retry_under_a_new_key_is_charged_transmitted_usage_again(
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 2
 
 
-async def test_a_replayed_key_does_not_reach_the_provider_twice(
+async def test_a_replayed_key_fails_closed_without_an_uncharged_transmission(
     clean_ledger: str,
 ) -> None:
     provider = FakeProvider()
     line = transport(clean_ledger, provider)
     request = request_with(distinct_excerpt(1))
 
-    await line.send(request, idempotency_key="evidence-1")
-    await line.send(request, idempotency_key="evidence-1")
+    first = await line.send(request, idempotency_key="evidence-1")
+    with pytest.raises(transport_module.TransportReplayError) as caught:
+        await line.send(request, idempotency_key="evidence-1")
 
     usage = await scalar(
         clean_ledger, "SELECT usage_snapshot FROM egress_evaluation_root"
@@ -106,6 +112,87 @@ async def test_a_replayed_key_does_not_reach_the_provider_twice(
         "the replay reused the reservation, so no second charge"
     )
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
+    assert first.replayed is False
+    assert caught.value.replayed is True
+    assert caught.value.reservation_id == first.reservation_id
+    assert provider.call_count == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 1
+
+
+async def test_a_failed_attempt_replay_is_not_sent_again(clean_ledger: str) -> None:
+    provider = FakeProvider(fail_with="provider_timeout")
+    line = transport(clean_ledger, provider)
+    request = request_with(distinct_excerpt(1))
+
+    with pytest.raises(ProviderAttemptError) as failed:
+        await line.send(request, idempotency_key="evidence-1")
+    with pytest.raises(transport_module.TransportReplayError) as replay:
+        await line.send(request, idempotency_key="evidence-1")
+
+    assert replay.value.reservation_id == failed.value.reservation_id
+    assert replay.value.replayed is True
+    assert provider.call_count == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 1
+
+
+async def test_concurrent_same_key_has_one_send_and_one_closed_replay(
+    clean_ledger: str,
+) -> None:
+    provider = FakeProvider()
+    line = transport(clean_ledger, provider)
+    request = request_with(distinct_excerpt(1))
+
+    results = await asyncio.gather(
+        line.send(request, idempotency_key="evidence-1"),
+        line.send(request, idempotency_key="evidence-1"),
+        return_exceptions=True,
+    )
+
+    receipts = sum(
+        isinstance(item, transport_module.TransportReceipt) for item in results
+    )
+    replays = sum(
+        isinstance(item, transport_module.TransportReplayError) for item in results
+    )
+    assert receipts == 1
+    assert replays == 1
+    assert provider.call_count == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 1
+
+
+async def test_cancelled_possible_send_is_recorded_and_seals_real_run(
+    clean_ledger: str,
+) -> None:
+    entered = asyncio.Event()
+
+    class MaybeSentProvider(FakeProvider):
+        async def send(self, projected_payload: object):
+            self.calls.append(projected_payload)  # type: ignore[arg-type]
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    provider = MaybeSentProvider()
+    line = transport(clean_ledger, provider)
+    task = asyncio.create_task(
+        line.send(
+            request_with(distinct_excerpt(1)), idempotency_key="evidence-1"
+        )
+    )
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = await scalar(clean_ledger, "SELECT state FROM egress_reservation")
+    error_code = await scalar(
+        clean_ledger, "SELECT public_error_code FROM egress_attempt"
+    )
+    assert state == "failed_known"
+    assert error_code == "provider_cancelled"
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_run_seal") == 1
 
 
 async def test_a_fallback_provider_records_a_second_route_disclosure(
@@ -147,8 +234,13 @@ async def test_a_known_provider_failure_is_recorded_and_does_not_seal(
     provider = FakeProvider(fail_with="provider_timeout")
     line = transport(clean_ledger, provider)
 
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderAttemptError) as caught:
         await line.send(request_with(distinct_excerpt(1)), idempotency_key="evidence-1")
+
+    assert caught.value.reservation_id == str(
+        await scalar(clean_ledger, "SELECT reservation_id FROM egress_reservation")
+    )
+    assert caught.value.replayed is False
 
     assert (
         await scalar(clean_ledger, "SELECT public_error_code FROM egress_attempt")

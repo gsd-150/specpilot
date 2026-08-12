@@ -15,6 +15,7 @@ dependencies = [
     # route the default install cannot make is a route nobody notices is broken
     # until the week it is needed.
     "httpx>=0.27",
+    "mcp>=1.26,<2",
     "psycopg[binary]>=3.2",
     "pydantic>=2.0",
     # Held to the same minor as the server image compose.yaml pins. The client
@@ -26,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2,<2",
     "hypothesis>=6.0",
     "mypy>=1.13",
     "pytest>=8.0",
@@ -44,10 +46,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "specpilot.egress.policies" = ["*.json"]
+"specpilot.api.static" = ["trace/*.html", "trace/assets/*.js", "trace/assets/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
+    "ignore:^Field 'lifespan' has an incomplete definition.*:pydantic_settings.sources.utils.IncompleteFieldDefinitionWarning:pydantic_settings\\.sources\\.utils$",
     "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [

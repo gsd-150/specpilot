@@ -10,8 +10,8 @@
 # the base service's `profiles` list. The invariant is now textual and easy to
 # check: no `ports:` key appears anywhere below.
 #
-# W0 status: api and mcp are health skeletons. Neither serves an L1 or L2
-# capability yet; the five MCP tools arrive in W3.
+# W3 status: MCP and API load only explicit deployment bindings. Missing or
+# invalid inputs leave a sanitized unavailable health surface.
 
 name: specpilot
 
@@ -63,6 +63,17 @@ services:
       dockerfile: docker/mcp.Dockerfile
     profiles: ["demo", "real"]
     networks: [internal]
+    volumes:
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
+      - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
+      - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
+    environment:
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
+      SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID:-}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
+      SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON:-[]}
+      SPECPILOT_MCP_ALLOWED_HOSTS_JSON: '["127.0.0.1:8080","mcp:8080"]'
+      SPECPILOT_MCP_ALLOWED_ORIGINS_JSON: '["http://127.0.0.1:8080","http://mcp:8080"]'
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +93,26 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     profiles: ["demo", "real"]
-    networks: [internal]
+    networks: [internal, egress]
+    volumes:
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
+      - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
+      - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
+    environment:
+      SPECPILOT_API_PROFILE: ${SPECPILOT_API_PROFILE}
+      SPECPILOT_API_DSN: ${SPECPILOT_API_DSN}
+      SPECPILOT_API_MCP_URL: ${SPECPILOT_API_MCP_URL}
+      SPECPILOT_API_SESSION_SECRET: ${SPECPILOT_API_SESSION_SECRET}
+      SPECPILOT_API_SESSION_AUDIENCE: ${SPECPILOT_API_SESSION_AUDIENCE}
+      SPECPILOT_API_BIND_HOST: ${SPECPILOT_API_BIND_HOST}
+      SPECPILOT_API_CONFIGURATION_HASH: ${SPECPILOT_API_CONFIGURATION_HASH}
+      SPECPILOT_API_PROMPT_ID: ${SPECPILOT_API_PROMPT_ID}
+      SPECPILOT_API_PROMPT_HASH: ${SPECPILOT_API_PROMPT_HASH}
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
+      SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
+      SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON}
+      SPECPILOT_MAIN_API_KEY: ${SPECPILOT_MAIN_API_KEY}
     depends_on:
       mcp:
         condition: service_healthy

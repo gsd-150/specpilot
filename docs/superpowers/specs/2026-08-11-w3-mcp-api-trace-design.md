@@ -169,7 +169,9 @@ rebinding protection.
 
 ## Run persistence and sanitized trace
 
-Migration `004` adds two normalized tables.
+> **[已变更｜2026-08-12｜迁移编号顺延]** Part 1 的真实 PostgreSQL RED 证明已发布 migration 001 的 stage CHECK 不接受 `planning`。因此追加 migration 004 扩展该精确闭集，不改写历史迁移；下述 run/trace 两表迁移顺延为 `005`，其设计语义不变。
+
+Migration `005` adds two normalized tables.
 
 `specpilot_run` stores:
 
@@ -337,7 +339,7 @@ text, mutate `specpilot_live`, or commit restricted fixture artifacts.
 
 ## Operational boundary
 
-Migration `004` is tested on throwaway databases and shipped with explicit
+Migrations `004` and `005` are tested on throwaway databases and shipped with explicit
 operator instructions. Applying it to `specpilot_live`, rebinding the packaged
 policy after the new planning stage, and making any real provider call remain
 separate owner-controlled operations.

@@ -40,6 +40,7 @@ class TaskLevel(StrEnum):
 
 
 class EgressStage(StrEnum):
+    PLANNING = "planning"
     EVIDENCE = "evidence"
     COMPLIANCE = "compliance"
     VERIFIER = "verifier"
@@ -96,6 +97,23 @@ class L1OnlinePayload(_FrozenModel):
     evidence_excerpts: tuple[EvidenceExcerpt, ...] = ()
 
 
+class ToolSchema(_FrozenModel):
+    name: Identifier
+    description: ShortText
+    input_schema: dict[str, object]
+
+
+class L1PlanPayload(_FrozenModel):
+    kind: Literal["l1_plan"] = "l1_plan"
+    query: ShortText
+    version: VersionMetadata
+    tool_catalog_version: Identifier
+    tool_catalog_hash: Sha256
+    tools: Annotated[tuple[ToolSchema, ...], Field(min_length=5, max_length=5)]
+    max_steps: Literal[4] = 4
+    max_tool_calls: Literal[6] = 6
+
+
 class L2DesignPayload(_FrozenModel):
     kind: Literal["l2_design"] = "l2_design"
     design_description: BoundedText
@@ -126,7 +144,11 @@ class JudgePayload(_FrozenModel):
 
 
 type EgressPayload = Annotated[
-    L1OnlinePayload | L2DesignPayload | L2AtomicClaimPayload | JudgePayload,
+    L1OnlinePayload
+    | L1PlanPayload
+    | L2DesignPayload
+    | L2AtomicClaimPayload
+    | JudgePayload,
     Field(discriminator="kind"),
 ]
 

@@ -1596,15 +1596,57 @@ def _answer(arguments: argparse.Namespace) -> int:
     return asyncio.run(_answer_async(arguments))
 
 
+def _answer_outcome_projection(outcome: Any) -> dict[str, Any]:
+    """Project provider failure before verifier verdict at the CLI boundary."""
+    answer = outcome.verified
+    if outcome.provider_error is not None:
+        return {
+            "status": "failed",
+            "refusal_reason": None,
+            "citation_faults": [],
+            "provider_error": outcome.provider_error,
+        }
+    return {
+        "status": answer.verdict.value,
+        "refusal_reason": (
+            answer.refusal_reason.value if answer.refusal_reason else None
+        ),
+        "citation_faults": list(answer.citation_faults),
+        "provider_error": None,
+    }
+
+
+def _authorized_answer_endpoint(route_name: str, manifest: Any) -> Any:
+    from specpilot.providers.http import LIVE_ROUTES
+
+    endpoint = LIVE_ROUTES[route_name].endpoint
+    binding = manifest.provider_route_binding
+    if (
+        binding is None
+        or binding.provider_id != endpoint.provider_id
+        or binding.use is not ProviderUse.ONLINE_MAIN
+    ):
+        raise EgressPolicyViolation(
+            "route_unauthorized",
+            "selected answer route is not authorized by the source manifest",
+        )
+    return endpoint
+
+
 async def _answer_async(arguments: argparse.Namespace) -> int:
     from specpilot.answer.evidence import build_evidence_from_unit
     from specpilot.answer.run import run_answer
+    from specpilot.egress.ledger import LedgerError
     from specpilot.egress.postgres import PostgresEgressLedger
     from specpilot.providers.http import (
-        LIVE_ROUTES,
         HttpChatAdapter,
         ProviderCredentialMissing,
         resolve_credential,
+    )
+    from specpilot.providers.transport import (
+        NoAdapterForRoute,
+        PolicyBoundTransport,
+        TransportReplayError,
     )
 
     try:
@@ -1704,37 +1746,52 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
     except ValueError:
         return _refuse("invalid_evidence_set")
 
+    try:
+        endpoint = _authorized_answer_endpoint(arguments.route, authorized)
+    except EgressPolicyViolation as violation:
+        return _refuse(f"blocked:{violation.code}")
+
     enforcer = EgressPolicyEnforcer(EgressPolicy.load(), manifests=store)
     ledger = PostgresEgressLedger(
         arguments.ledger_dsn, policy=EgressPolicy.load(), manifests=store
     )
-    endpoint = LIVE_ROUTES[arguments.route].endpoint
     try:
         key = resolve_credential(endpoint)
     except ProviderCredentialMissing:
         return _refuse("provider_credential_missing", EXIT_USAGE)
     adapter = HttpChatAdapter(endpoint, api_key=key)
+    transport = PolicyBoundTransport(
+        enforcer=enforcer,
+        ledger=ledger,
+        adapters=(cast(Any, adapter),),
+    )
     try:
         outcome = await run_answer(
             arguments.question,
             evidence,
-            enforcer=enforcer,
-            ledger=ledger,
-            adapter=adapter,
+            transport=transport,
+            model_id=endpoint.model_id,
             source_manifest=authorized,
             corpus_manifest_id=corpus_manifest.manifest_id,
             evaluation_root_id=arguments.evaluation_root_id,
             run_id=arguments.run_id,
         )
     except EgressPolicyViolation as violation:
-        return _refuse(violation.code)
+        return _refuse(f"blocked:{violation.code}")
+    except TransportReplayError as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except NoAdapterForRoute as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except LedgerError as error:
+        return _refuse(f"blocked:{error.code}", EXIT_IO)
     finally:
         await adapter.aclose()
 
     answer = outcome.verified
+    projection = _answer_outcome_projection(outcome)
     return _emit(
         {
-            "status": answer.verdict.value,
+            "status": projection["status"],
             "answer": answer.answer,
             "citations": [
                 {
@@ -1747,10 +1804,8 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
                 }
                 for citation in answer.citations
             ],
-            "refusal_reason": (
-                answer.refusal_reason.value if answer.refusal_reason else None
-            ),
-            "citation_faults": list(answer.citation_faults),
+            "refusal_reason": projection["refusal_reason"],
+            "citation_faults": projection["citation_faults"],
             "scoped_document_id": scoped,
             "evidence_count": len(evidence),
             "retrieved_clause_ids": [unit.unit_id for unit in ranked],
@@ -1762,7 +1817,7 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
             "request_bytes": (
                 outcome.request_size.request_bytes if outcome.request_size else None
             ),
-            "provider_error": outcome.provider_error,
+            "provider_error": projection["provider_error"],
             "source_manifest_id": authorized.manifest_id,
             "corpus_manifest_id": corpus_manifest.manifest_id,
         }
@@ -2672,9 +2727,13 @@ async def _egress_rebind_policy_async(arguments: argparse.Namespace) -> int:
 async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     from specpilot.egress.ledger import LedgerError
     from specpilot.egress.postgres import PostgresEgressLedger
-    from specpilot.providers.base import ProviderError
     from specpilot.providers.fake import FakeProvider
-    from specpilot.providers.transport import PolicyBoundTransport
+    from specpilot.providers.transport import (
+        NoAdapterForRoute,
+        PolicyBoundTransport,
+        ProviderAttemptError,
+        TransportReplayError,
+    )
 
     # --route must actually change the route. A judge smoke that quietly
     # exercises the online chain is false evidence for the go/no-go checklist.
@@ -2763,13 +2822,17 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
         )
     )
     try:
-        response = await transport.send(request, idempotency_key="route-smoke-1")
+        receipt = await transport.send(request, idempotency_key="route-smoke-1")
     except EgressPolicyViolation as error:
-        return _refuse(f"refused:{error.code}")
+        return _refuse(f"blocked:{error.code}")
+    except TransportReplayError as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except NoAdapterForRoute as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
     except LedgerError as error:
         return _refuse(f"blocked:{error.code}")
-    except ProviderError as error:
-        return _refuse(f"blocked:{error.public_error_code}")
+    except ProviderAttemptError as error:
+        return _refuse(f"failed:{error.public_error_code}", EXIT_IO)
     finally:
         aclose = getattr(provider, "aclose", None)
         if aclose is not None:
@@ -2781,10 +2844,10 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
             "route": arguments.route,
             "provider_use": manifest.provider_route_binding.use.value,
             "adapter": "live" if live else "fixture",
-            "provider_id": response.provider_id,
-            "model_id": response.model_id,
-            "finish_reason": response.metadata.finish_reason,
-            "tool_call_count": response.metadata.tool_call_count,
+            "provider_id": receipt.response.provider_id,
+            "model_id": receipt.response.model_id,
+            "finish_reason": receipt.response.metadata.finish_reason,
+            "tool_call_count": receipt.response.metadata.tool_call_count,
             # Priced by the caps: source text only. Deliberately NOT placed
             # beside prompt_tokens, which covers the whole prompt including the
             # system message and the tool schema. Comparing those two reads as
@@ -2793,14 +2856,15 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
             # These three are like for like. A byte-level BPE cannot emit more
             # tokens than the request has bytes, so the bound is checked here
             # against a live route rather than asserted from construction.
-            "request_bytes": response.metadata.request_bytes,
-            "provider_prompt_tokens": response.metadata.prompt_tokens,
+            "request_bytes": receipt.response.metadata.request_bytes,
+            "provider_prompt_tokens": receipt.response.metadata.prompt_tokens,
             "token_upper_bound_held": (
-                response.metadata.prompt_tokens <= response.metadata.request_bytes
+                receipt.response.metadata.prompt_tokens
+                <= receipt.response.metadata.request_bytes
             ),
             "discloses": "synthetic-fixture-spec only",
             "proves": (
-                _live_findings(response)
+                _live_findings(receipt.response)
                 if live
                 else "transport, enforcer and ledger are wired and policy-bound"
             ),

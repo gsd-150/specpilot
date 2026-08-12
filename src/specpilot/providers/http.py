@@ -34,11 +34,13 @@ from typing import Any
 
 import httpx
 
+from specpilot.agents.contracts import ToolPlan
 from specpilot.contracts.answer import REPLY_INSTRUCTIONS
 from specpilot.contracts.egress import (
     EgressPayload,
     JudgePayload,
     L1OnlinePayload,
+    L1PlanPayload,
     L2AtomicClaimPayload,
     L2DesignPayload,
 )
@@ -69,6 +71,20 @@ PROBE_TOOL: dict[str, Any] = {
 _SYSTEM_PROMPT = (
     "You answer strictly from the evidence excerpts supplied in the message. "
     "If they do not support an answer, say so."
+)
+
+_PLANNING_SYSTEM_PROMPT = json.dumps(
+    {
+        "instruction": (
+            "Return exactly one object matching response_schema. Use only the "
+            "tools and identifiers supplied in the user catalog. Return JSON "
+            "content only."
+        ),
+        "response_schema": ToolPlan.model_json_schema(),
+    },
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
 )
 
 _STATUS_CODES = {
@@ -175,7 +191,7 @@ class HttpChatAdapter:
             "messages": _render_messages(projected_payload),
             "temperature": 0,
         }
-        if self._probe_tools:
+        if self._probe_tools and not isinstance(projected_payload, L1PlanPayload):
             body["tools"] = [PROBE_TOOL]
 
         # Serialized here rather than left to httpx, so the byte count recorded
@@ -293,12 +309,16 @@ _ATTRIBUTION = (
 
 def _system_prompt(payload: EgressPayload) -> str:
     """The judge scores; everything else answers under the citation contract."""
+    if isinstance(payload, L1PlanPayload):
+        return _PLANNING_SYSTEM_PROMPT
     if isinstance(payload, JudgePayload):
         return _SYSTEM_PROMPT
     return f"{_SYSTEM_PROMPT}\n\n{REPLY_INSTRUCTIONS}"
 
 
 def _render_user(payload: EgressPayload) -> str:
+    if isinstance(payload, L1PlanPayload):
+        return payload.model_dump_json()
     lines: list[str] = []
     if not isinstance(payload, JudgePayload):
         lines.append(
@@ -343,6 +363,8 @@ class RouteConfig:
     endpoint: ProviderEndpoint
     description: str = field(default="")
 
+    endpoint_purpose: str = field(default="")
+
 
 MAIN_ROUTE = RouteConfig(
     endpoint=ProviderEndpoint(
@@ -352,6 +374,7 @@ MAIN_ROUTE = RouteConfig(
         api_key_env="SPECPILOT_MAIN_API_KEY",
     ),
     description="online main chain",
+    endpoint_purpose="online-main-deepseek-v4-flash-api",
 )
 
 JUDGE_ROUTE = RouteConfig(
@@ -362,6 +385,7 @@ JUDGE_ROUTE = RouteConfig(
         api_key_env="SPECPILOT_JUDGE_API_KEY",
     ),
     description="offline judge",
+    endpoint_purpose="offline-judge-chatanywhere-glm-5.2-api",
 )
 
 LIVE_ROUTES = {"main": MAIN_ROUTE, "judge": JUDGE_ROUTE}

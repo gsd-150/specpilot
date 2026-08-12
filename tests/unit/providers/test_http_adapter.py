@@ -22,8 +22,10 @@ from specpilot.providers.http import (
     HttpChatAdapter,
     ProviderCredentialMissing,
     ProviderEndpoint,
+    _system_prompt,
     resolve_credential,
 )
+from tests.unit.egress.test_planning_projection import planning_request
 from tests.unit.egress.test_policy_projection import l1_payload
 
 pytestmark = pytest.mark.anyio
@@ -92,6 +94,69 @@ async def test_a_successful_call_returns_only_allowlisted_response_facts() -> No
     assert response.metadata.prompt_tokens == 41
     assert response.metadata.completion_tokens == 7
     assert response.metadata.finish_reason == "stop"
+
+
+async def test_planning_payload_sends_source_free_catalog_json() -> None:
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured)
+    payload = planning_request(query="When may a sender retry?").payload
+
+    response = await adapter.send(payload)
+
+    messages = json.loads(captured[0].content)["messages"]
+    system = next(
+        message["content"] for message in messages if message["role"] == "system"
+    )
+    user = next(message["content"] for message in messages if message["role"] == "user")
+    rendered = json.loads(user)
+    contract = json.loads(system)
+    schema = contract["response_schema"]
+    assert rendered == payload.model_dump(mode="json")
+    assert payload.query not in system
+    assert schema["required"] == ["plan_id", "steps"]
+    assert schema["properties"]["steps"]["minItems"] == 1
+    assert schema["properties"]["steps"]["maxItems"] == 4
+    assert "StepResultRef" in schema["$defs"]
+    assert schema["$defs"]["StepResultRef"]["properties"]["take"]["maximum"] == 3
+    search_step = schema["$defs"]["SearchClausesStep"]
+    assert search_step["required"] == ["step_id", "tool", "args"]
+    assert set(search_step["properties"]) == {
+        "step_id",
+        "tool",
+        "args",
+        "depends_on",
+    }
+    assert search_step["properties"]["tool"]["const"] == "search_clauses"
+    assert schema["$defs"]["GetClauseArgs"]["required"] == [
+        "corpus_manifest_id",
+        "document_id",
+        "clauses",
+    ]
+    assert response.metadata.request_bytes == len(captured[0].content)
+    assert "excerpt" not in user.lower()
+    assert "candidate" not in user.lower()
+    assert "disclosure" not in user.lower()
+
+
+async def test_planning_never_uses_native_provider_tool_calls() -> None:
+    captured: list[httpx.Request] = []
+    adapter = adapter_returning(ok_body(), capture=captured, probe_tools=True)
+
+    await adapter.send(planning_request(query="When may a sender retry?").payload)
+
+    body = json.loads(captured[0].content)
+    assert "tools" not in body
+
+
+def test_planning_payload_uses_the_formal_json_only_contract() -> None:
+    payload = planning_request(query="When may a sender retry?").payload
+
+    system = _system_prompt(payload)
+
+    contract = json.loads(system)
+    assert contract["instruction"].endswith("JSON content only.")
+    assert contract["response_schema"]["title"] == "ToolPlan"
+    assert "citations" not in system.lower()
 
 
 async def test_the_request_carries_the_key_and_the_payload_and_nothing_else() -> None:

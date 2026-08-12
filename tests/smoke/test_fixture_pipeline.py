@@ -146,7 +146,7 @@ async def test_the_demo_route_reserves_sends_and_records_without_payload_text(
     )
 
     assert provider.call_count == 1
-    assert response.content.startswith("fixture answer")
+    assert '"sufficient":true' in response.response.content
 
     with psycopg.connect(clean_ledger) as connection:
         reservations = connection.execute(
