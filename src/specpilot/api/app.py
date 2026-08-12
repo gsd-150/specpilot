@@ -20,6 +20,7 @@ from specpilot.api.contracts import (
     HealthView,
 )
 from specpilot.api.dependencies import ApiRuntime
+from specpilot.api.static import install_trace_routes
 from specpilot.runs.contracts import RunRecord, RunStatus, TerminalEvent
 from specpilot.runtime import WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionClaims, SessionTokenError
@@ -121,6 +122,11 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                     await close_worker()
 
     app = FastAPI(title="SpecPilot", version="0.1.0", lifespan=lifespan)
+    install_trace_routes(
+        app,
+        source_manifest_id=runtime.binding.source_manifest_id,
+        corpus_manifest_id=runtime.binding.corpus_manifest_id,
+    )
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(
@@ -260,6 +266,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
 
 def _unconfigured_app() -> FastAPI:
     app = FastAPI(title="SpecPilot", version="0.1.0")
+    install_trace_routes(app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -1,4 +1,4 @@
-.PHONY: setup check unit integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant
+.PHONY: setup check unit integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant frontend-test frontend-build
 
 SPECPILOT_PYTHON ?= .venv/bin/python
 
@@ -8,6 +8,12 @@ setup:
 	$(SPECPILOT_PYTHON) -m pip install -e ".[dev]"
 
 check: lint typecheck unit
+
+frontend-test:
+	npm --prefix web/trace test -- --run
+
+frontend-build:
+	npm --prefix web/trace run build
 
 unit:
 	$(SPECPILOT_PYTHON) -m pytest tests/unit -q

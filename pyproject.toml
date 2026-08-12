@@ -45,6 +45,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "specpilot.egress.policies" = ["*.json"]
+"specpilot.api.static" = ["trace/*.html", "trace/assets/*.js", "trace/assets/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -21,6 +21,7 @@ from specpilot.agents.evidence import EvidenceAgent
 from specpilot.agents.planner import Planner, PlannerContext
 from specpilot.api.app import create_app
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
+from specpilot.api.static import install_trace_routes
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
@@ -217,6 +218,7 @@ class _ProviderHook:
 
 def _unavailable_app() -> FastAPI:
     app = FastAPI(title="SpecPilot", version="0.1.0")
+    install_trace_routes(app)
 
     @app.get("/health", status_code=503)
     async def health() -> dict[str, str]:
