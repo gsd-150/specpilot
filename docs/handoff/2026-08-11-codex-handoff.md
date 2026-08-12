@@ -38,7 +38,7 @@ Fresh local W3 checks on 2026-08-13:
 
 | command | result |
 | --- | --- |
-| `make check` | Ruff clean; strict mypy clean over 94 source files; 1,419 unit tests passed, 2 restricted-fixture tests skipped |
+| `make check` | Ruff clean; strict mypy clean over 94 source files; 1,597 unit and CLI tests passed, 2 restricted-fixture tests skipped |
 | `npm test -- --run` | 106 passed |
 | `npm run build` | TypeScript and Vite production build passed |
 

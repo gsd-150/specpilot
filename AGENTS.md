@@ -55,10 +55,11 @@ colima start && docker compose -f compose.yaml -f compose.index.yaml up --wait q
 ## Commands
 
 ```bash
-make check              # lint + typecheck + tests/unit  — the fast loop
+make check              # lint + typecheck + unit + CLI tests — the fast loop
 make lint               # ruff
 make typecheck          # mypy --strict over src
 make unit               # tests/unit only
+make cli                # tests/cli only; no service dependency
 make integration-db     # needs SPECPILOT_TEST_DSN
 make integration-qdrant # needs Qdrant up
 make fixture-smoke      # needs SPECPILOT_TEST_DSN
