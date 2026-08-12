@@ -118,6 +118,22 @@ produce only a sanitized unavailable health response. The fixture profile must
 bind to loopback. The real profile may bind inside the container but remains
 unpublished by the base Compose file.
 
+Both API and MCP receive the same three frozen artifact trees through explicit
+read-only bind mounts. Set
+`SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST`,
+`SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST`, and
+`SPECPILOT_MCP_SOURCE_DATA_DIR_HOST` to host directories. Inside both
+containers they are fixed at `/run/specpilot/corpus`,
+`/run/specpilot/manifests`, and `/run/specpilot/sources`; each `xml_path` in
+`SPECPILOT_MCP_SOURCES_JSON` must be an absolute path below the last directory.
+Host paths are mount sources only and never become container environment
+values.
+
+The base API joins `internal` and `egress`, which permits the real provider
+route while leaving MCP internal-only. `compose.demo.yaml` overrides the
+fixture API to `internal` plus the demo bridge and publishes it only on
+`127.0.0.1`; the fixture API never joins `egress`.
+
 On colima the published port binds to the VM's loopback, not the Mac's, so check
 it from inside the VM: `colima ssh -- curl http://127.0.0.1:8000/health`. On
 Docker Desktop and on Linux it is reachable from the host directly.

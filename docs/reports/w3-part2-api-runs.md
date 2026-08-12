@@ -9,8 +9,9 @@ traces, leased interruption semantics, and deployment assembly for the API and
 MCP client. It does not add SSE, a browser page, durable question checkpoints,
 or a real-provider run.
 
-The deterministic end-to-end fixture crossed FastAPI, the leased worker, a
-model-authored planner response, Streamable HTTP MCP, local retrieval, the real
+The deployed deterministic fixture assembly crossed environment loading,
+FastAPI, the leased worker, its configured fixture provider, Streamable HTTP
+MCP, local retrieval, the real
 PostgreSQL disclosure ledger, and the citation verifier. It reached
 `answered`, recorded exactly one successful `planning` reservation and one
 successful `evidence` reservation, and returned 17 typed trace events. The
@@ -27,13 +28,14 @@ SPECPILOT_TEST_DSN=postgresql://localhost:5432/specpilot_w3_e2e_test \
 SPECPILOT_TEST_QDRANT_URL=http://127.0.0.1:6334 \
 .venv/bin/python -m pytest tests/integration/api/test_l1_end_to_end.py -q
 
-2 passed in 1.11s
+1 passed in 1.31s
 ```
 
-The second case is a lifecycle regression: the MCP server lifespan, HTTP
-client, and SDK client enter and exit their task-bound async contexts in one
-owner task. Unit regressions additionally cover startup cancellation, partial
-entry with a `BaseException`, close cancellation, and repeated close.
+The test selects the fixture provider through `_assemble_runtime`; it does not
+inject an alternate answer provider. Unit regressions cover startup
+cancellation, partial entry with a `BaseException`, cleanup failure while
+preserving the primary failure, concurrent start/close, close cancellation,
+same-task exit, and repeated close.
 
 ## Full verification
 
@@ -47,7 +49,7 @@ SPECPILOT_TEST_DSN=postgresql://localhost:5432/specpilot_w3_e2e_test \
 SPECPILOT_TEST_QDRANT_URL=http://127.0.0.1:6334 \
 .venv/bin/python -m pytest -q
 
-1829 passed, 2 skipped in 22.30s
+1837 passed, 2 skipped in 23.30s
 ```
 
 The two skips are the repository's pre-existing unit dependency skips. No
@@ -95,6 +97,9 @@ explicit Task 11 policy-successor/rebind operation before planning is enabled.
 Nothing in this work migrated or rebound `specpilot_live`, called a real
 provider, or used the real corpus in an outbound request.
 
-The base Compose file publishes no host port and passes only explicitly named
-API, manifest, and provider environment variables. Missing or invalid runtime
+The base Compose file publishes no host port. API and MCP share three explicit
+read-only frozen-artifact mounts at fixed container paths; host paths are used
+only as mount sources. MCP remains internal-only. The base/real API joins the
+egress network, while the demo override replaces that topology with internal
+plus its loopback-published demo bridge. Missing or invalid runtime
 configuration exposes only a sanitized unavailable health response.
