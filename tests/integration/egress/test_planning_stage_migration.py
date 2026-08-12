@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
@@ -102,16 +103,14 @@ def test_upgrade_preserves_rows_allows_planning_and_rejects_unknown(
             ).fetchone()
             assert constraint is not None
             rendered = constraint[0]
-            assert all(
-                stage in rendered
-                for stage in (
-                    "planning",
-                    "evidence",
-                    "compliance",
-                    "verifier",
-                    "judge",
-                )
-            )
+            allowed = set(re.findall(r"'([^']+)'", rendered))
+            assert allowed == {
+                "planning",
+                "evidence",
+                "compliance",
+                "verifier",
+                "judge",
+            }
         finally:
             connection.execute("RESET search_path")
             connection.execute(

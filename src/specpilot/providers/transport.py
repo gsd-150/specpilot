@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 
 from specpilot.contracts.egress import EgressRequest
@@ -37,6 +39,7 @@ class NoAdapterForRoute(LedgerError):
 # cannot express it. What bounds the disclosure in that case is the reservation,
 # which was already committed and is never refunded on error.
 _NOTHING_MEASURED = RequestSize(request_tokens=0, request_bytes=0)
+_RECONCILIATION_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,18 @@ class ProviderAttemptError(Exception):
         self.reservation_id = reservation_id
         self.replayed = replayed
         super().__init__(public_error_code)
+
+
+class TransportReplayError(Exception):
+    """A reservation was already consumed, but no response is stored to replay."""
+
+    __slots__ = ("code", "replayed", "reservation_id")
+
+    def __init__(self, reservation_id: str) -> None:
+        self.code = "transport_replay_refused"
+        self.reservation_id = reservation_id
+        self.replayed = True
+        super().__init__(self.code)
 
 
 class PolicyBoundTransport:
@@ -113,6 +128,11 @@ class PolicyBoundTransport:
             counter,
             idempotency_key=idempotency_key,
         )
+        if reservation.replayed:
+            # A reservation authorizes exactly one transmission. The ledger
+            # intentionally stores no provider response body, so there is
+            # nothing safe to return and no authority for another send.
+            raise TransportReplayError(reservation.reservation_id)
 
         # Filled from the response, not from the disclosure facts. This used to
         # record `sum(fact.byte_count)` — the enforcer's content projection —
@@ -120,45 +140,49 @@ class PolicyBoundTransport:
         # path recorded the real request size into the same column. One column,
         # two quantities, decided by which caller you came through.
         started = time.monotonic()
+        response: ProviderResponse | None = None
+        failure_code: str | None = None
         try:
             response = await adapter.send(reservation_request.projected_payload)
         except ProviderError as error:
-            await self.__record(
+            failure_code = error.public_error_code
+        except asyncio.CancelledError:
+            await self.__reconcile_cancelled_send(
                 reservation.reservation_id,
                 request,
-                _NOTHING_MEASURED,
-                AttemptOutcome.FAILED_KNOWN,
                 duration_ms=_elapsed_ms(started),
-                public_error_code=error.public_error_code,
             )
-            raise ProviderAttemptError(
-                error.public_error_code,
-                reservation.reservation_id,
-                reservation.replayed,
-            ) from None
+            raise
         except Exception:
             # An unclassified adapter fault: it is not known whether anything
             # left the machine, so this is recorded and re-raised, never retried
             # transparently.
-            await self.__record(
+            failure_code = "provider_unclassified_error"
+
+        # Perform accounting only after the raw adapter exception is out of
+        # scope. Otherwise either the public provider error or a ledger error
+        # could retain the raw exception as ``__context__``.
+        if failure_code is not None:
+            await self.__record_after_send(
                 reservation.reservation_id,
                 request,
                 _NOTHING_MEASURED,
                 AttemptOutcome.FAILED_KNOWN,
                 duration_ms=_elapsed_ms(started),
-                public_error_code="provider_unclassified_error",
+                public_error_code=failure_code,
             )
             raise ProviderAttemptError(
-                "provider_unclassified_error",
+                failure_code,
                 reservation.reservation_id,
                 reservation.replayed,
             ) from None
 
+        assert response is not None
         request_size = RequestSize(
             request_tokens=response.metadata.prompt_tokens,
             request_bytes=response.metadata.request_bytes,
         )
-        await self.__record(
+        await self.__record_after_send(
             reservation.reservation_id,
             request,
             request_size,
@@ -171,6 +195,66 @@ class PolicyBoundTransport:
             replayed=reservation.replayed,
             request_size=request_size,
         )
+
+    async def __record_after_send(
+        self,
+        reservation_id: str,
+        request: EgressRequest,
+        request_size: RequestSize,
+        outcome: AttemptOutcome,
+        *,
+        duration_ms: int,
+        public_error_code: str | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            self.__record(
+                reservation_id,
+                request,
+                request_size,
+                outcome,
+                duration_ms=duration_ms,
+                public_error_code=public_error_code,
+            )
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await _settle_bounded(task)
+            await self.__seal_bounded(request)
+            raise
+
+    async def __reconcile_cancelled_send(
+        self,
+        reservation_id: str,
+        request: EgressRequest,
+        *,
+        duration_ms: int,
+    ) -> None:
+        # Cancellation can arrive after socket bytes left but before a response
+        # became definite. Spend and close rather than pretending it was a
+        # no-send. Repeated cancellation cannot interrupt these local writes.
+        record = asyncio.create_task(
+            self.__record(
+                reservation_id,
+                request,
+                _NOTHING_MEASURED,
+                AttemptOutcome.FAILED_KNOWN,
+                duration_ms=duration_ms,
+                public_error_code="provider_cancelled",
+            )
+        )
+        await _settle_bounded(record)
+        await self.__seal_bounded(request)
+
+    async def __seal_bounded(self, request: EgressRequest) -> None:
+        seal = asyncio.create_task(
+            self.__ledger.seal_run(
+                request.evaluation_root_id,
+                request.run_id,
+                "provider send was cancelled after reservation",
+            )
+        )
+        await _settle_bounded(seal)
 
     async def __record(
         self,
@@ -206,9 +290,30 @@ def _elapsed_ms(started: float) -> int:
     return max(int((time.monotonic() - started) * 1000), 0)
 
 
+async def _settle_bounded(task: asyncio.Task[object]) -> None:
+    """Finish one shielded ledger operation despite repeated cancellation."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RECONCILIATION_TIMEOUT_SECONDS
+    while not task.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            task.cancel()
+            break
+        try:
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+    if not task.done():
+        task.cancel()
+    if task.done():
+        with suppress(BaseException):
+            task.result()
+
+
 __all__ = [
     "NoAdapterForRoute",
     "PolicyBoundTransport",
     "ProviderAttemptError",
+    "TransportReplayError",
     "TransportReceipt",
 ]

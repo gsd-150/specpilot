@@ -87,7 +87,6 @@ async def run_answer(
             verified=VerifiedAnswer(
                 verdict=AnswerVerdict.REFUSED,
                 refusal_reason=RefusalReason.EVIDENCE_INSUFFICIENT,
-                citation_faults=(error.public_error_code,),
             ),
             reservation_id=error.reservation_id,
             replayed=error.replayed,

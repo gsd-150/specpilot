@@ -31,7 +31,7 @@ from specpilot.corpus.clauses import ClauseLimits, iter_clause_texts
 from specpilot.egress.ledger import AttemptOutcome, RequestSize
 from specpilot.manifests.store import ManifestStore
 from specpilot.providers.base import ProviderError, ProviderResponse, ResponseMetadata
-from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.providers.transport import PolicyBoundTransport, TransportReplayError
 from tests.helpers import rfc_factory
 from tests.unit.manifests.test_source_manifest import assessment, initial_fields
 
@@ -300,9 +300,49 @@ async def test_a_failed_send_still_spends_the_reservation(
     assert ledger.attempts[0][0] is AttemptOutcome.FAILED_KNOWN
     assert outcome.provider_error == "provider_timeout"
     assert outcome.verified.verdict is AnswerVerdict.REFUSED
+    assert outcome.verified.refusal_reason is RefusalReason.EVIDENCE_INSUFFICIENT
+    assert outcome.verified.citation_faults == (), (
+        "provider failure is outcome data, never a citation-verifier fault"
+    )
     assert outcome.reservation_id == "res-1"
     assert outcome.replayed is False
     assert outcome.request_size is None
+
+
+@pytest.mark.anyio
+async def test_closed_replay_is_not_mislabeled_as_evidence_insufficient(
+    source: Any, evidence: Any
+) -> None:
+    manifest, _ = source
+    built, _ = evidence
+
+    class ReplayLedger(FakeLedger):
+        async def check_and_reserve(
+            self, request: Any, counter: Any, *, idempotency_key: str
+        ) -> FakeReservation:
+            self.events.append("reserve")
+            return FakeReservation(replayed=True)
+
+    ledger = ReplayLedger()
+    adapter = FakeAdapter(content=reply([built[0].disclosed.content_hash]))
+    with pytest.raises(TransportReplayError):
+        await run_answer(
+            "Which paragraph exists?",
+            built,
+            transport=PolicyBoundTransport(
+                enforcer=FakeEnforcer(),  # type: ignore[arg-type]
+                ledger=ledger,  # type: ignore[arg-type]
+                adapters=(adapter,),  # type: ignore[arg-type]
+            ),
+            model_id=adapter.model_id,
+            source_manifest=manifest,
+            corpus_manifest_id=CORPUS,
+            evaluation_root_id="slice-1",
+            run_id="run-1",
+            idempotency_key="already-used",
+        )
+
+    assert ledger.events == ["reserve"]
 
 
 @pytest.mark.anyio

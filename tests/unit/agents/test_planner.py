@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import pytest
 
+import specpilot.providers.transport as transport_module
 from specpilot.agents.planner import InvalidToolPlan, Planner, PlannerContext
 from specpilot.providers.fake import FakeProvider
 from tests.unit.egress.test_planning_projection import planning_request
-from tests.unit.providers.test_transport_fail_closed import StubLedger, transport
+from tests.unit.providers.test_transport_fail_closed import (
+    ReplayLedger,
+    StubLedger,
+    transport,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -59,3 +64,23 @@ async def test_planner_reads_json_content_not_native_tool_calls() -> None:
 
     assert plan.plan_id == "plan-1"
     assert [step.step_id for step in plan.steps] == ["search"]
+
+
+async def test_planner_does_not_turn_closed_replay_into_an_invalid_plan() -> None:
+    request = planning_request(query="When may a sender retry?")
+    provider = FakeProvider()
+    planner = Planner(transport(provider, ReplayLedger()))
+    context = PlannerContext(
+        source_manifest=request.source_manifest,
+        corpus_manifest_id=request.version.corpus_manifest_id,
+        evaluation_root_id=request.evaluation_root_id,
+        run_id=request.run_id,
+        model_id=request.model_id,
+        idempotency_key="plan-1",
+    )
+    await planner.plan("When may a sender retry?", context)
+
+    with pytest.raises(transport_module.TransportReplayError):
+        await planner.plan("When may a sender retry?", context)
+
+    assert provider.call_count == 1

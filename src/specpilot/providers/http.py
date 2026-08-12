@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 
+from specpilot.agents.contracts import ToolPlan
 from specpilot.contracts.answer import REPLY_INSTRUCTIONS
 from specpilot.contracts.egress import (
     EgressPayload,
@@ -72,10 +73,18 @@ _SYSTEM_PROMPT = (
     "If they do not support an answer, say so."
 )
 
-_PLANNING_SYSTEM_PROMPT = (
-    "Return exactly one JSON object matching the supplied bounded ToolPlan "
-    "contract. Use only the five listed tools, prior-step references, and the "
-    "supplied corpus and document identifiers. Return JSON content only."
+_PLANNING_SYSTEM_PROMPT = json.dumps(
+    {
+        "instruction": (
+            "Return exactly one object matching response_schema. Use only the "
+            "tools and identifiers supplied in the user catalog. Return JSON "
+            "content only."
+        ),
+        "response_schema": ToolPlan.model_json_schema(),
+    },
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
 )
 
 _STATUS_CODES = {
