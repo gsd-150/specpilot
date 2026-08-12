@@ -38,12 +38,27 @@ the reason is in the docstring. Do not compress them away.
 Anything touching retrieval or the answer path needs all of this up:
 
 ```bash
-colima start && docker compose -f compose.yaml -f compose.index.yaml up --wait qdrant
+colima start
+docker start specpilot-qdrant-1        # the container already exists; fastest path
+```
+
+First time, or after the container is removed — the `--env-file` is required
+since W3, because compose validates *every* service even when you name one, and
+the `mcp`/`api` bind mounts expand to `:/run/specpilot/corpus:ro` without it:
+
+```bash
+docker compose --env-file .env.example -f compose.yaml -f compose.index.yaml up --wait qdrant
 ```
 
 - **Qdrant** `localhost:6333`, frozen collection
   `specpilot_ff4841e2d846388014efa06870fbbdb7`, 1,922 points. It runs under
-  Colima, so it dies whenever the Colima VM stops.
+  Colima, so it dies whenever the Colima VM stops — and the container stays
+  stopped after a host reboot even once Colima is back, which reads as
+  `DenseBackendUnavailable` / `Connection refused` from code that worked before.
+- **Reinstall after pulling**: `.venv/bin/python -m pip install -e ".[dev]"`
+  from the **main checkout**, never from a worktree. W3 added `mcp` and
+  `uvicorn`; a stale venv fails as ~12 collection errors and a mypy
+  `import-not-found`, both of which look like the branch is broken.
 - **PostgreSQL** `specpilot_live` — the egress ledger. Schema is
   `migrations/*.sql`, applied in order.
 - **BGE-M3 weights** at `data/cache/models/bge-m3` (2.1 GB) — *not* the

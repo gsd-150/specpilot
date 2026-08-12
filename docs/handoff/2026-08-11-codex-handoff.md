@@ -166,11 +166,14 @@ recovery, the full W5 fixture matrix, and locked W6 evaluation. See
 
 ## Open items, and what each one actually blocks
 
-1. **W3 is not integrated into `main`.** The implementation and reconciled
-   handoff are complete on the published `feat/w3-mcp-api-trace` branch. Draft
-   PR #1 is mergeable and its CI is green; review, mark it ready when
-   appropriate, and merge it before treating W3 as delivered from the default
-   branch.
+1. ~~**W3 is not integrated into `main`.**~~ **Closed 2026-08-13.** PR #1 merged
+   at 04:50; `main` is `96b13eb` and matches `origin/main`, CI green on the merge
+   commit. This item was written ten minutes before the merge — a reminder that
+   the fastest-moving lines in this file are the ones about its own state.
+
+   Re-verified independently on 2026-08-13: **1,856 passed, 0 skipped, 0 failed**
+   on a fresh database with Qdrant up, ruff clean, mypy `--strict` clean over 94
+   source files.
 
 2. **No rule for requirements that span consecutive paragraphs.** The one known
    instance is *closed*: the §8.2.3 pooling completeness audit on 2026-08-09
