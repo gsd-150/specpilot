@@ -134,6 +134,58 @@ route while leaving MCP internal-only. `compose.demo.yaml` overrides the
 fixture API to `internal` plus the demo bridge and publishes it only on
 `127.0.0.1`; the fixture API never joins `egress`.
 
+## L1 API and sanitized trace
+
+The W3 HTTP surface is intentionally small:
+
+- `POST /sessions/demo` exists only for the loopback fixture profile. It sets a
+  five-minute HTTP-only, SameSite-strict session cookie and returns no token.
+- `POST /chat` requires that cookie or an `Authorization: Bearer ...` header,
+  validates the exact source/corpus binding, persists a query hash (never the
+  question), queues one L1 run, and returns `202` with its `run_id`.
+- `GET /runs/{run_id}` requires the same credential. Unknown and foreign-owned
+  IDs have the identical `404` response, so the endpoint is not an ownership
+  oracle. Its typed event stream contains stable codes, opaque IDs, hashes,
+  counts, timings, and ledger summaries only.
+- `GET /trace` serves the packaged React client. It polls the owner-scoped run
+  endpoint, stops on a terminal state, and stops locally after 60 seconds. A
+  local polling timeout preserves the last server state and offers a manual
+  refresh; it never writes a new server status.
+
+The terminal states are deliberately distinct. `refused` is a normal
+evidence/citation decision; `egress_blocked` means the disclosure ledger denied
+the provider send; `failed` is selected from `provider_error`, not the verifier
+verdict; and `interrupted` is read-derived from an expired worker lease and is
+never automatically resumed. The page also renders `answered`, but it does not
+render the answer or any source excerpt in this W3 slice.
+
+Migration 004 adds the closed `planning` egress stage. Migration 005 adds the
+owner-bound run and sanitized event tables. Enabling 004 changes the packaged
+policy hash, so an existing corpus ledger still needs the explicit migration
+003 successor and `egress rebind-policy` operation described above. No API
+startup performs migrations or policy rebinding.
+
+W3 uses bounded HTTP polling only. SSE, `/chat/{run_id}/events`, reconnect
+semantics, and SSE credential transport remain W5 work; this release contains
+no `EventSource` client or events endpoint.
+
+The deterministic browser gate uses only a synthetic RFC fixture, the local
+fake provider, a dedicated fresh database named `specpilot_w3_browser_test`,
+and loopback HTTP. Run it with:
+
+```bash
+createdb specpilot_w3_browser_test
+npm --prefix web/trace exec playwright install chromium
+npm --prefix web/trace run build
+SPECPILOT_BROWSER_DSN=postgresql://localhost:5432/specpilot_w3_browser_test \
+  npm --prefix web/trace run test:browser
+dropdb specpilot_w3_browser_test
+```
+
+The launcher refuses another database name or a non-loopback host, requires a
+fresh schema, applies migrations 001--005, and clears that allowlisted schema
+on bounded shutdown. It never calls a real provider.
+
 On colima the published port binds to the VM's loopback, not the Mac's, so check
 it from inside the VM: `colima ssh -- curl http://127.0.0.1:8000/health`. On
 Docker Desktop and on Linux it is reachable from the host directly.
