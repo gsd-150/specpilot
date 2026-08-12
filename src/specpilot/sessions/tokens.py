@@ -12,6 +12,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import math
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -95,13 +96,10 @@ class SessionIssuer:
         raise SessionTokenError("invalid_session") from None
 
     def _issue(self, *, session_id: str, profile: str, ttl_seconds: int) -> str:
-        now = _clock_time(self._clock)
+        issued = _clock_seconds(self._clock)
         validated_session_id = _validated_identifier(session_id)
         validated_profile = _validated_identifier(profile)
         ttl = _validated_ttl(ttl_seconds)
-        issued = int(now.timestamp())
-        if issued < 0:
-            raise ValueError
         expires = issued + ttl
         datetime.fromtimestamp(expires, tz=UTC)
         claims = {
@@ -126,19 +124,20 @@ class SessionIssuer:
 class SessionVerifier:
     """Strictly parse and authenticate a canonical session credential."""
 
-    __slots__ = ("_audience", "_clock", "_secret")
+    __slots__ = ("_audience", "_clock", "_profile", "_secret")
 
-    def __init__(self, *, secret: bytes, audience: str, clock: Clock) -> None:
+    def __init__(
+        self, *, secret: bytes, audience: str, profile: str, clock: Clock
+    ) -> None:
         self._secret = _validated_secret(secret)
         self._audience = _validated_identifier(audience)
+        self._profile = _validated_identifier(profile)
         self._clock = _validated_clock(clock)
 
-    def verify(
-        self, token: str, *, expected_profile: str | None = None
-    ) -> SessionClaims:
+    def verify(self, token: str) -> SessionClaims:
         error_code: Literal["invalid_session", "expired_session"]
         try:
-            return self._verify(token, expected_profile=expected_profile)
+            return self._verify(token)
         except SessionTokenError as error:
             error_code = cast(
                 Literal["invalid_session", "expired_session"], str(error)
@@ -159,16 +158,9 @@ class SessionVerifier:
         # exception as ``__context__``, which can carry token-derived JSON.
         raise SessionTokenError(error_code) from None
 
-    def _verify(
-        self, token: str, *, expected_profile: str | None = None
-    ) -> SessionClaims:
+    def _verify(self, token: str) -> SessionClaims:
         try:
-            now = _clock_time(self._clock)
-            profile = (
-                None
-                if expected_profile is None
-                else _validated_identifier(expected_profile)
-            )
+            now_seconds = _clock_seconds(self._clock)
             version, payload_segment, signature_segment = _split_token(token)
             payload = _decode_base64url(payload_segment, max_bytes=_MAX_PAYLOAD_BYTES)
             signature = _decode_base64url(
@@ -193,16 +185,13 @@ class SessionVerifier:
                 or isinstance(raw_claims["v"], bool)
                 or raw_claims["alg"] != _ALGORITHM
                 or raw_claims["aud"] != self._audience
-                or (profile is not None and raw_claims["profile"] != profile)
+                or raw_claims["profile"] != self._profile
             ):
                 raise ValueError
             session_id = _validated_identifier(raw_claims["session_id"])
             claims_profile = _validated_identifier(raw_claims["profile"])
             audience = _validated_identifier(raw_claims["aud"])
             nonce = _validated_nonce(raw_claims["nonce"])
-            now_seconds = int(now.timestamp())
-            if now_seconds < 0:
-                raise ValueError
             if issued > now_seconds:
                 raise ValueError
             if now_seconds >= expires:
@@ -220,7 +209,10 @@ class SessionVerifier:
             raise
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(audience={self._audience!r})"
+        return (
+            f"{type(self).__name__}(audience={self._audience!r}, "
+            f"profile={self._profile!r})"
+        )
 
 
 def _validated_secret(secret: bytes) -> bytes:
@@ -266,18 +258,22 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _clock_time(clock: Clock) -> datetime:
+def _clock_seconds(clock: Clock) -> int:
     invalid = False
     try:
         value = clock()
+        aware = _aware_utc(value)
+        raw = aware.timestamp()
+        if not math.isfinite(raw) or raw < 0:
+            raise ValueError
+        seconds = int(raw)
+        datetime.fromtimestamp(seconds, tz=UTC)
     except Exception:
-        # The clock is an injected trust boundary.  Its raw exception cannot
-        # become the session error's retained context or public detail.
         invalid = True
-        value = None
-    if invalid or value is None:
+        seconds = 0
+    if invalid:
         raise SessionTokenError("invalid_session") from None
-    return _aware_utc(value)
+    return seconds
 
 
 def _canonical_json(value: object) -> bytes:

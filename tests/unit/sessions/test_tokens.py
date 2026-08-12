@@ -4,7 +4,8 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime, timedelta
+import math
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 import pytest
@@ -38,6 +39,11 @@ class FailingClock:
     def __call__(self) -> datetime:
         self.calls += 1
         raise self.error
+
+
+class ExplodingTimestamp(datetime):
+    def timestamp(self) -> float:
+        raise RuntimeError("timestamp raw marker")
 
 
 def _encode(value: bytes) -> str:
@@ -84,11 +90,13 @@ def _verifier(
     *,
     secret: bytes = SECRET,
     audience: str = "specpilot-api",
+    profile: str = "fixture",
     clock: Clock | None = None,
 ) -> SessionVerifier:
     return SessionVerifier(
         secret=secret,
         audience=audience,
+        profile=profile,
         clock=clock or Clock(),
     )
 
@@ -106,7 +114,7 @@ def test_token_is_short_lived_profile_bound_and_tamper_evident() -> None:
     token = SessionIssuer(
         secret=SECRET, audience="specpilot-api", clock=issue_clock
     ).issue(session_id="session-a", profile="fixture", ttl_seconds=300)
-    claims = _verifier().verify(token, expected_profile="fixture")
+    claims = _verifier().verify(token)
 
     assert claims.session_id == "session-a"
     assert claims.profile == "fixture"
@@ -179,6 +187,26 @@ def test_arbitrary_clock_failures_are_sanitized(operation: str) -> None:
     assert "raw detail" not in repr(caught.value)
 
 
+@pytest.mark.parametrize("operation", ["issue", "verify"])
+@pytest.mark.parametrize("failure", [SystemExit("stop"), KeyboardInterrupt()])
+def test_clock_base_exceptions_are_not_swallowed(
+    operation: str, failure: BaseException
+) -> None:
+    """Catches process-control exceptions becoming authentication failures."""
+    class BaseExceptionClock:
+        def __call__(self) -> datetime:
+            raise failure
+
+    clock = BaseExceptionClock()
+    with pytest.raises(type(failure)):
+        if operation == "issue":
+            SessionIssuer(
+                secret=SECRET, audience="specpilot-api", clock=clock
+            ).issue(session_id="session-a", profile="fixture", ttl_seconds=300)
+        else:
+            _verifier(clock=clock).verify(_signed_claims())
+
+
 @pytest.mark.parametrize("secret", ["x" * 32, b"x" * 31, bytearray(b"x" * 32)])
 @pytest.mark.parametrize("owner", [SessionIssuer, SessionVerifier])
 def test_signing_key_must_be_immutable_bytes_of_at_least_32_bytes(
@@ -186,7 +214,15 @@ def test_signing_key_must_be_immutable_bytes_of_at_least_32_bytes(
 ) -> None:
     """Catches text, short, or mutable signing keys entering token state."""
     with pytest.raises(SessionTokenError, match="^invalid_session$") as caught:
-        owner(secret=secret, audience="specpilot-api", clock=Clock())  # type: ignore[arg-type]
+        if owner is SessionIssuer:
+            owner(secret=secret, audience="specpilot-api", clock=Clock())  # type: ignore[arg-type]
+        else:
+            owner(  # type: ignore[arg-type]
+                secret=secret,
+                audience="specpilot-api",
+                profile="fixture",
+                clock=Clock(),
+            )
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert str(secret) not in repr(caught.value)
@@ -266,25 +302,44 @@ def test_claims_payload_is_canonical_base64url_json_without_padding() -> None:
     assert len(_decode(signature_segment)) == hashlib.sha256().digest_size
 
 
-def test_verify_rejects_wrong_secret_audience_and_expected_profile() -> None:
+def test_verify_rejects_wrong_secret_audience_and_profile() -> None:
     """Catches failure to bind credentials to deployment and runtime profile."""
     token = _signed_claims()
 
     _assert_invalid(token, _verifier(secret=OTHER_SECRET))
     _assert_invalid(token, _verifier(audience="other-api"))
+    _assert_invalid(token, _verifier(profile="real"))
+
+
+def test_verifier_always_rejects_token_for_another_profile() -> None:
+    """Catches profile checking being optional or disabled by a caller."""
+    token = _signed_claims(profile="fixture")
+
+    _assert_invalid(token, _verifier(profile="real"))
+
+
+def test_verifier_constructor_requires_profile_at_runtime() -> None:
+    """Catches restoring a constructor path with no mandatory profile binding."""
+    with pytest.raises(TypeError):
+        SessionVerifier(  # type: ignore[call-arg]
+            secret=SECRET,
+            audience="specpilot-api",
+            clock=Clock(),
+        )
+
+
+@pytest.mark.parametrize(
+    "profile", [" fixture", "fixture ", "f\u0456xture", b"fixture"]
+)
+def test_verifier_constructor_rejects_transformed_profiles(profile: object) -> None:
+    """Catches normalized or confusable deployment profiles authorizing tokens."""
     with pytest.raises(SessionTokenError, match="^invalid_session$"):
-        _verifier().verify(token, expected_profile="real")
-
-
-def test_header_and_cookie_values_use_the_same_verifier_path() -> None:
-    """Catches transport-specific token interpretation or weaker cookie checks."""
-    token = _signed_claims()
-    verifier = _verifier()
-
-    bearer_claims = verifier.verify(token, expected_profile="fixture")
-    cookie_claims = verifier.verify(token, expected_profile="fixture")
-
-    assert bearer_claims == cookie_claims
+        SessionVerifier(
+            secret=SECRET,
+            audience="specpilot-api",
+            profile=profile,  # type: ignore[arg-type]
+            clock=Clock(),
+        )
 
 
 def test_exact_expiry_boundary_is_expired() -> None:
@@ -506,11 +561,78 @@ def test_public_errors_and_object_reprs_never_expose_token_or_secret() -> None:
     assert "session-a" not in repr(caught.value)
 
 
-def test_verify_rejects_non_string_tokens_and_profiles() -> None:
+class RaisingTimezone(tzinfo):
+    def utcoffset(self, value: datetime | None) -> timedelta:
+        del value
+        raise RuntimeError("tzinfo raw marker")
+
+
+@pytest.mark.parametrize("operation", ["issue", "verify"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        ExplodingTimestamp(2026, 8, 12, tzinfo=UTC),
+        datetime(2026, 8, 12, tzinfo=RaisingTimezone()),  # type: ignore[arg-type]
+    ],
+)
+def test_hostile_datetime_and_timezone_failures_are_sanitized(
+    operation: str, value: datetime
+) -> None:
+    """Catches clock conversion callbacks escaping with token-adjacent detail."""
+    clock = Clock(value)
+    with pytest.raises(SessionTokenError, match="^invalid_session$") as caught:
+        if operation == "issue":
+            SessionIssuer(
+                secret=SECRET, audience="specpilot-api", clock=clock
+            ).issue(session_id="session-a", profile="fixture", ttl_seconds=300)
+        else:
+            _verifier(clock=clock).verify(_signed_claims())
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "raw marker" not in repr(caught.value)
+
+
+@pytest.mark.parametrize("operation", ["issue", "verify"])
+@pytest.mark.parametrize("raw", [-0.5, math.nan, math.inf, -math.inf])
+def test_nonfinite_or_negative_subsecond_raw_timestamp_is_rejected(
+    operation: str, raw: float
+) -> None:
+    """Catches int() flooring a negative fractional clock to authorized zero."""
+    class RawTimestamp(datetime):
+        def timestamp(self) -> float:
+            return raw
+
+    clock = Clock(RawTimestamp(1970, 1, 1, tzinfo=UTC))
+    with pytest.raises(SessionTokenError, match="^invalid_session$"):
+        if operation == "issue":
+            SessionIssuer(
+                secret=SECRET, audience="specpilot-api", clock=clock
+            ).issue(session_id="session-a", profile="fixture", ttl_seconds=300)
+        else:
+            _verifier(clock=clock).verify(_signed_claims(iat=0, exp=300))
+
+
+@pytest.mark.parametrize("raw", [0.0, 0.5])
+def test_epoch_and_positive_subsecond_timestamp_floor_to_zero(
+    raw: float,
+) -> None:
+    """Catches rejecting valid epoch or positive subsecond aware clocks."""
+    class RawTimestamp(datetime):
+        def timestamp(self) -> float:
+            return raw
+
+    clock = Clock(RawTimestamp(1970, 1, 1, tzinfo=UTC))
+    token = SessionIssuer(
+        secret=SECRET, audience="specpilot-api", clock=clock
+    ).issue(session_id="session-a", profile="fixture", ttl_seconds=300)
+
+    assert _verifier(clock=clock).verify(token).issued_at.timestamp() == 0
+
+
+def test_verify_rejects_non_string_tokens() -> None:
     """Catches coercion of foreign transport values into credentials."""
     verifier = _verifier()
     for token in (None, b"token", 1, True):
         with pytest.raises(SessionTokenError, match="^invalid_session$"):
             verifier.verify(token)  # type: ignore[arg-type]
-    with pytest.raises(SessionTokenError, match="^invalid_session$"):
-        verifier.verify(_signed_claims(), expected_profile=b"fixture")  # type: ignore[arg-type]
