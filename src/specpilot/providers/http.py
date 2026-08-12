@@ -363,6 +363,8 @@ class RouteConfig:
     endpoint: ProviderEndpoint
     description: str = field(default="")
 
+    endpoint_purpose: str = field(default="")
+
 
 MAIN_ROUTE = RouteConfig(
     endpoint=ProviderEndpoint(
@@ -372,6 +374,7 @@ MAIN_ROUTE = RouteConfig(
         api_key_env="SPECPILOT_MAIN_API_KEY",
     ),
     description="online main chain",
+    endpoint_purpose="online-main-deepseek-v4-flash-api",
 )
 
 JUDGE_ROUTE = RouteConfig(
@@ -382,6 +385,7 @@ JUDGE_ROUTE = RouteConfig(
         api_key_env="SPECPILOT_JUDGE_API_KEY",
     ),
     description="offline judge",
+    endpoint_purpose="offline-judge-chatanywhere-glm-5.2-api",
 )
 
 LIVE_ROUTES = {"main": MAIN_ROUTE, "judge": JUDGE_ROUTE}

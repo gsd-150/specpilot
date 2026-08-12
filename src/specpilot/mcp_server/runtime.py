@@ -47,6 +47,7 @@ LOOPBACK_ORIGINS = (
     "http://[::1]:8080",
 )
 _ExactIdentity = Annotated[str, StringConstraints(min_length=1, max_length=256)]
+_DEPLOYED_SOURCE_ROOT = Path("/run/specpilot/sources")
 
 
 class _RuntimeSource(BaseModel):
@@ -93,6 +94,19 @@ class RuntimeConfig(BaseModel):
                 or parsed.fragment
             ):
                 raise ValueError("allowed origins must be exact HTTP origins")
+        deployed = self.corpus_manifest_dir == Path("/run/specpilot/corpus") and (
+            self.source_manifest_dir == Path("/run/specpilot/manifests")
+        )
+        if deployed:
+            root = _DEPLOYED_SOURCE_ROOT.resolve()
+            for source in self.sources:
+                path = source.xml_path
+                if (
+                    not path.is_absolute()
+                    or ".." in path.parts
+                    or not path.resolve().is_relative_to(root)
+                ):
+                    raise ValueError("runtime source must be inside mounted root")
         return self
 
 

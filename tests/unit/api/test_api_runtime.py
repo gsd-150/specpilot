@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from specpilot.api.runtime import (
     ApiRuntimeConfig,
     _McpClientHook,
+    _require_real_route,
     create_runtime_app,
     load_runtime_config,
 )
@@ -105,6 +106,13 @@ def test_real_runtime_forbids_demo_host_constraint_only_for_fixture(
     assert load_runtime_config().profile == "real"
 
 
+def test_real_route_binds_provider_and_exact_endpoint_purpose() -> None:
+    _require_real_route("deepseek", "online-main-deepseek-v4-flash-api")
+
+    with pytest.raises(ValueError):
+        _require_real_route("deepseek", "alternate-main-purpose")
+
+
 @pytest.mark.anyio
 async def test_runtime_factory_missing_or_invalid_config_is_sanitized(
     monkeypatch: pytest.MonkeyPatch,
@@ -163,6 +171,7 @@ class _ControlledContext(_TaskBoundContext):
     exit_started: asyncio.Event | None = None
     exit_release: asyncio.Event | None = None
     enter_error: BaseException | None = None
+    exit_error: BaseException | None = None
     exits: int = 0
 
     async def __aenter__(self) -> Self:
@@ -187,6 +196,8 @@ class _ControlledContext(_TaskBoundContext):
         if self.exit_release is not None:
             await self.exit_release.wait()
         await super().__aexit__(exc_type, exc_value, traceback)
+        if self.exit_error is not None:
+            raise self.exit_error
 
 
 @pytest.mark.anyio
@@ -269,6 +280,61 @@ async def test_mcp_hook_close_is_idempotent_after_cleanup() -> None:
     await hook.start()
     await hook.aclose()
     await hook.aclose()
+
+    assert http.exits == 1
+    assert client.exits == 1
+
+
+@pytest.mark.anyio
+async def test_mcp_hook_start_keeps_primary_when_partial_cleanup_also_fails() -> None:
+    primary = KeyboardInterrupt("primary")
+    cleanup = RuntimeError("cleanup")
+    http = _ControlledContext(exit_error=cleanup)
+    client = _ControlledContext(enter_error=primary)
+    hook = _McpClientHook(http, client)  # type: ignore[arg-type]
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        await hook.start()
+
+    assert raised.value is primary
+    assert hook._owner is None
+
+
+@pytest.mark.anyio
+async def test_mcp_hook_concurrent_start_creates_only_one_owner() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    http = _ControlledContext(enter_started=entered, enter_release=release)
+    client = _ControlledContext()
+    hook = _McpClientHook(http, client)  # type: ignore[arg-type]
+
+    first = asyncio.create_task(hook.start())
+    await entered.wait()
+    second = asyncio.create_task(hook.start())
+    release.set()
+    await first
+    with pytest.raises(RuntimeError, match="already started"):
+        await second
+    await hook.aclose()
+
+    assert http.exits == 1
+    assert client.exits == 1
+
+
+@pytest.mark.anyio
+async def test_mcp_hook_concurrent_close_waits_for_one_cleanup() -> None:
+    exiting = asyncio.Event()
+    release = asyncio.Event()
+    http = _ControlledContext(exit_started=exiting, exit_release=release)
+    client = _ControlledContext()
+    hook = _McpClientHook(http, client)  # type: ignore[arg-type]
+    await hook.start()
+
+    first = asyncio.create_task(hook.aclose())
+    await exiting.wait()
+    second = asyncio.create_task(hook.aclose())
+    release.set()
+    await asyncio.gather(first, second)
 
     assert http.exits == 1
     assert client.exits == 1

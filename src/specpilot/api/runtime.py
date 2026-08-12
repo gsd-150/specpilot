@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -127,32 +127,35 @@ class _McpClientHook:
     _owner: asyncio.Task[None] | None = None
     _ready: asyncio.Future[BaseException | None] | None = None
     _close: asyncio.Future[None] | None = None
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
-        if self._owner is not None:
-            raise RuntimeError("MCP client hook already started")
-        loop = asyncio.get_running_loop()
-        ready: asyncio.Future[BaseException | None] = loop.create_future()
-        close: asyncio.Future[None] = loop.create_future()
-        owner = asyncio.create_task(self._run(ready, close))
-        self._owner = owner
-        self._ready = ready
-        self._close = close
+        async with self._lock:
+            if self._owner is not None:
+                raise RuntimeError("MCP client hook already started")
+            loop = asyncio.get_running_loop()
+            ready: asyncio.Future[BaseException | None] = loop.create_future()
+            close: asyncio.Future[None] = loop.create_future()
+            owner = asyncio.create_task(self._run(ready, close))
+            self._owner = owner
+            self._ready = ready
+            self._close = close
         try:
             error = await asyncio.shield(ready)
         except BaseException:
             owner.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(BaseException):
                 await owner
-            self._reset()
+            await self._reset(owner)
             raise
         if error is not None:
-            self._reset()
+            await self._reset(owner)
             raise error
 
     async def aclose(self) -> None:
-        owner = self._owner
-        close = self._close
+        async with self._lock:
+            owner = self._owner
+            close = self._close
         if owner is None or close is None:
             return
         if not close.done():
@@ -168,7 +171,7 @@ class _McpClientHook:
             with suppress(BaseException):
                 await owner
         finally:
-            self._reset()
+            await self._reset(owner)
         if cancelled:
             raise asyncio.CancelledError
 
@@ -177,20 +180,28 @@ class _McpClientHook:
         ready: asyncio.Future[BaseException | None],
         close: asyncio.Future[None],
     ) -> None:
+        stack = AsyncExitStack()
         try:
-            async with self.http_client, self.client:
-                ready.set_result(None)
-                await close
-        except BaseException as error:
+            await stack.enter_async_context(self.http_client)
+            await stack.enter_async_context(self.client)
+        except BaseException as primary:
+            with suppress(BaseException):
+                await stack.aclose()
             if not ready.done():
-                ready.set_result(error)
-                return
-            raise
+                ready.set_result(primary)
+            return
+        ready.set_result(None)
+        try:
+            await close
+        finally:
+            await stack.aclose()
 
-    def _reset(self) -> None:
-        self._owner = None
-        self._ready = None
-        self._close = None
+    async def _reset(self, owner: asyncio.Task[None]) -> None:
+        async with self._lock:
+            if self._owner is owner:
+                self._owner = None
+                self._ready = None
+                self._close = None
 
 
 @dataclass(slots=True)
@@ -233,6 +244,8 @@ def _assemble_runtime(config: ApiRuntimeConfig) -> ApiRuntime:
     route = source.provider_route_binding
     if route is None:
         raise ValueError("source route is not authorized")
+    if config.profile == "real":
+        _require_real_route(route.provider_id, route.endpoint_purpose)
 
     policy = EgressPolicy.load()
     adapter, provider_hook = _provider(config.profile, route.provider_id)
@@ -338,6 +351,15 @@ def _provider(
         raise ValueError("source route does not match the real main provider")
     adapter = HttpChatAdapter(endpoint, api_key=resolve_credential(endpoint))
     return cast(_ProviderAdapter, adapter), _ProviderHook(adapter.aclose)
+
+
+def _require_real_route(provider_id: str, endpoint_purpose: str) -> None:
+    endpoint = MAIN_ROUTE.endpoint
+    if (provider_id, endpoint_purpose) != (
+        endpoint.provider_id,
+        MAIN_ROUTE.endpoint_purpose,
+    ):
+        raise ValueError("source route does not match the real main endpoint")
 
 
 async def _postgres_health(dsn: str) -> bool:

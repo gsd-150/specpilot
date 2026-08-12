@@ -197,7 +197,7 @@ async def test_happy_path_sends_once_and_records_one_attempt() -> None:
     assert len(ledger.attempts) == 1
     assert ledger.attempts[0].outcome is AttemptOutcome.SUCCEEDED
     assert isinstance(receipt, TransportReceipt)
-    assert receipt.response.content.startswith("fixture answer")
+    assert '"sufficient":true' in receipt.response.content
     assert receipt.reservation_id == "res-1"
     assert receipt.replayed is False
     assert receipt.request_size == ledger.attempts[0].request_size

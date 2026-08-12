@@ -3,7 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-from specpilot.contracts.egress import EgressPayload, JudgePayload, L1PlanPayload
+from specpilot.contracts.egress import (
+    EgressPayload,
+    JudgePayload,
+    L1OnlinePayload,
+    L1PlanPayload,
+)
 from specpilot.providers.base import (
     ProviderError,
     ProviderResponse,
@@ -117,6 +122,23 @@ def _deterministic_content(payload: EgressPayload) -> str:
                         "depends_on": ["search"],
                     },
                 ],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if isinstance(payload, L1OnlinePayload):
+        citations = (
+            [{"evidence_id": payload.evidence_excerpts[0].content_hash}]
+            if payload.evidence_excerpts
+            else []
+        )
+        return json.dumps(
+            {
+                "sufficient": bool(citations),
+                "answer": "The deterministic fixture supports the answer."
+                if citations
+                else None,
+                "citations": citations,
             },
             separators=(",", ":"),
             sort_keys=True,

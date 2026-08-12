@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from uvicorn.importer import import_from_string
 
 from specpilot.contracts.corpus_manifest import Bm25Binding, ParseQaEvidence
@@ -97,6 +98,34 @@ def test_runtime_transport_configuration_rejects_normalized_host_input(
         assert "exact" in str(error)
     else:
         raise AssertionError("normalized host input was accepted")
+
+
+@pytest.mark.parametrize(
+    "xml_path",
+    [
+        "/etc/passwd",
+        "/run/specpilot/sources/../manifests/source.json",
+        "relative.xml",
+    ],
+)
+def test_deployed_runtime_source_must_stay_inside_fixed_mount(
+    monkeypatch: pytest.MonkeyPatch, xml_path: str
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv(
+        "SPECPILOT_MCP_CORPUS_MANIFEST_DIR", "/run/specpilot/corpus"
+    )
+    monkeypatch.setenv("SPECPILOT_MCP_CORPUS_MANIFEST_ID", "a" * 64)
+    monkeypatch.setenv(
+        "SPECPILOT_MCP_SOURCE_MANIFEST_DIR", "/run/specpilot/manifests"
+    )
+    monkeypatch.setenv(
+        "SPECPILOT_MCP_SOURCES_JSON",
+        json.dumps([{"manifest_id": "b" * 64, "xml_path": xml_path}]),
+    )
+
+    with pytest.raises(ValidationError):
+        load_runtime_config()
 
 
 def test_runtime_search_backend_never_returns_an_unrequested_document(
