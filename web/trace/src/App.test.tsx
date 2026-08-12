@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App, type AppApi, type PollingHook } from "./App";
@@ -123,6 +124,20 @@ describe("run form", () => {
     await Promise.resolve();
     expect(error).not.toHaveBeenCalled();
   });
+
+  it("accepts a delayed create completion after the StrictMode effect replay", async () => {
+    let resolve!: (value: { run_id: string; status: "queued" }) => void;
+    const create = vi.fn(() => new Promise<{ run_id: string; status: "queued" }>((done) => { resolve = done; }));
+    render(<StrictMode><App api={{ createRun: create }} usePolling={() => ({ serverRun: view("queued"), connectionState: "connected", refresh: vi.fn() })} sourceManifestId={HASH} corpusManifestId={HASH} /></StrictMode>);
+    const input = screen.getByLabelText("L1 question");
+    fireEvent.change(input, { target: { value: "strict private question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run L1" }));
+    expect(create).toHaveBeenCalledOnce();
+    resolve({ run_id: UUID, status: "queued" });
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(await screen.findByText(UUID)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("strict private question");
+  });
 });
 
 describe("terminal status semantics", () => {
@@ -212,5 +227,19 @@ describe("sanitized timeline", () => {
     await submit(h);
     const html = (await screen.findByRole("list", { name: "Run trace" })).textContent ?? "";
     for (const marker of ["/Users/private", "provider-secret", "token-secret", "raw exception message", "excerpt-secret", "candidate-secret"]) expect(html).not.toContain(marker);
+  });
+
+  it("never renders provider-authored plan or step IDs even when syntactically valid", async () => {
+    const events = [
+      { kind: "plan_summary", sequence: 1, plan_id: "private_question_marker", step_count: 1, max_tool_calls: 1 },
+      { kind: "agent_step", sequence: 2, agent: "orchestrator", step_id: "api_key_secret", phase: "finished", duration_ms: 1, error_code: null },
+      { kind: "tool_finished", sequence: 3, step_id: "api_key_secret", tool: "search_clauses", argument_keys: ["query", "private_question_marker"], result_count: 1, duration_ms: 1, retry_count: 0, error_code: "provider_authored_error" },
+    ] as unknown as RunEvent[];
+    const h = harness(view("running", null, events));
+    await submit(h);
+    const html = (await screen.findByRole("list", { name: "Run trace" })).textContent ?? "";
+    for (const marker of ["private_question_marker", "api_key_secret", "provider_authored_error"]) expect(html).not.toContain(marker);
+    expect(html).toContain("search_clauses");
+    expect(html).toContain("query");
   });
 });

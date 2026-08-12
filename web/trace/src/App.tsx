@@ -52,8 +52,11 @@ export function App({ api = { createRun }, usePolling: polling = useRunPolling, 
   const [runId, setRunId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
