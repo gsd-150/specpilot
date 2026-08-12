@@ -234,7 +234,11 @@ def create_runtime_app() -> FastAPI:
         return _unavailable_app()
 
 
-def _assemble_runtime(config: ApiRuntimeConfig) -> ApiRuntime:
+def _assemble_runtime(
+    config: ApiRuntimeConfig,
+    *,
+    mcp_http_client: httpx.AsyncClient | None = None,
+) -> ApiRuntime:
     mcp_config = load_mcp_config()
     if len(mcp_config.sources) != 1:
         raise ValueError("L1 API requires exactly one source binding")
@@ -256,7 +260,7 @@ def _assemble_runtime(config: ApiRuntimeConfig) -> ApiRuntime:
         ),
         adapters=(adapter,),
     )
-    http_client = httpx.AsyncClient(trust_env=False)
+    http_client = mcp_http_client or httpx.AsyncClient(trust_env=False)
     mcp_client = StreamableMcpClient(config.mcp_url, http_client=http_client)
     mcp_hook = _McpClientHook(http_client, mcp_client)
     store = PostgresRunStore(config.dsn)

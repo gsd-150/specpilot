@@ -15,16 +15,11 @@ import httpx
 import psycopg
 import pytest
 
-from specpilot.agents.evidence import EvidenceAgent
-from specpilot.agents.planner import Planner, PlannerContext
 from specpilot.api.app import create_app
-from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
-from specpilot.contracts.egress import (
-    CorpusUsage,
-    EgressPayload,
-    L1OnlinePayload,
-    L1PlanPayload,
-)
+from specpilot.api.dependencies import ApiRuntime
+from specpilot.api.runtime import _assemble_runtime, load_runtime_config
+from specpilot.contracts.corpus_manifest import Bm25Binding, ParseQaEvidence
+from specpilot.contracts.egress import CorpusUsage
 from specpilot.contracts.manifests import (
     ProviderRouteBinding,
     ProviderUse,
@@ -32,31 +27,28 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
+from specpilot.corpus.dense_inventory import derived_corpus_sha256
 from specpilot.corpus.tool_metadata import build_rfc_tool_metadata
-from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.policy import EgressPolicy
-from specpilot.egress.postgres import PostgresEgressLedger
 from specpilot.ingestion.rfc import load_verified_rfc
+from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
 from specpilot.mcp_server.app import create_app as create_mcp_app
 from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.services import McpToolServices, SearchBackendHit
-from specpilot.providers.base import ProviderResponse, ResponseMetadata
-from specpilot.providers.transport import PolicyBoundTransport
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.local import LocalCorpus
 from specpilot.retrieval.protocol import locator_for_unit
-from specpilot.runs.postgres import PostgresRunStore
-from specpilot.runtime import RunJob, RunWorker
-from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
+from specpilot.sessions.tokens import SessionIssuer
 from tests.helpers import rfc_factory
+from tests.helpers.corpus_manifest_factory import corpus_draft
 from tests.unit.corpus.test_tool_metadata import TOOL_RFC_XML
 from tests.unit.manifests.test_source_manifest import assessment
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 NOW = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
-DOCUMENT_ID = "ietf-rfc-9999"
+DOCUMENT_ID = "ietf-rfc-9110"
 QUESTION = "Which retry requirement is stated?"
 
 
@@ -87,97 +79,10 @@ class _Search:
         )
 
 
-class _Counter:
-    provider_id = "fixture-provider"
-    model_id = "fixture-model-v1"
-
-    def count_tokens(self, text: str) -> int:
-        return max(len(text.split()), 1)
-
-
-class _TwoStageProvider:
-    provider_id = "fixture-provider"
-    model_id = "fixture-model-v1"
-
-    def __init__(self) -> None:
-        self.calls: list[EgressPayload] = []
-
-    @property
-    def token_counter(self) -> _Counter:
-        return _Counter()
-
-    async def send(self, payload: EgressPayload) -> ProviderResponse:
-        self.calls.append(payload)
-        if isinstance(payload, L1PlanPayload):
-            content = json.dumps(
-                {
-                    "plan_id": "e2e-plan",
-                    "steps": [
-                        {
-                            "step_id": "search",
-                            "tool": "search_clauses",
-                            "args": {
-                                "query": payload.query,
-                                "corpus_manifest_id": (
-                                    payload.version.corpus_manifest_id
-                                ),
-                                "document_ids": [payload.version.document_id],
-                                "normative_levels": [],
-                                "limit": 3,
-                            },
-                            "depends_on": [],
-                        },
-                        {
-                            "step_id": "read",
-                            "tool": "get_clause",
-                            "args": {
-                                "corpus_manifest_id": (
-                                    payload.version.corpus_manifest_id
-                                ),
-                                "document_id": payload.version.document_id,
-                                "clauses": {
-                                    "kind": "step_result",
-                                    "step_id": "search",
-                                    "take": 1,
-                                },
-                            },
-                            "depends_on": ["search"],
-                        },
-                    ],
-                },
-                separators=(",", ":"),
-            )
-        else:
-            assert isinstance(payload, L1OnlinePayload)
-            content = json.dumps(
-                {
-                    "sufficient": True,
-                    "answer": "The bounded fixture supports the answer.",
-                    "citations": [
-                        {"evidence_id": payload.evidence_excerpts[0].content_hash}
-                    ],
-                },
-                separators=(",", ":"),
-            )
-        return ProviderResponse(
-            provider_id=self.provider_id,
-            model_id=self.model_id,
-            content=content,
-            metadata=ResponseMetadata(
-                prompt_tokens=max(len(content.split()), 1),
-                completion_tokens=max(len(content.split()), 1),
-                finish_reason="stop",
-                duration_ms=0,
-                request_bytes=len(payload.model_dump_json().encode()),
-            ),
-        )
-
-
 @dataclass(slots=True)
 class _McpHook:
     app: Any
-    client: StreamableMcpClient
-    http_client: httpx.AsyncClient
+    client: Any
     _owner: asyncio.Task[None] | None = None
     _ready: asyncio.Future[None] | None = None
     _close: asyncio.Future[None] | None = None
@@ -198,13 +103,13 @@ class _McpHook:
     async def _run(self) -> None:
         assert self._ready is not None
         assert self._close is not None
-        async with (
-            self.app.router.lifespan_context(self.app),
-            self.http_client,
-            self.client,
-        ):
+        async with self.app.router.lifespan_context(self.app):
+            await self.client.start()
             self._ready.set_result(None)
-            await self._close
+            try:
+                await self._close
+            finally:
+                await self.client.aclose()
 
 
 def _policy() -> EgressPolicy:
@@ -246,16 +151,19 @@ async def _seed_epoch(dsn: str, corpus_id: str, policy_hash: str) -> None:
 
 @asynccontextmanager
 async def _runtime(
-    dsn: str, tmp_path: Path
-) -> AsyncIterator[tuple[ApiRuntime, SessionIssuer, _TwoStageProvider]]:
-    xml_path = rfc_factory.write(tmp_path, "e2e.xml", TOOL_RFC_XML)
+    dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[ApiRuntime, SessionIssuer]]:
+    xml_path = rfc_factory.write(
+        tmp_path, "e2e.xml", TOOL_RFC_XML.replace('number="9999"', 'number="9110"')
+    )
     verified = load_verified_rfc(xml_path, RfcLimits())
     documents = ((verified, ClauseLimits()),)
     corpus = LocalCorpus.load(documents, RfcLimits())
     corpus_id = hashlib.sha256(
         "\n".join(unit.unit_id for unit in corpus.units()).encode()
     ).hexdigest()
-    source_store = ManifestStore(tmp_path / "source-manifests")
+    source_dir = tmp_path / "source-manifests"
+    source_store = ManifestStore(source_dir)
     initial = source_store.create_source_v2(
         RfcSourceManifestDraft(
             document_id=DOCUMENT_ID,
@@ -283,6 +191,29 @@ async def _runtime(
         route_binding=route,
         created_at=datetime(2026, 8, 6, 3, tzinfo=UTC),
     )
+    bm25 = Bm25Index.build(corpus.indexable())
+    corpus_dir = tmp_path / "corpus-manifests"
+    corpus_store = CorpusManifestStore(corpus_dir)
+    draft = corpus_draft(
+        source_manifest_ids=(source.manifest_id,),
+        bm25=Bm25Binding(
+            tokenizer_version=bm25.tokenizer_version,
+            k1=bm25.parameters.k1,
+            b=bm25.parameters.b,
+            index_fingerprint=bm25.fingerprint,
+        ),
+        point_count=corpus.unit_count(),
+        derived_corpus_sha256=derived_corpus_sha256(corpus.units()),
+        parse_qa=(
+            ParseQaEvidence(
+                source_manifest_id=source.manifest_id,
+                evidence_sha256="1" * 64,
+            ),
+        ),
+    )
+    with corpus_store.acquire_freeze_lease(draft.collection_name) as lease:
+        corpus_manifest = corpus_store.create(draft, lease=lease)
+    corpus_id = corpus_manifest.manifest_id
     services = McpToolServices(
         corpus=corpus,
         search_backend=_Search(corpus),
@@ -298,83 +229,34 @@ async def _runtime(
         transport=httpx.ASGITransport(app=mcp_app),
         base_url="http://127.0.0.1:8080",
     )
-    mcp_client = StreamableMcpClient(
-        "http://127.0.0.1:8080/mcp", http_client=mcp_http
-    )
-    hook = _McpHook(mcp_app, mcp_client, mcp_http)
-    policy = _policy()
+    policy = EgressPolicy.load()
     await _seed_epoch(dsn, corpus_id, policy.policy_hash)
-    provider = _TwoStageProvider()
-    transport = PolicyBoundTransport(
-        enforcer=EgressPolicyEnforcer(
-            policy, manifests=source_store, clock=lambda: NOW
+    secret = "e2e-session-secret-material-at-least-32-bytes"
+    environment = {
+        "SPECPILOT_API_PROFILE": "fixture",
+        "SPECPILOT_API_DSN": dsn,
+        "SPECPILOT_API_MCP_URL": "http://127.0.0.1:8080/mcp",
+        "SPECPILOT_API_SESSION_SECRET": secret,
+        "SPECPILOT_API_SESSION_AUDIENCE": "specpilot-api",
+        "SPECPILOT_API_BIND_HOST": "127.0.0.1",
+        "SPECPILOT_API_CONFIGURATION_HASH": "d" * 64,
+        "SPECPILOT_API_PROMPT_ID": "l1-answer-v1",
+        "SPECPILOT_API_PROMPT_HASH": "e" * 64,
+        "SPECPILOT_MCP_CORPUS_MANIFEST_DIR": str(corpus_dir),
+        "SPECPILOT_MCP_CORPUS_MANIFEST_ID": corpus_id,
+        "SPECPILOT_MCP_SOURCE_MANIFEST_DIR": str(source_dir),
+        "SPECPILOT_MCP_SOURCES_JSON": json.dumps(
+            [{"manifest_id": source.manifest_id, "xml_path": str(xml_path)}]
         ),
-        ledger=PostgresEgressLedger(
-            dsn, policy=policy, manifests=source_store, clock=lambda: NOW
-        ),
-        adapters=(provider,),
-    )
-    store = PostgresRunStore(dsn)
-    worker = RunWorker(
-        store=store,
-        planner=Planner(transport),
-        evidence_agent=EvidenceAgent(mcp_client, corpus),
-        answer_transport=transport,
-        worker_id="e2e-worker",
-        queue_capacity=2,
-        lease_seconds=5,
-        heartbeat_interval_seconds=0.1,
-    )
-    secret = b"e2e-session-secret-material-at-least-32-bytes"
-    issuer = SessionIssuer(secret=secret, audience="specpilot-api", clock=lambda: NOW)
-    runtime = ApiRuntime(
-        store=store,
-        worker=worker,
-        verifier=SessionVerifier(
-            secret=secret,
-            audience="specpilot-api",
-            profile="fixture",
-            clock=lambda: NOW,
-        ),
-        binding=ApiRunBinding(
-            profile="fixture",
-            source_manifest_id=source.manifest_id,
-            corpus_manifest_id=corpus_id,
-            policy_hash=policy.policy_hash,
-            configuration_hash="d" * 64,
-            prompt_id="l1-answer-v1",
-            prompt_hash="e" * 64,
-            provider_id=provider.provider_id,
-            model_id=provider.model_id,
-            build_job=lambda run_id, question, request: RunJob(
-                run_id=run_id,
-                question=question,
-                planner_context=PlannerContext(
-                    source_manifest=source,
-                    corpus_manifest_id=corpus_id,
-                    evaluation_root_id=request.evaluation_root_id,
-                    run_id=str(run_id),
-                    model_id=provider.model_id,
-                    idempotency_key=f"{run_id}-planning",
-                ),
-                corpus_manifest_id=corpus_id,
-                answer_context={
-                    "model_id": provider.model_id,
-                    "source_manifest": source,
-                    "corpus_manifest_id": corpus_id,
-                    "evaluation_root_id": request.evaluation_root_id,
-                    "run_id": str(run_id),
-                    "idempotency_key": f"{run_id}-answer",
-                },
-            ),
-        ),
-        bind_host="127.0.0.1",
-        postgres_health=lambda: _health(dsn),
-        mcp_health=lambda: _qdrant_health(),
-        demo_issuer=issuer,
-        lifecycle_hooks=(hook,),
-    )
-    yield runtime, issuer, provider
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    runtime = _assemble_runtime(load_runtime_config(), mcp_http_client=mcp_http)
+    hook = _McpHook(mcp_app, runtime.lifecycle_hooks[0])
+    object.__setattr__(runtime, "lifecycle_hooks", (hook,))
+    assert runtime.demo_issuer is not None
+    issuer = runtime.demo_issuer
+    yield runtime, issuer
 
 
 async def _health(dsn: str) -> bool:
@@ -390,10 +272,13 @@ async def _qdrant_health() -> bool:
 
 
 async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
-    clean_ledger: str, tmp_path: Path, qdrant_url: str
+    clean_ledger: str,
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert qdrant_url == "http://127.0.0.1:6334"
-    async with _runtime(clean_ledger, tmp_path) as (runtime, issuer, provider):
+    async with _runtime(clean_ledger, tmp_path, monkeypatch) as (runtime, issuer):
         token = issuer.issue(
             session_id="e2e-owner", profile="fixture", ttl_seconds=300
         )
@@ -431,7 +316,6 @@ async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
     assert trace["reason"] is None
     assert QUESTION not in response.text
     assert "A sender" not in response.text
-    assert len(provider.calls) == 2
     kinds = [event["kind"] for event in trace["events"]]
     assert kinds.index("tool_finished") < kinds.index("verifier_summary")
     verifier = next(
