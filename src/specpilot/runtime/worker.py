@@ -14,11 +14,11 @@ import anyio
 
 from specpilot.agents.contracts import ToolCallSummary, ToolPlan
 from specpilot.agents.evidence import EvidenceResult
-from specpilot.agents.planner import InvalidToolPlan, PlannerContext
+from specpilot.agents.planner import InvalidToolPlan, PlannerContext, PlannerResult
 from specpilot.answer.run import AnswerOutcome, run_answer
 from specpilot.contracts.egress import EgressStage
 from specpilot.egress.enforcer import EgressPolicyViolation
-from specpilot.egress.ledger import LedgerError
+from specpilot.providers.transport import ProviderAttemptError
 from specpilot.runs.contracts import (
     AgentName,
     AgentStepEvent,
@@ -32,6 +32,8 @@ from specpilot.runs.contracts import (
     RunStatus,
     TerminalEvent,
     ToolFinishedEvent,
+    VerifierCheckSummary,
+    VerifierSummaryEvent,
 )
 from specpilot.runs.outcomes import Terminal, project_answer_outcome, project_gate_error
 
@@ -55,7 +57,7 @@ class RunStore(Protocol):
 
 
 class RunPlanner(Protocol):
-    async def plan(self, question: str, context: PlannerContext) -> ToolPlan: ...
+    async def plan(self, question: str, context: PlannerContext) -> PlannerResult: ...
 
 
 class RunEvidenceAgent(Protocol):
@@ -121,7 +123,8 @@ class RunWorker:
         self._send, self._receive = anyio.create_memory_object_stream[RunJob](
             queue_capacity
         )
-        self._task_group: anyio.abc.TaskGroup | None = None
+        self._supervisor_task: asyncio.Task[None] | None = None
+        self._supervisor_ready = asyncio.Event()
         self._started = False
         self._closed = False
         self._lifecycle_lock = asyncio.Lock()
@@ -132,10 +135,8 @@ class RunWorker:
                 raise WorkerUnavailable("worker_closed")
             if self._started:
                 return
-            task_group = anyio.create_task_group()
-            await task_group.__aenter__()
-            task_group.start_soon(self._consume)
-            self._task_group = task_group
+            self._supervisor_task = asyncio.create_task(self._supervise())
+            await self._supervisor_ready.wait()
             self._started = True
 
     async def submit(self, job: RunJob) -> None:
@@ -156,18 +157,23 @@ class RunWorker:
                 return
             self._closed = True
             await self._send.aclose()
-            task_group = self._task_group
-            if task_group is not None:
-                task_group.cancel_scope.cancel()
-                await task_group.__aexit__(None, None, None)
-            await self._receive.aclose()
-            self._task_group = None
+            supervisor = self._supervisor_task
+            if supervisor is not None:
+                supervisor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await supervisor
+            self._supervisor_task = None
             self._started = False
 
-    async def _consume(self) -> None:
+    async def _supervise(self) -> None:
+        """Own the receive stream from entry through exit in one task."""
         async with self._receive:
-            async for job in self._receive:
-                await self._run_safely(job)
+            self._supervisor_ready.set()
+            await self._consume()
+
+    async def _consume(self) -> None:
+        async for job in self._receive:
+            await self._run_safely(job)
 
     async def _run_safely(self, job: RunJob) -> None:
         try:
@@ -195,9 +201,10 @@ class RunWorker:
             self._heartbeat(job.run_id, lease_lost, stop_heartbeat)
         )
         terminal: Terminal | None = None
-        egress_stage = EgressStage.PLANNING
+        active_stage: tuple[AgentName, str, float] | None = None
         try:
             planning_started = time.monotonic()
+            active_stage = (AgentName.ORCHESTRATOR, "planning", planning_started)
             await self._append(
                 job.run_id,
                 _agent_event(
@@ -206,18 +213,15 @@ class RunWorker:
                     AgentStepPhase.STARTED,
                 ),
             )
-            plan = await self._planner.plan(job.question, job.planner_context)
             if lease_lost.is_set():
                 return
-            await self._append(
-                job.run_id,
-                _agent_event(
-                    AgentName.ORCHESTRATOR,
-                    "planning",
-                    AgentStepPhase.FINISHED,
-                    started=planning_started,
-                ),
-            )
+            planning = await self._planner.plan(job.question, job.planner_context)
+            if lease_lost.is_set():
+                return
+            await self._append(job.run_id, _planning_egress_event(planning))
+            if lease_lost.is_set():
+                return
+            plan = planning.plan
             await self._append(
                 job.run_id,
                 PlanSummaryEvent(
@@ -229,8 +233,21 @@ class RunWorker:
             )
             if lease_lost.is_set():
                 return
+            await self._append(
+                job.run_id,
+                _agent_event(
+                    AgentName.ORCHESTRATOR,
+                    "planning",
+                    AgentStepPhase.FINISHED,
+                    started=planning_started,
+                ),
+            )
+            active_stage = None
+            if lease_lost.is_set():
+                return
 
             evidence_started = time.monotonic()
+            active_stage = (AgentName.EVIDENCE_AGENT, "evidence", evidence_started)
             await self._append(
                 job.run_id,
                 _agent_event(
@@ -239,8 +256,27 @@ class RunWorker:
                     AgentStepPhase.STARTED,
                 ),
             )
-            result = await self._evidence_agent.collect(
-                plan, job.corpus_manifest_id
+            if lease_lost.is_set():
+                return
+            result = await self._evidence_agent.collect(plan, job.corpus_manifest_id)
+            if lease_lost.is_set():
+                return
+            await self._append_tool_summaries(job.run_id, result.calls)
+            if lease_lost.is_set():
+                return
+            selected_evidence = tuple(result.evidence[:5])
+            await self._append(
+                job.run_id,
+                EvidenceSummaryEvent(
+                    sequence=1,
+                    evidence=tuple(
+                        EvidenceRefSummary(
+                            evidence_id=item.disclosed.content_hash,
+                            content_hash=item.disclosed.content_hash,
+                        )
+                        for item in selected_evidence
+                    ),
+                ),
             )
             if lease_lost.is_set():
                 return
@@ -253,20 +289,7 @@ class RunWorker:
                     started=evidence_started,
                 ),
             )
-            await self._append_tool_summaries(job.run_id, result.calls)
-            await self._append(
-                job.run_id,
-                EvidenceSummaryEvent(
-                    sequence=1,
-                    evidence=tuple(
-                        EvidenceRefSummary(
-                            evidence_id=item.disclosed.content_hash,
-                            content_hash=item.disclosed.content_hash,
-                        )
-                        for item in result.evidence
-                    ),
-                ),
-            )
+            active_stage = None
             if lease_lost.is_set():
                 return
 
@@ -274,17 +297,32 @@ class RunWorker:
             # The worker owns the one outward boundary. An in-memory job may
             # carry call metadata, but it may not replace that transport.
             answer_context["transport"] = self._answer_transport
-            egress_stage = EgressStage.EVIDENCE
             answer_started = time.monotonic()
+            active_stage = (AgentName.ANSWER, "answer", answer_started)
             await self._append(
                 job.run_id,
                 _agent_event(AgentName.ANSWER, "answer", AgentStepPhase.STARTED),
             )
+            if lease_lost.is_set():
+                return
             outcome = await self._answer_runner(
                 job.question,
-                result.evidence,
+                selected_evidence,
                 **answer_context,
             )
+            if lease_lost.is_set():
+                return
+            answer_egress = _answer_egress_event(outcome)
+            if answer_egress is not None:
+                await self._append(job.run_id, answer_egress)
+                if lease_lost.is_set():
+                    return
+            await self._append(
+                job.run_id, _verifier_event(outcome, started=answer_started)
+            )
+            if lease_lost.is_set():
+                return
+            await self._append(job.run_id, _answer_event(outcome))
             if lease_lost.is_set():
                 return
             await self._append(
@@ -294,22 +332,31 @@ class RunWorker:
                     "answer",
                     AgentStepPhase.FINISHED,
                     started=answer_started,
+                    error_code=outcome.provider_error,
                 ),
             )
-            await self._append(job.run_id, _answer_event(outcome))
+            active_stage = None
             terminal = project_answer_outcome(outcome)
-        except InvalidToolPlan:
+        except ProviderAttemptError as error:
+            if lease_lost.is_set():
+                return
+            await self._finish_error_stage(
+                job.run_id, active_stage, error.public_error_code
+            )
+            active_stage = None
+            terminal = Terminal(RunStatus.FAILED, error.public_error_code)
+        except InvalidToolPlan as error:
+            if lease_lost.is_set():
+                return
+            await self._finish_error_stage(job.run_id, active_stage, str(error))
+            active_stage = None
             terminal = Terminal(RunStatus.REFUSED, "invalid_tool_plan")
         except EgressPolicyViolation as error:
             terminal = project_gate_error(error)
-            await self._append(
-                job.run_id, _blocked_egress_event(egress_stage, error.code)
-            )
-        except LedgerError as error:
-            terminal = project_gate_error(error)
-            await self._append(
-                job.run_id, _blocked_egress_event(egress_stage, error.code)
-            )
+            if lease_lost.is_set():
+                return
+            await self._finish_error_stage(job.run_id, active_stage, error.code)
+            active_stage = None
         finally:
             stop_heartbeat.set()
             heartbeat.cancel()
@@ -325,6 +372,26 @@ class RunWorker:
                 sequence=1,
                 status=terminal.status,
                 reason=terminal.reason,
+            ),
+        )
+
+    async def _finish_error_stage(
+        self,
+        run_id: UUID,
+        stage: tuple[AgentName, str, float] | None,
+        error_code: str,
+    ) -> None:
+        if stage is None:
+            return
+        agent, step_id, started = stage
+        await self._append(
+            run_id,
+            _agent_event(
+                agent,
+                step_id,
+                AgentStepPhase.FINISHED,
+                started=started,
+                error_code=error_code,
             ),
         )
 
@@ -389,6 +456,7 @@ def _agent_event(
     phase: AgentStepPhase,
     *,
     started: float | None = None,
+    error_code: str | None = None,
 ) -> AgentStepEvent:
     return AgentStepEvent(
         sequence=1,
@@ -400,21 +468,66 @@ def _agent_event(
             if started is None
             else max(int((time.monotonic() - started) * 1000), 0)
         ),
+        error_code=error_code,
+    )
+
+
+def _planning_egress_event(result: PlannerResult) -> EgressSummaryEvent:
+    return EgressSummaryEvent(
+        sequence=1,
+        stage=EgressStage.PLANNING,
+        reservation_id=UUID(result.reservation_id),
+        ledger_id=None,
+        admitted=True,
+        request_tokens=result.request_size.request_tokens,
+        request_bytes=result.request_size.request_bytes,
+        cost_microunits=None,
         error_code=None,
     )
 
 
-def _blocked_egress_event(stage: EgressStage, code: str) -> EgressSummaryEvent:
+def _answer_egress_event(outcome: AnswerOutcome) -> EgressSummaryEvent | None:
+    if outcome.reservation_id is None or outcome.request_size is None:
+        return None
     return EgressSummaryEvent(
         sequence=1,
-        stage=stage,
-        reservation_id=None,
+        stage=EgressStage.EVIDENCE,
+        reservation_id=UUID(outcome.reservation_id),
         ledger_id=None,
-        admitted=False,
-        request_tokens=0,
-        request_bytes=0,
-        cost_microunits=0,
-        error_code=code,
+        admitted=True,
+        request_tokens=outcome.request_size.request_tokens,
+        request_bytes=outcome.request_size.request_bytes,
+        cost_microunits=None,
+        error_code=None,
+    )
+
+
+def _verifier_event(outcome: AnswerOutcome, *, started: float) -> VerifierSummaryEvent:
+    if outcome.verified.citations:
+        checks = tuple(
+            VerifierCheckSummary(
+                evidence_id=citation.content_hash,
+                passed=True,
+                fault_code=None,
+            )
+            for citation in outcome.verified.citations
+        )
+    else:
+        faults = outcome.verified.citation_faults
+        if not faults and outcome.parse_fault is not None:
+            faults = (outcome.parse_fault,)
+        checks = tuple(
+            VerifierCheckSummary(
+                evidence_id=None,
+                passed=False,
+                fault_code=fault.rsplit(":", 1)[-1],
+            )
+            for fault in faults
+        )
+    return VerifierSummaryEvent(
+        sequence=1,
+        checks=checks,
+        duration_ms=max(int((time.monotonic() - started) * 1000), 0),
     )
 
 

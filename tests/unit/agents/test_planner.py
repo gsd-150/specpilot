@@ -15,8 +15,9 @@ from tests.unit.providers.test_transport_fail_closed import (
 pytestmark = pytest.mark.anyio
 
 
-async def test_invalid_content_spends_one_planning_attempt_and_executes_no_tools(
-) -> None:
+async def test_invalid_content_spends_one_planning_attempt_and_executes_no_tools() -> (
+    None
+):
     request = planning_request(query="When may a sender retry?")
     provider = FakeProvider()
     provider.reply = "not-json"
@@ -60,10 +61,14 @@ async def test_planner_reads_json_content_not_native_tool_calls() -> None:
         idempotency_key="plan-1",
     )
 
-    plan = await planner.plan("When may a sender retry?", context)
+    result = await planner.plan("When may a sender retry?", context)
 
-    assert plan.plan_id == "plan-1"
-    assert [step.step_id for step in plan.steps] == ["search"]
+    assert result.plan.plan_id == "plan-1"
+    assert [step.step_id for step in result.plan.steps] == ["search"]
+    assert result.reservation_id == "res-1"
+    assert result.replayed is False
+    assert result.request_size.request_tokens == 1
+    assert result.request_size.request_bytes > 0
 
 
 async def test_planner_does_not_turn_closed_replay_into_an_invalid_plan() -> None:

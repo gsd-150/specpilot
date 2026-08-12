@@ -410,8 +410,11 @@ BEGIN
                 OR NOT specpilot_trace_integer(
                     event_payload -> 'request_bytes', 0, 1000000
                 )
-                OR NOT specpilot_trace_integer(
-                    event_payload -> 'cost_microunits', 0, 1000000000
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'cost_microunits') = 'null'
+                    OR specpilot_trace_integer(
+                        event_payload -> 'cost_microunits', 0, 1000000000
+                    )
                 )
                 OR NOT (
                     jsonb_typeof(event_payload -> 'error_code') = 'null'

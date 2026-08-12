@@ -188,6 +188,36 @@ def test_answer_outcome_keeps_provider_failure_distinct_from_verifier_refusal() 
     assert event.provider_error == "provider_timeout"
 
 
+def test_egress_cost_is_explicitly_unknown_instead_of_fabricated_zero() -> None:
+    contracts = _contracts()
+
+    event = contracts.EgressSummaryEvent(
+        sequence=7,
+        stage="planning",
+        reservation_id=uuid.UUID("00000000-0000-0000-0000-000000000007"),
+        ledger_id=None,
+        admitted=True,
+        request_tokens=10,
+        request_bytes=100,
+        cost_microunits=None,
+        error_code=None,
+    )
+
+    assert event.cost_microunits is None
+
+    payload = event.model_dump(mode="json")
+    assert "cost_microunits" in payload
+    del payload["cost_microunits"]
+    with pytest.raises(ValidationError, match="cost_microunits"):
+        contracts.EgressSummaryEvent.model_validate(payload)
+
+    for invalid in ("unknown", 1.5, True, -1, 1_000_000_001):
+        with pytest.raises(ValidationError, match="cost_microunits"):
+            contracts.EgressSummaryEvent.model_validate(
+                {**event.model_dump(mode="json"), "cost_microunits": invalid}
+            )
+
+
 @pytest.mark.parametrize(
     ("status", "reason"),
     [
@@ -328,9 +358,7 @@ def test_run_record_rejects_incoherent_terminal_and_lease_timestamps() -> None:
 def test_candidate_score_accepts_raw_bm25_values_above_one() -> None:
     contracts = _contracts()
 
-    summary = contracts.CandidateScoreSummary(
-        candidate_id="candidate-a", score=42.75
-    )
+    summary = contracts.CandidateScoreSummary(candidate_id="candidate-a", score=42.75)
     assert summary.score == 42.75
 
 

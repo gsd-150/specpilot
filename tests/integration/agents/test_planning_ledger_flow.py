@@ -51,12 +51,13 @@ async def test_planning_records_one_attempt_and_no_source_disclosures(
         idempotency_key="planning-1",
     )
 
-    plan = await planner.plan("When may a sender retry?", context)
+    result = await planner.plan("When may a sender retry?", context)
 
     reservation_id = await scalar(
         clean_ledger, "SELECT reservation_id FROM egress_reservation"
     )
-    assert plan.plan_id == "fixture-plan"
+    assert result.plan.plan_id == "fixture-plan"
+    assert result.reservation_id == reservation_id
     assert provider.call_count == 1
     assert reservation_id is not None
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1

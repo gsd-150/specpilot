@@ -29,6 +29,7 @@ from specpilot.contracts.manifests import (
     RfcSourceManifest,
     SourceManifest,
 )
+from specpilot.egress.ledger import RequestSize
 from specpilot.providers.transport import PolicyBoundTransport
 
 _CATALOG_VERSION = "mcp-v1"
@@ -62,11 +63,21 @@ class PlannerContext:
     idempotency_key: str
 
 
+@dataclass(frozen=True, slots=True)
+class PlannerResult:
+    """A valid plan plus the real sanitized planning receipt metadata."""
+
+    plan: ToolPlan
+    reservation_id: str
+    replayed: bool
+    request_size: RequestSize
+
+
 class Planner:
     def __init__(self, transport: PolicyBoundTransport) -> None:
         self._transport = transport
 
-    async def plan(self, question: str, context: PlannerContext) -> ToolPlan:
+    async def plan(self, question: str, context: PlannerContext) -> PlannerResult:
         version = VersionMetadata(
             source_manifest_id=context.source_manifest.manifest_id,
             corpus_manifest_id=context.corpus_manifest_id,
@@ -95,9 +106,15 @@ class Planner:
             request, idempotency_key=context.idempotency_key
         )
         try:
-            return ToolPlan.model_validate_json(receipt.response.content)
+            plan = ToolPlan.model_validate_json(receipt.response.content)
         except (ValidationError, ValueError):
             raise InvalidToolPlan() from None
+        return PlannerResult(
+            plan=plan,
+            reservation_id=receipt.reservation_id,
+            replayed=receipt.replayed,
+            request_size=receipt.request_size,
+        )
 
 
 def _authorized_route(
@@ -130,4 +147,4 @@ def _tool_catalog_hash(tools: tuple[ToolSchema, ...]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-__all__ = ["InvalidToolPlan", "Planner", "PlannerContext"]
+__all__ = ["InvalidToolPlan", "Planner", "PlannerContext", "PlannerResult"]

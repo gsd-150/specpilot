@@ -110,27 +110,32 @@ def test_provider_error_wins_over_refusal_and_parser_faults() -> None:
         "excerpt_bytes_exceeded",
         "policy_snapshot_mismatch",
         "route_unauthorized",
-        "ledger_unavailable",
-        "reservation_ambiguous",
-        "run_sealed",
     ],
 )
 def test_closed_admission_family_is_visible_as_egress_blocked(code: str) -> None:
-    error: EgressPolicyViolation | LedgerError
-    if code in {
-        "root_unique_excerpts_exceeded",
-        "excerpt_bytes_exceeded",
-        "policy_snapshot_mismatch",
-        "route_unauthorized",
-    }:
-        error = EgressPolicyViolation(code, "raw question and ledger detail")
-    else:
-        error = LedgerError(code, "raw question and ledger detail")
+    error = EgressPolicyViolation(code, "raw question and ledger detail")
 
     projected = project_gate_error(error)
 
     assert projected == Terminal(RunStatus.EGRESS_BLOCKED, code)
     assert "raw question" not in repr(projected)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        LedgerError("ledger_unavailable", "raw accounting detail"),
+        LedgerError("reservation_ambiguous", "raw accounting detail"),
+        LedgerError("run_sealed", "raw accounting detail"),
+        LedgerError("ledger_integrity_error", "raw accounting detail"),
+        EgressPolicyViolation("unknown_policy_code", "raw policy detail"),
+    ],
+)
+def test_post_send_accounting_and_unknown_policy_errors_are_not_gate_rejections(
+    error: Exception,
+) -> None:
+    with pytest.raises(TypeError, match="not_gate_error"):
+        project_gate_error(error)
 
 
 @pytest.mark.parametrize(

@@ -113,9 +113,7 @@ def _valid_event_payloads() -> dict[str, dict[str, object]]:
         "verifier_summary": {
             "kind": "verifier_summary",
             "sequence": 10,
-            "checks": [
-                {"evidence_id": "a" * 64, "passed": False, "fault_code": "x"}
-            ],
+            "checks": [{"evidence_id": "a" * 64, "passed": False, "fault_code": "x"}],
             "duration_ms": 20,
         },
         "terminal": {
@@ -476,6 +474,59 @@ def test_raw_sql_accepts_uuid_text_that_pydantic_accepts(clean_ledger: str) -> N
             sequence=7,
             payload=payload,
         )
+
+
+def test_raw_sql_accepts_explicit_unknown_egress_cost(clean_ledger: str) -> None:
+    import psycopg
+
+    payload = _valid_event_payloads()["egress_summary"]
+    payload["cost_microunits"] = None
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        _insert_event_payload(
+            connection,
+            run_id,
+            kind="egress_summary",
+            sequence=7,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize("invalid", ["unknown", 1.5, True, -1, 1_000_000_001])
+def test_raw_sql_rejects_wrong_egress_cost(clean_ledger: str, invalid: object) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()["egress_summary"]
+    payload["cost_microunits"] = invalid
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind="egress_summary",
+                sequence=7,
+                payload=payload,
+            )
+
+
+def test_raw_sql_rejects_missing_egress_cost(clean_ledger: str) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()["egress_summary"]
+    del payload["cost_microunits"]
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind="egress_summary",
+                sequence=7,
+                payload=payload,
+            )
 
 
 @pytest.mark.parametrize(

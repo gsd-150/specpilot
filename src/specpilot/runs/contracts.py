@@ -58,7 +58,7 @@ TerminalReason = Annotated[
 Sequence = Annotated[int, Field(ge=1, le=10_000)]
 Count = Annotated[int, Field(ge=0, le=1_000_000)]
 DurationMs = Annotated[int, Field(ge=0, le=3_600_000)]
-CostMicrounits = Annotated[int, Field(ge=0, le=1_000_000_000)]
+CostMicrounits = Annotated[int, Field(strict=True, ge=0, le=1_000_000_000)]
 
 
 class _FrozenModel(BaseModel):
@@ -179,7 +179,9 @@ class EgressSummaryEvent(_RunEventBase):
     admitted: bool
     request_tokens: Count
     request_bytes: Count
-    cost_microunits: CostMicrounits
+    # Null means the provider boundary supplied no authoritative price. It is
+    # distinct from a measured zero-cost request.
+    cost_microunits: CostMicrounits | None
     error_code: TerminalReason | None
 
     @model_validator(mode="after")
