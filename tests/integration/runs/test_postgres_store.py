@@ -12,6 +12,7 @@ from specpilot.runs.contracts import (
     PlanSummaryEvent,
     RunRecord,
     RunStatus,
+    StateTransitionEvent,
     TerminalEvent,
 )
 from specpilot.runs.postgres import (
@@ -229,6 +230,35 @@ async def _force_run_schedule(
     return outcomes[0], outcomes[1]
 
 
+async def _expire_while_waiting_for_run_lock(
+    dsn: str,
+    run_id: uuid.UUID,
+    application_name: str,
+    operation: Callable[[], Awaitable[Any]],
+    clock: Clock,
+    *,
+    seconds: int,
+) -> object:
+    locked = asyncio.Event()
+    release = asyncio.Event()
+    holder_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    holder = asyncio.create_task(
+        _hold_run_row(dsn, run_id, locked, release, holder_pid)
+    )
+    task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(locked.wait(), timeout=2)
+        blocker_pid = await asyncio.wait_for(holder_pid, timeout=2)
+        task = asyncio.create_task(operation())
+        await _wait_for_run_lock(dsn, application_name, task, {blocker_pid})
+        clock.advance(seconds=seconds)
+    finally:
+        release.set()
+        await holder
+    assert task is not None
+    return await task
+
+
 @pytest.mark.anyio
 async def test_create_assigns_queue_lease_and_owner_read_hides_foreign_run(
     clean_ledger: str,
@@ -371,6 +401,187 @@ async def test_cancelled_lock_wait_closes_connection(clean_ledger: str) -> None:
         await holder
 
     assert await seed_store.claim(created.run_id, "worker-a", lease_seconds=30)
+
+
+@pytest.mark.anyio
+async def test_claim_rechecks_clock_after_waiting_for_lock(clean_ledger: str) -> None:
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    seed = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await seed.create(_new_run(clock))
+    name = f"run-stale-claim-{uuid.uuid4().hex}"
+    contender = PostgresRunStore(_named_dsn(clean_ledger, name), clock=clock)
+    result = await _expire_while_waiting_for_run_lock(
+        clean_ledger,
+        created.run_id,
+        name,
+        lambda: contender.claim(created.run_id, "worker-a", lease_seconds=30),
+        clock,
+        seconds=5,
+    )
+    assert result is False
+    view = await seed.read_owned(created.run_id, created.session_id)
+    assert view is not None
+    assert len(view.events) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["append", "complete", "heartbeat"])
+async def test_append_complete_and_heartbeat_recheck_clock_after_lock(
+    clean_ledger: str, operation: str
+) -> None:
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    seed = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await seed.create(_new_run(clock, session_id=f"owner-{operation}"))
+    assert await seed.claim(created.run_id, "worker-a", lease_seconds=5)
+    name = f"run-stale-{operation}-{uuid.uuid4().hex}"
+    contender = PostgresRunStore(_named_dsn(clean_ledger, name), clock=clock)
+    if operation == "append":
+        call = lambda: contender.append(  # noqa: E731
+            created.run_id,
+            "worker-a",
+            PlanSummaryEvent(
+                sequence=1, plan_id="plan-a", step_count=1, max_tool_calls=1
+            ),
+        )
+    elif operation == "complete":
+        call = lambda: contender.complete(  # noqa: E731
+            created.run_id,
+            "worker-a",
+            TerminalEvent(
+                sequence=1, status=RunStatus.FAILED, reason="provider_timeout"
+            ),
+        )
+    else:
+        call = lambda: contender.heartbeat(  # noqa: E731
+            created.run_id, "worker-a", lease_seconds=30
+        )
+    if operation == "append":
+        with pytest.raises(RunStoreValidationError):
+            await _expire_while_waiting_for_run_lock(
+                clean_ledger, created.run_id, name, call, clock, seconds=5
+            )
+    else:
+        assert (
+            await _expire_while_waiting_for_run_lock(
+                clean_ledger, created.run_id, name, call, clock, seconds=5
+            )
+            is False
+        )
+    view = await seed.read_owned(created.run_id, created.session_id)
+    assert view is not None
+    assert len(view.events) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("previous", "status"),
+    [
+        (RunStatus.RUNNING, RunStatus.QUEUED),
+        (RunStatus.RUNNING, RunStatus.ANSWERED),
+        (RunStatus.QUEUED, RunStatus.RUNNING),
+    ],
+)
+async def test_append_rejects_forged_state_transitions(
+    clean_ledger: str, previous: RunStatus, status: RunStatus
+) -> None:
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    assert await store.claim(created.run_id, "worker-a", lease_seconds=30)
+    event = StateTransitionEvent(
+        sequence=1, previous_status=previous, status=status, reason=None
+    )
+    with pytest.raises(RunStoreValidationError, match="^invalid_run_data$"):
+        await store.append(created.run_id, "worker-a", event)
+    view = await store.read_owned(created.run_id, created.session_id)
+    assert view is not None
+    assert len(view.events) == 2
+
+
+@pytest.mark.anyio
+async def test_invalid_public_identifiers_fail_before_sql(clean_ledger: str) -> None:
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock)
+    invalid = "secret owner with spaces"
+    event = PlanSummaryEvent(
+        sequence=1, plan_id="plan-a", step_count=1, max_tool_calls=1
+    )
+    for operation in (
+        lambda: store.claim(uuid.uuid4(), invalid, lease_seconds=30),
+        lambda: store.heartbeat(uuid.uuid4(), invalid, lease_seconds=30),
+        lambda: store.append(uuid.uuid4(), invalid, event),
+        lambda: store.complete(
+            uuid.uuid4(),
+            invalid,
+            TerminalEvent(
+                sequence=1, status=RunStatus.FAILED, reason="provider_timeout"
+            ),
+        ),
+    ):
+        with pytest.raises(RunStoreValidationError, match="^invalid_run_data$"):
+            await operation()
+
+
+@pytest.mark.anyio
+async def test_owner_read_uses_one_repeatable_snapshot(
+    clean_ledger: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an old run row being combined with newly committed events."""
+    import psycopg
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    seed = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await seed.create(_new_run(clock))
+    read_name = f"run-snapshot-read-{uuid.uuid4().hex}"
+    reader = PostgresRunStore(_named_dsn(clean_ledger, read_name), clock=clock)
+    row_read = asyncio.Event()
+    resume = asyncio.Event()
+    original_execute = psycopg.AsyncConnection.execute
+
+    async def paused_execute(
+        connection: psycopg.AsyncConnection[Any],
+        query: Any,
+        params: Any = None,
+        *,
+        prepare: bool | None = None,
+        binary: bool = False,
+    ) -> Any:
+        cursor = await original_execute(
+            connection, query, params, prepare=prepare, binary=binary
+        )
+        if (
+            "FROM specpilot_run WHERE run_id" in str(query)
+            and "session_id" in str(query)
+            and connection.info.parameter_status("application_name") == read_name
+        ):
+            row_read.set()
+            await resume.wait()
+        return cursor
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", paused_execute)
+    read_task = asyncio.create_task(
+        reader.read_owned(created.run_id, created.session_id)
+    )
+    try:
+        await asyncio.wait_for(row_read.wait(), timeout=2)
+        assert await seed.claim(created.run_id, "worker-a", lease_seconds=30)
+        assert await seed.complete(
+            created.run_id,
+            "worker-a",
+            TerminalEvent(
+                sequence=1, status=RunStatus.FAILED, reason="provider_timeout"
+            ),
+        )
+    finally:
+        resume.set()
+    view = await read_task
+    assert view is not None
+    assert view.status is RunStatus.QUEUED
+    assert [event.sequence for event in view.events] == [1]
 
 
 @pytest.mark.anyio

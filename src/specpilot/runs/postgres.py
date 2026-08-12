@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter, ValidationError
@@ -19,11 +20,14 @@ from specpilot.runs.contracts import (
     RunView,
     StateTransitionEvent,
     TerminalEvent,
+    TraceIdentifier,
 )
 
 _QUEUE_LEASE_OWNER = "queue-delivery"
 _LEASE_EXPIRED_REASON = "lease_expired"
 _EVENT_ADAPTER: TypeAdapter[RunEvent] = TypeAdapter(RunEvent)
+_IDENTIFIER_ADAPTER: TypeAdapter[str] = TypeAdapter(TraceIdentifier)
+_UUID_ADAPTER: TypeAdapter[UUID] = TypeAdapter(UUID)
 _RUN_COLUMNS = (
     "run_id, request_id, session_id, task_level, profile, source_manifest_id, "
     "corpus_manifest_id, policy_hash, configuration_hash, prompt_id, "
@@ -108,14 +112,17 @@ class PostgresRunStore:
         return queued
 
     async def read_owned(self, run_id: UUID, session_id: str) -> RunView | None:
+        validated_run_id = _validated_uuid(run_id)
+        validated_session_id = _validated_identifier(session_id)
         connection = await self._connect()
         try:
-            async with connection:
+            await connection.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+            async with connection, connection.transaction():
                 row = await (
                     await connection.execute(
                         "SELECT " + _RUN_COLUMNS + " FROM specpilot_run "
                         "WHERE run_id = %s AND session_id = %s",
-                        (run_id, session_id),
+                        (validated_run_id, validated_session_id),
                     )
                 ).fetchone()
                 if row is None:
@@ -124,7 +131,7 @@ class PostgresRunStore:
                     await connection.execute(
                         "SELECT sequence, kind, payload FROM specpilot_run_event "
                         "WHERE run_id = %s ORDER BY sequence",
-                        (run_id,),
+                        (validated_run_id,),
                     )
                 ).fetchall()
         except psycopg.Error:
@@ -161,12 +168,15 @@ class PostgresRunStore:
         *,
         lease_seconds: int,
     ) -> bool:
-        now = self._now()
-        expiry = _lease_expiry(now, lease_seconds)
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
+        _validated_lease_seconds(lease_seconds)
         connection = await self._connect()
         try:
             async with connection, connection.transaction():
-                row = await _lock_run(connection, run_id)
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
+                expiry = _lease_expiry(now, lease_seconds)
                 if (
                     row is None
                     or row["status"] != RunStatus.QUEUED.value
@@ -184,7 +194,7 @@ class PostgresRunStore:
                     "UPDATE specpilot_run SET status = 'running', started_at = %s, "
                     "lease_owner = %s, lease_expires_at = %s, "
                     "last_heartbeat_at = %s WHERE run_id = %s AND status = 'queued'",
-                    (now, lease_owner, expiry, now, run_id),
+                    (now, validated_owner, expiry, now, validated_run_id),
                 )
                 if updated.rowcount != 1:
                     return False
@@ -202,18 +212,29 @@ class PostgresRunStore:
         *,
         lease_seconds: int,
     ) -> bool:
-        now = self._now()
-        expiry = _lease_expiry(now, lease_seconds)
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
+        _validated_lease_seconds(lease_seconds)
         connection = await self._connect()
         try:
             async with connection, connection.transaction():
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
+                expiry = _lease_expiry(now, lease_seconds)
+                if (
+                    row is None
+                    or row["status"] != RunStatus.RUNNING.value
+                    or row["lease_owner"] != validated_owner
+                    or row["lease_expires_at"] <= now
+                ):
+                    return False
                 updated = await connection.execute(
                     "UPDATE specpilot_run SET "
                     "lease_expires_at = GREATEST(lease_expires_at, %s), "
                     "last_heartbeat_at = %s WHERE run_id = %s "
                     "AND status = 'running' AND lease_owner = %s "
                     "AND lease_expires_at > %s",
-                    (expiry, now, run_id, lease_owner, now),
+                    (expiry, now, validated_run_id, validated_owner, now),
                 )
                 return updated.rowcount == 1
         except psycopg.Error:
@@ -225,24 +246,26 @@ class PostgresRunStore:
         lease_owner: str,
         event: RunEvent,
     ) -> RunEvent:
-        now = self._now()
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
         validated = _validated_event(event)
-        if isinstance(validated, TerminalEvent):
+        if isinstance(validated, (StateTransitionEvent, TerminalEvent)):
             raise RunStoreValidationError()
         connection = await self._connect()
         try:
             async with connection, connection.transaction():
-                row = await _lock_run(connection, run_id)
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
                 if (
                     row is None
                     or row["status"] != RunStatus.RUNNING.value
-                    or row["lease_owner"] != lease_owner
+                    or row["lease_owner"] != validated_owner
                     or row["lease_expires_at"] <= now
                 ):
                     raise RunStoreValidationError()
-                sequence = await _next_sequence(connection, run_id)
+                sequence = await _next_sequence(connection, validated_run_id)
                 allocated = _allocated_event(validated, sequence)
-                await _insert_event(connection, run_id, allocated, now)
+                await _insert_event(connection, validated_run_id, allocated, now)
                 return allocated
         except RunStoreValidationError:
             raise
@@ -257,23 +280,25 @@ class PostgresRunStore:
         lease_owner: str,
         event: TerminalEvent,
     ) -> bool:
-        now = self._now()
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
         validated = _validated_terminal(event)
         connection = await self._connect()
         try:
             async with connection, connection.transaction():
-                row = await _lock_run(connection, run_id)
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
                 if (
                     row is None
                     or row["status"] not in {
                         RunStatus.QUEUED.value,
                         RunStatus.RUNNING.value,
                     }
-                    or row["lease_owner"] != lease_owner
+                    or row["lease_owner"] != validated_owner
                     or row["lease_expires_at"] <= now
                 ):
                     return False
-                sequence = await _next_sequence(connection, run_id)
+                sequence = await _next_sequence(connection, validated_run_id)
                 allocated_payload = validated.model_dump(mode="json")
                 allocated_payload["sequence"] = sequence
                 await connection.execute(
@@ -281,7 +306,7 @@ class PostgresRunStore:
                     "(run_id, sequence, kind, payload, recorded_at) "
                     "VALUES (%s, %s, %s, %s, %s)",
                     (
-                        run_id,
+                        validated_run_id,
                         sequence,
                         validated.kind.value,
                         Jsonb(allocated_payload),
@@ -293,7 +318,12 @@ class PostgresRunStore:
                     "completed_at = %s, lease_owner = NULL, "
                     "lease_expires_at = NULL, last_heartbeat_at = NULL "
                     "WHERE run_id = %s AND status IN ('queued', 'running')",
-                    (validated.status.value, validated.reason, now, run_id),
+                    (
+                        validated.status.value,
+                        validated.reason,
+                        now,
+                        validated_run_id,
+                    ),
                 )
                 if updated.rowcount != 1:
                     raise RunStoreIntegrityError()
@@ -374,9 +404,28 @@ def _aware_utc(value: datetime) -> datetime:
 
 
 def _lease_expiry(now: datetime, lease_seconds: int) -> datetime:
-    if lease_seconds <= 0:
-        raise RunStoreValidationError()
+    _validated_lease_seconds(lease_seconds)
     return now + timedelta(seconds=lease_seconds)
+
+
+def _validated_lease_seconds(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise RunStoreValidationError()
+    return value
+
+
+def _validated_identifier(value: str) -> str:
+    try:
+        return _IDENTIFIER_ADAPTER.validate_python(value)
+    except (TypeError, ValueError, ValidationError):
+        raise RunStoreValidationError() from None
+
+
+def _validated_uuid(value: UUID) -> UUID:
+    try:
+        return _UUID_ADAPTER.validate_python(value, strict=True)
+    except (TypeError, ValueError, ValidationError):
+        raise RunStoreValidationError() from None
 
 
 def _run_values(run: RunRecord) -> tuple[Any, ...]:

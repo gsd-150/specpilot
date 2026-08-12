@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
 from asyncio import gather
 from datetime import timedelta
 
@@ -138,3 +140,53 @@ async def test_reconcile_expired_is_concurrent_idempotent_and_skips_terminal(
     assert terminal_view is not None
     assert terminal_view.status is RunStatus.FAILED
     assert terminal_view.reason == "queue_delivery_failed"
+
+
+@pytest.mark.anyio
+async def test_reconcile_skips_locked_row_then_next_invocation_persists_it(
+    clean_ledger: str,
+) -> None:
+    """Catches treating SKIP LOCKED as permanent reconciliation."""
+    import psycopg
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    clock.advance(seconds=5)
+    locked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(clean_ledger) as connection,
+            connection.transaction(),
+        ):
+            row = await (
+                await connection.execute(
+                    "SELECT run_id FROM specpilot_run WHERE run_id = %s FOR UPDATE",
+                    (created.run_id,),
+                )
+            ).fetchone()
+            assert row == (created.run_id,)
+            locked.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold(), name=f"reconcile-holder-{uuid.uuid4().hex}")
+    try:
+        await asyncio.wait_for(locked.wait(), timeout=2)
+        assert await store.reconcile_expired(clock()) == 0
+    finally:
+        release.set()
+        await holder
+
+    projected = await store.read_owned(created.run_id, created.session_id)
+    assert projected is not None
+    assert projected.status is RunStatus.INTERRUPTED
+    assert projected.completed_at is None
+    assert await store.reconcile_expired(clock()) == 1
+    persisted = await store.read_owned(created.run_id, created.session_id)
+    assert persisted is not None
+    assert persisted.status is RunStatus.INTERRUPTED
+    assert persisted.completed_at == clock()
+    assert [event.kind.value for event in persisted.events].count("terminal") == 1
