@@ -137,8 +137,21 @@ jobs:
   images:
     name: compose config and image build
     runs-on: ubuntu-latest
+    env:
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST: ${{ runner.temp }}/specpilot-ci/corpus
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST: ${{ runner.temp }}/specpilot-ci/manifests
+      SPECPILOT_MCP_SOURCE_DATA_DIR_HOST: ${{ runner.temp }}/specpilot-ci/sources
     steps:
       - uses: actions/checkout@v4
+      # Compose deliberately has no deployment defaults for restricted artifact
+      # mounts. CI supplies empty disposable sources so configuration and image
+      # construction exercise the mount shape without real corpus material.
+      - name: create empty CI artifact mount sources
+        run: |
+          mkdir -p \
+            "$SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST" \
+            "$SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST" \
+            "$SPECPILOT_MCP_SOURCE_DATA_DIR_HOST"
       - run: docker compose --profile demo config
       - run: docker compose --profile real config
       # The base file must publish nothing; only the explicit demo override may.
