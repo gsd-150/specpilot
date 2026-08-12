@@ -136,7 +136,17 @@ disclosure so far:
 314 / 76,113. The licence premise has plenty of headroom and the accounting
 survives across evaluation roots.
 
-### What runs, and what is a stub
+### What runs, and what remains
+
+> **[已变更｜2026-08-13｜W3 MCP/API/trace slice completed]** The stub status
+> below is retained as the pre-W3 record. The branch now exposes five read-only
+> tools over real Streamable HTTP MCP, runs the model-authored bounded L1 plan
+> through the PostgreSQL disclosure ledger and verifier, accepts owner-bound
+> asynchronous runs over FastAPI, and serves a packaged React trace page with a
+> 60-second polling limit. Refusal, disclosure block, provider failure, and
+> expired-lease interruption remain distinct. Browser closure uses an
+> HTTP-only fixture cookie and a synthetic local corpus; no real provider was
+> called. SSE and `/chat/{run_id}/events` remain W5.
 
 **Runs end to end, verified live against a real provider on 2026-08-11 — both
 directions:**
@@ -284,6 +294,13 @@ matching checkout with
 `psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f migrations/003_egress_ledger_policy_successor.sql`.
 
 ### 4. W3 — MCP tools, FastAPI L1 API, trace page
+
+> **[已完成｜2026-08-13]** This checklist item is implemented on
+> `feat/w3-mcp-api-trace`. Migrations 004 and 005 remain explicit operator
+> actions, and the planning policy still requires the migration 003 successor
+> and `egress rebind-policy` flow for an existing corpus ledger. See
+> `docs/reports/w3-mcp-api-trace-report.md` for the fresh release evidence and
+> the one local Docker DNS limitation.
 
 The largest remaining piece and the half the job title names. Both entry points
 are stubs today (11 and 18 lines). The roadmap's W3 scope: expose the five
