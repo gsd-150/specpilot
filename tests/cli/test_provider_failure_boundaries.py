@@ -51,7 +51,7 @@ def test_route_smoke_reports_provider_failure_as_failed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     async def fail(*args: object, **kwargs: object) -> object:
-        raise ProviderAttemptError("provider_timeout", "res-1", False)
+        raise ProviderAttemptError("provider_timeout", "res-1", False, None)
 
     monkeypatch.setattr("specpilot.providers.transport.PolicyBoundTransport.send", fail)
 

@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from specpilot.agents.contracts import ToolCallSummary, ToolName
-from specpilot.agents.planner import PlannerResult
+from specpilot.agents.planner import InvalidToolPlan, PlannerResult
 from specpilot.answer.run import AnswerOutcome
 from specpilot.contracts.answer import AnswerVerdict, RefusalReason, VerifiedAnswer
 from specpilot.egress.enforcer import EgressPolicyViolation
@@ -147,6 +147,7 @@ class FakeAnswerer:
     block: asyncio.Event | None = None
     transports: list[object] = field(default_factory=list)
     evidence_seen: tuple[Any, ...] = ()
+    error: BaseException | None = None
 
     async def __call__(
         self, question: str, evidence: object, **kwargs: object
@@ -157,6 +158,8 @@ class FakeAnswerer:
         self.entered.set()
         if self.block is not None:
             await self.block.wait()
+        if self.error is not None:
+            raise self.error
         return self.outcome
 
 
@@ -392,7 +395,18 @@ async def test_gate_error_is_blocked_but_transport_replay_is_not() -> None:
 
     assert terminal.status is RunStatus.EGRESS_BLOCKED
     assert terminal.reason == "root_unique_excerpts_exceeded"
-    assert not any(isinstance(event, EgressSummaryEvent) for event in store.events)
+    blocked = [event for event in store.events if isinstance(event, EgressSummaryEvent)]
+    assert len(blocked) == 1
+    assert blocked[0].admitted is False
+    assert blocked[0].reservation_id is None
+    assert blocked[0].replayed is False
+    assert blocked[0].request_tokens is None
+    assert blocked[0].request_bytes is None
+    assert blocked[0].cost_microunits is None
+    assert blocked[0].error_code == "root_unique_excerpts_exceeded"
+    assert isinstance(store.events[0], AgentStepEvent)
+    assert store.events[1] == blocked[0]
+    assert isinstance(store.events[2], AgentStepEvent)
     assert evidence.calls == answerer.calls == 0
 
     replay_store = FakeStore()
@@ -408,6 +422,24 @@ async def test_gate_error_is_blocked_but_transport_replay_is_not() -> None:
 
     assert replay_store.terminals == []
     assert replay_evidence.calls == replay_answerer.calls == 0
+
+
+async def test_answer_admission_gate_summary_names_evidence_stage() -> None:
+    answerer = FakeAnswerer(
+        refused_outcome(),
+        error=EgressPolicyViolation("root_unique_bytes_exceeded", "raw question"),
+    )
+    made, store, _, _, _ = worker(answerer=answerer)
+
+    await made.start()
+    await made.submit(job())
+    terminal = await wait_terminal(store)
+    await made.aclose()
+
+    assert terminal.status is RunStatus.EGRESS_BLOCKED
+    blocked = [event for event in store.events if isinstance(event, EgressSummaryEvent)]
+    assert blocked[-1].admitted is False
+    assert blocked[-1].stage.value == "evidence"
 
 
 async def test_lost_heartbeat_stops_before_next_stage_and_never_completes() -> None:
@@ -486,9 +518,13 @@ async def test_local_crash_is_left_for_lease_expiry_without_raw_trace() -> None:
 
 
 async def test_invalid_plan_is_refused_without_mcp_or_answer_call() -> None:
-    from specpilot.agents.planner import InvalidToolPlan
-
-    planner = FakePlanner(error=InvalidToolPlan())
+    planner = FakePlanner(
+        error=InvalidToolPlan(
+            reservation_id="00000000-0000-0000-0000-000000000013",
+            replayed=False,
+            request_size=RequestSize(request_tokens=13, request_bytes=130),
+        )
+    )
     made, store, _, evidence, answerer = worker(planner=planner)
 
     await made.start()
@@ -502,6 +538,14 @@ async def test_invalid_plan_is_refused_without_mcp_or_answer_call() -> None:
         reason="invalid_tool_plan",
     )
     assert evidence.calls == answerer.calls == 0
+    egress = [event for event in store.events if isinstance(event, EgressSummaryEvent)]
+    assert len(egress) == 1
+    assert egress[0].reservation_id == UUID("00000000-0000-0000-0000-000000000013")
+    assert egress[0].request_bytes == 130
+    assert egress[0].admitted is True
+    assert [event.sequence for event in store.events] == list(
+        range(3, 3 + len(store.events))
+    )
 
 
 async def test_heartbeat_error_abandons_lease_without_next_stage() -> None:
@@ -533,6 +577,7 @@ async def test_planning_provider_attempt_is_failed_once_and_sanitized() -> None:
             "provider_timeout",
             "00000000-0000-0000-0000-000000000011",
             False,
+            request_size=None,
         )
     )
     made, store, _, evidence, answerer = worker(planner=planner)
@@ -552,6 +597,16 @@ async def test_planning_provider_attempt_is_failed_once_and_sanitized() -> None:
         if isinstance(event, AgentStepEvent) and event.phase is AgentStepPhase.FINISHED
     ]
     assert [event.error_code for event in finished] == ["provider_timeout"]
+    egress = [event for event in store.events if isinstance(event, EgressSummaryEvent)]
+    assert len(egress) == 1
+    assert egress[0].reservation_id == UUID("00000000-0000-0000-0000-000000000011")
+    assert egress[0].request_tokens is None
+    assert egress[0].request_bytes is None
+    assert egress[0].replayed is False
+    assert egress[0].admitted is True
+    assert isinstance(store.events[0], AgentStepEvent)
+    assert store.events[1] == egress[0]
+    assert store.events[2] == finished[0]
     assert all(
         "secret planning input" not in event.model_dump_json() for event in store.events
     )
@@ -612,6 +667,37 @@ async def test_supervisor_lifecycle_is_cross_task_and_concurrently_idempotent() 
     await started
     await asyncio.gather(made.start(), made.start())
     await asyncio.wait_for(asyncio.gather(made.aclose(), made.aclose()), timeout=0.2)
+
+
+async def test_cancelled_start_cleans_supervisor_before_restart() -> None:
+    class DelayedReady:
+        def __init__(self) -> None:
+            self.set_called = asyncio.Event()
+            self.release = asyncio.Event()
+
+        def set(self) -> None:
+            self.set_called.set()
+
+        async def wait(self) -> None:
+            await self.release.wait()
+
+    made, store, _, _, _ = worker()
+    delayed = DelayedReady()
+    made._supervisor_ready = delayed  # type: ignore[assignment]
+
+    starting = asyncio.create_task(made.start())
+    await delayed.set_called.wait()
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    delayed.release.set()
+    await made.start()
+    await made.submit(job())
+    await wait_terminal(store)
+    await made.aclose()
+
+    assert store.calls.count("claim") == 1
 
 
 async def test_evidence_is_trimmed_to_five_before_trace_and_answer() -> None:

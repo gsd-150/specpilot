@@ -200,6 +200,7 @@ def test_egress_cost_is_explicitly_unknown_instead_of_fabricated_zero() -> None:
         request_tokens=10,
         request_bytes=100,
         cost_microunits=None,
+        replayed=False,
         error_code=None,
     )
 
@@ -216,6 +217,40 @@ def test_egress_cost_is_explicitly_unknown_instead_of_fabricated_zero() -> None:
             contracts.EgressSummaryEvent.model_validate(
                 {**event.model_dump(mode="json"), "cost_microunits": invalid}
             )
+
+
+def test_blocked_egress_requires_explicitly_unavailable_attempt_metadata() -> None:
+    contracts = _contracts()
+
+    blocked = contracts.EgressSummaryEvent(
+        sequence=7,
+        stage="planning",
+        reservation_id=None,
+        ledger_id=None,
+        admitted=False,
+        replayed=False,
+        request_tokens=None,
+        request_bytes=None,
+        cost_microunits=None,
+        error_code="root_unique_excerpts_exceeded",
+    )
+    assert blocked.request_tokens is None
+    assert blocked.request_bytes is None
+
+    base = blocked.model_dump(mode="json")
+    for update in (
+        {"reservation_id": "00000000-0000-0000-0000-000000000007"},
+        {"replayed": True},
+        {"request_tokens": 0},
+        {"request_bytes": 0},
+        {"cost_microunits": 0},
+    ):
+        with pytest.raises(ValidationError):
+            contracts.EgressSummaryEvent.model_validate({**base, **update})
+
+    del base["replayed"]
+    with pytest.raises(ValidationError, match="replayed"):
+        contracts.EgressSummaryEvent.model_validate(base)
 
 
 @pytest.mark.parametrize(

@@ -141,7 +141,7 @@ def test_post_send_accounting_and_unknown_policy_errors_are_not_gate_rejections(
 @pytest.mark.parametrize(
     "error",
     [
-        ProviderAttemptError("provider_timeout", "reservation-1", False),
+        ProviderAttemptError("provider_timeout", "reservation-1", False, None),
         TransportReplayError("reservation-1"),
         NoAdapterForRoute(),
     ],

@@ -36,6 +36,11 @@ async def test_invalid_content_spends_one_planning_attempt_and_executes_no_tools
         await planner.plan("When may a sender retry?", context)
 
     assert str(caught.value) == "invalid_tool_plan"
+    assert caught.value.reservation_id == "res-1"
+    assert caught.value.replayed is False
+    assert caught.value.request_size.request_bytes > 0
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert provider.call_count == 1
     assert len(ledger.reserved) == 1
     assert len(ledger.attempts) == 1

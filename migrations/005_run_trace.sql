@@ -382,13 +382,13 @@ BEGIN
                     event_payload,
                     ARRAY[
                         'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
-                        'admitted', 'request_tokens', 'request_bytes',
+                        'admitted', 'replayed', 'request_tokens', 'request_bytes',
                         'cost_microunits', 'error_code'
                     ]
                 )
                 OR NOT (event_payload ?& ARRAY[
                     'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
-                    'admitted', 'request_tokens', 'request_bytes',
+                    'admitted', 'replayed', 'request_tokens', 'request_bytes',
                     'cost_microunits', 'error_code'
                 ])
                 OR jsonb_typeof(event_payload -> 'stage') <> 'string'
@@ -404,11 +404,18 @@ BEGIN
                     OR specpilot_trace_uuid(event_payload -> 'ledger_id')
                 )
                 OR jsonb_typeof(event_payload -> 'admitted') <> 'boolean'
-                OR NOT specpilot_trace_integer(
-                    event_payload -> 'request_tokens', 0, 1000000
+                OR jsonb_typeof(event_payload -> 'replayed') <> 'boolean'
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'request_tokens') = 'null'
+                    OR specpilot_trace_integer(
+                        event_payload -> 'request_tokens', 0, 1000000
+                    )
                 )
-                OR NOT specpilot_trace_integer(
-                    event_payload -> 'request_bytes', 0, 1000000
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'request_bytes') = 'null'
+                    OR specpilot_trace_integer(
+                        event_payload -> 'request_bytes', 0, 1000000
+                    )
                 )
                 OR NOT (
                     jsonb_typeof(event_payload -> 'cost_microunits') = 'null'
@@ -423,8 +430,32 @@ BEGIN
             THEN RETURN false; END IF;
             admitted_value := (event_payload ->> 'admitted')::boolean;
             nullable_reason := jsonb_typeof(event_payload -> 'error_code') = 'null';
-            IF (admitted_value AND NOT nullable_reason)
-                OR (NOT admitted_value AND nullable_reason)
+            IF (
+                    admitted_value
+                    AND (
+                        NOT nullable_reason
+                        OR jsonb_typeof(event_payload -> 'reservation_id') = 'null'
+                        OR (
+                            jsonb_typeof(event_payload -> 'request_tokens') = 'null'
+                            AND jsonb_typeof(event_payload -> 'request_bytes') <> 'null'
+                        )
+                        OR (
+                            jsonb_typeof(event_payload -> 'request_tokens') <> 'null'
+                            AND jsonb_typeof(event_payload -> 'request_bytes') = 'null'
+                        )
+                    )
+                )
+                OR (
+                    NOT admitted_value
+                    AND (
+                        nullable_reason
+                        OR jsonb_typeof(event_payload -> 'reservation_id') <> 'null'
+                        OR (event_payload ->> 'replayed')::boolean
+                        OR jsonb_typeof(event_payload -> 'request_tokens') <> 'null'
+                        OR jsonb_typeof(event_payload -> 'request_bytes') <> 'null'
+                        OR jsonb_typeof(event_payload -> 'cost_microunits') <> 'null'
+                    )
+                )
             THEN RETURN false; END IF;
         WHEN 'usage_summary' THEN
             IF NOT specpilot_trace_exact_object(

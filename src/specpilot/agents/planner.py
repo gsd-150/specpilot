@@ -49,7 +49,18 @@ _TOOL_MODELS = (
 class InvalidToolPlan(Exception):
     """The provider returned content that is not one bounded ToolPlan."""
 
-    def __init__(self) -> None:
+    __slots__ = ("replayed", "request_size", "reservation_id")
+
+    def __init__(
+        self,
+        *,
+        reservation_id: str,
+        replayed: bool,
+        request_size: RequestSize,
+    ) -> None:
+        self.reservation_id = reservation_id
+        self.replayed = replayed
+        self.request_size = request_size
         super().__init__("invalid_tool_plan")
 
 
@@ -108,7 +119,17 @@ class Planner:
         try:
             plan = ToolPlan.model_validate_json(receipt.response.content)
         except (ValidationError, ValueError):
-            raise InvalidToolPlan() from None
+            plan = None
+        if plan is None:
+            # Construct outside the parser's exception handler so the durable
+            # orchestration error cannot retain provider response content in
+            # either cause or implicit context.
+            error = InvalidToolPlan(
+                reservation_id=receipt.reservation_id,
+                replayed=receipt.replayed,
+                request_size=receipt.request_size,
+            )
+            raise error
         return PlannerResult(
             plan=plan,
             reservation_id=receipt.reservation_id,

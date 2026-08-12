@@ -85,6 +85,7 @@ def _valid_event_payloads() -> dict[str, dict[str, object]]:
             "reservation_id": "00000000-0000-0000-0000-000000000007",
             "ledger_id": None,
             "admitted": True,
+            "replayed": False,
             "request_tokens": 10,
             "request_bytes": 100,
             "cost_microunits": 3,
@@ -490,6 +491,71 @@ def test_raw_sql_accepts_explicit_unknown_egress_cost(clean_ledger: str) -> None
             sequence=7,
             payload=payload,
         )
+
+
+def test_raw_sql_accepts_blocked_egress_with_unavailable_attempt_metadata(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    payload = _valid_event_payloads()["egress_summary"]
+    payload.update(
+        admitted=False,
+        reservation_id=None,
+        replayed=False,
+        request_tokens=None,
+        request_bytes=None,
+        cost_microunits=None,
+        error_code="root_unique_excerpts_exceeded",
+    )
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        _insert_event_payload(
+            connection,
+            run_id,
+            kind="egress_summary",
+            sequence=7,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"reservation_id": "00000000-0000-0000-0000-000000000007"},
+        {"replayed": True},
+        {"request_tokens": 0},
+        {"request_bytes": 0},
+        {"cost_microunits": 0},
+    ],
+)
+def test_raw_sql_rejects_blocked_egress_with_fabricated_attempt_metadata(
+    clean_ledger: str, update: dict[str, object]
+) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()["egress_summary"]
+    payload.update(
+        admitted=False,
+        reservation_id=None,
+        replayed=False,
+        request_tokens=None,
+        request_bytes=None,
+        cost_microunits=None,
+        error_code="root_unique_excerpts_exceeded",
+    )
+    payload.update(update)
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind="egress_summary",
+                sequence=7,
+                payload=payload,
+            )
 
 
 @pytest.mark.parametrize("invalid", ["unknown", 1.5, True, -1, 1_000_000_001])

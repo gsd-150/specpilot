@@ -177,8 +177,9 @@ class EgressSummaryEvent(_RunEventBase):
     reservation_id: UUID | None
     ledger_id: UUID | None
     admitted: bool
-    request_tokens: Count
-    request_bytes: Count
+    replayed: bool
+    request_tokens: Count | None
+    request_bytes: Count | None
     # Null means the provider boundary supplied no authoritative price. It is
     # distinct from a measured zero-cost request.
     cost_microunits: CostMicrounits | None
@@ -186,10 +187,24 @@ class EgressSummaryEvent(_RunEventBase):
 
     @model_validator(mode="after")
     def _admission_has_a_stable_result(self) -> Self:
-        if self.admitted and self.error_code is not None:
-            raise ValueError("an admitted egress summary has no error code")
-        if not self.admitted and self.error_code is None:
+        if self.admitted:
+            if self.reservation_id is None:
+                raise ValueError("an admitted egress summary requires a reservation")
+            if self.error_code is not None:
+                raise ValueError("an admitted egress summary has no error code")
+            if (self.request_tokens is None) != (self.request_bytes is None):
+                raise ValueError("request measurements are available as one pair")
+            return self
+        if self.error_code is None:
             raise ValueError("a blocked egress summary requires a stable error code")
+        if (
+            self.reservation_id is not None
+            or self.replayed
+            or self.request_tokens is not None
+            or self.request_bytes is not None
+            or self.cost_microunits is not None
+        ):
+            raise ValueError("a blocked egress summary has no attempt metadata")
         return self
 
 

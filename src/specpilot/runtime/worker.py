@@ -18,6 +18,7 @@ from specpilot.agents.planner import InvalidToolPlan, PlannerContext, PlannerRes
 from specpilot.answer.run import AnswerOutcome, run_answer
 from specpilot.contracts.egress import EgressStage
 from specpilot.egress.enforcer import EgressPolicyViolation
+from specpilot.egress.ledger import RequestSize
 from specpilot.providers.transport import ProviderAttemptError
 from specpilot.runs.contracts import (
     AgentName,
@@ -120,6 +121,7 @@ class RunWorker:
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._heartbeat_interval = heartbeat_interval_seconds
+        self._queue_capacity = queue_capacity
         self._send, self._receive = anyio.create_memory_object_stream[RunJob](
             queue_capacity
         )
@@ -135,8 +137,21 @@ class RunWorker:
                 raise WorkerUnavailable("worker_closed")
             if self._started:
                 return
-            self._supervisor_task = asyncio.create_task(self._supervise())
-            await self._supervisor_ready.wait()
+            supervisor = asyncio.create_task(self._supervise())
+            self._supervisor_task = supervisor
+            try:
+                await self._supervisor_ready.wait()
+            except BaseException:
+                supervisor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await supervisor
+                if self._supervisor_task is supervisor:
+                    self._supervisor_task = None
+                self._send, self._receive = anyio.create_memory_object_stream[RunJob](
+                    self._queue_capacity
+                )
+                self._supervisor_ready = asyncio.Event()
+                raise
             self._started = True
 
     async def submit(self, job: RunJob) -> None:
@@ -202,6 +217,7 @@ class RunWorker:
         )
         terminal: Terminal | None = None
         active_stage: tuple[AgentName, str, float] | None = None
+        egress_stage = EgressStage.PLANNING
         try:
             planning_started = time.monotonic()
             active_stage = (AgentName.ORCHESTRATOR, "planning", planning_started)
@@ -298,6 +314,7 @@ class RunWorker:
             # carry call metadata, but it may not replace that transport.
             answer_context["transport"] = self._answer_transport
             answer_started = time.monotonic()
+            egress_stage = EgressStage.EVIDENCE
             active_stage = (AgentName.ANSWER, "answer", answer_started)
             await self._append(
                 job.run_id,
@@ -340,6 +357,17 @@ class RunWorker:
         except ProviderAttemptError as error:
             if lease_lost.is_set():
                 return
+            await self._append(
+                job.run_id,
+                _admitted_egress_event(
+                    EgressStage.PLANNING,
+                    reservation_id=error.reservation_id,
+                    replayed=error.replayed,
+                    request_size=error.request_size,
+                ),
+            )
+            if lease_lost.is_set():
+                return
             await self._finish_error_stage(
                 job.run_id, active_stage, error.public_error_code
             )
@@ -348,11 +376,27 @@ class RunWorker:
         except InvalidToolPlan as error:
             if lease_lost.is_set():
                 return
+            await self._append(
+                job.run_id,
+                _admitted_egress_event(
+                    EgressStage.PLANNING,
+                    reservation_id=error.reservation_id,
+                    replayed=error.replayed,
+                    request_size=error.request_size,
+                ),
+            )
+            if lease_lost.is_set():
+                return
             await self._finish_error_stage(job.run_id, active_stage, str(error))
             active_stage = None
             terminal = Terminal(RunStatus.REFUSED, "invalid_tool_plan")
         except EgressPolicyViolation as error:
             terminal = project_gate_error(error)
+            if lease_lost.is_set():
+                return
+            await self._append(
+                job.run_id, _blocked_egress_event(egress_stage, error.code)
+            )
             if lease_lost.is_set():
                 return
             await self._finish_error_stage(job.run_id, active_stage, error.code)
@@ -473,16 +517,49 @@ def _agent_event(
 
 
 def _planning_egress_event(result: PlannerResult) -> EgressSummaryEvent:
+    return _admitted_egress_event(
+        EgressStage.PLANNING,
+        reservation_id=result.reservation_id,
+        replayed=result.replayed,
+        request_size=result.request_size,
+    )
+
+
+def _admitted_egress_event(
+    stage: EgressStage,
+    *,
+    reservation_id: str,
+    replayed: bool,
+    request_size: RequestSize | None,
+) -> EgressSummaryEvent:
+    tokens = request_size.request_tokens if request_size is not None else None
+    byte_count = request_size.request_bytes if request_size is not None else None
     return EgressSummaryEvent(
         sequence=1,
-        stage=EgressStage.PLANNING,
-        reservation_id=UUID(result.reservation_id),
+        stage=stage,
+        reservation_id=UUID(reservation_id),
         ledger_id=None,
         admitted=True,
-        request_tokens=result.request_size.request_tokens,
-        request_bytes=result.request_size.request_bytes,
+        replayed=replayed,
+        request_tokens=tokens,
+        request_bytes=byte_count,
         cost_microunits=None,
         error_code=None,
+    )
+
+
+def _blocked_egress_event(stage: EgressStage, error_code: str) -> EgressSummaryEvent:
+    return EgressSummaryEvent(
+        sequence=1,
+        stage=stage,
+        reservation_id=None,
+        ledger_id=None,
+        admitted=False,
+        replayed=False,
+        request_tokens=None,
+        request_bytes=None,
+        cost_microunits=None,
+        error_code=error_code,
     )
 
 
@@ -495,6 +572,7 @@ def _answer_egress_event(outcome: AnswerOutcome) -> EgressSummaryEvent | None:
         reservation_id=UUID(outcome.reservation_id),
         ledger_id=None,
         admitted=True,
+        replayed=outcome.replayed,
         request_tokens=outcome.request_size.request_tokens,
         request_bytes=outcome.request_size.request_bytes,
         cost_microunits=None,

@@ -290,9 +290,7 @@ async def test_excerpt_over_the_token_cap_is_no_send() -> None:
         )
     )
 
-    error = await assert_no_send(
-        egress_request(payload=payload), EgressPolicyViolation
-    )
+    error = await assert_no_send(egress_request(payload=payload), EgressPolicyViolation)
 
     assert error.code == "excerpt_bytes_exceeded"
 
@@ -365,6 +363,7 @@ async def test_a_known_provider_failure_records_a_failed_attempt() -> None:
     assert caught.value.public_error_code == "provider_timeout"
     assert caught.value.reservation_id == "res-1"
     assert caught.value.replayed is False
+    assert caught.value.request_size is None
     assert str(caught.value) == "provider_timeout"
 
     assert provider.call_count == 1
@@ -394,6 +393,7 @@ async def test_an_unclassified_adapter_failure_carries_no_raw_exception() -> Non
     assert caught.value.__context__ is None
     assert marker not in str(caught.value)
     assert marker not in repr(caught.value)
+    assert caught.value.request_size is None
     assert ledger.attempts[0].public_error_code == "provider_unclassified_error"
 
 

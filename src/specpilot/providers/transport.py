@@ -55,17 +55,19 @@ class TransportReceipt:
 class ProviderAttemptError(Exception):
     """A recorded provider failure with reservation identity and no raw cause."""
 
-    __slots__ = ("public_error_code", "replayed", "reservation_id")
+    __slots__ = ("public_error_code", "replayed", "request_size", "reservation_id")
 
     def __init__(
         self,
         public_error_code: str,
         reservation_id: str,
         replayed: bool,
+        request_size: RequestSize | None,
     ) -> None:
         self.public_error_code = public_error_code
         self.reservation_id = reservation_id
         self.replayed = replayed
+        self.request_size = request_size
         super().__init__(public_error_code)
 
 
@@ -175,6 +177,7 @@ class PolicyBoundTransport:
                 failure_code,
                 reservation.reservation_id,
                 reservation.replayed,
+                None,
             ) from None
 
         assert response is not None
