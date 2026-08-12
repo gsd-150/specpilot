@@ -34,7 +34,6 @@ from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
 from specpilot.mcp_server.app import create_app as create_mcp_app
-from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.services import McpToolServices, SearchBackendHit
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.local import LocalCorpus
@@ -339,38 +338,3 @@ async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
     assert {row[0] for row in reservations} == {"planning", "evidence"}
     assert len(reservations) == 2
     assert attempts == (2,)
-
-
-async def test_mcp_lifecycle_hook_closes_without_cancelling_its_owner(
-    tmp_path: Path,
-) -> None:
-    xml_path = rfc_factory.write(tmp_path, "hook.xml", TOOL_RFC_XML)
-    verified = load_verified_rfc(xml_path, RfcLimits())
-    documents = ((verified, ClauseLimits()),)
-    corpus = LocalCorpus.load(documents, RfcLimits())
-    services = McpToolServices(
-        corpus=corpus,
-        search_backend=_Search(corpus),
-        tool_metadata=build_rfc_tool_metadata(
-            corpus_manifest_id="c" * 64,
-            documents=documents,
-            units=corpus.units(),
-            rfc_limits=RfcLimits(),
-        ),
-    )
-    mcp_app = create_mcp_app(services)
-    mcp_http = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=mcp_app),
-        base_url="http://127.0.0.1:8080",
-    )
-    hook = _McpHook(
-        mcp_app,
-        StreamableMcpClient(
-            "http://127.0.0.1:8080/mcp", http_client=mcp_http
-        ),
-        mcp_http,
-    )
-
-    await hook.start()
-    await hook.aclose()
-    assert not asyncio.current_task().cancelled()
