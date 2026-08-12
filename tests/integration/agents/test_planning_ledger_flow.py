@@ -57,7 +57,7 @@ async def test_planning_records_one_attempt_and_no_source_disclosures(
         clean_ledger, "SELECT reservation_id FROM egress_reservation"
     )
     assert result.plan.plan_id == "fixture-plan"
-    assert result.reservation_id == reservation_id
+    assert result.reservation_id == str(reservation_id)
     assert provider.call_count == 1
     assert reservation_id is not None
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
