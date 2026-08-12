@@ -10,6 +10,22 @@ import type { RunEvent, RunStatus, RunView } from "./api";
 
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
 const HASH = "a".repeat(64);
+const ANSWER_FAULT_CODES = [
+  "reply_too_large",
+  "reply_not_json",
+  "reply_not_an_object",
+  "reply_missing_sufficient",
+  "reply_missing_answer",
+  "reply_answer_too_long",
+  "reply_missing_citations",
+  "reply_too_many_citations",
+  "reply_citation_not_a_string",
+  "reply_citation_malformed",
+  "reply_unreadable",
+  "not_disclosed",
+  "cross_manifest",
+  "no_citation",
+] as const;
 
 function view(status: RunStatus, reason: string | null = null, events: RunEvent[] = []): RunView {
   const terminal = !["queued", "running", "interrupted"].includes(status);
@@ -241,5 +257,34 @@ describe("sanitized timeline", () => {
     for (const marker of ["private_question_marker", "api_key_secret", "provider_authored_error"]) expect(html).not.toContain(marker);
     expect(html).toContain("search_clauses");
     expect(html).toContain("query");
+  });
+
+  it.each(ANSWER_FAULT_CODES)("renders the real closed answer fault %s", async (faultCode) => {
+    const events = [{
+      kind: "verifier_summary", sequence: 1,
+      checks: [{ evidence_id: HASH, passed: false, fault_code: faultCode }],
+      duration_ms: 1,
+    }] as unknown as RunEvent[];
+    const h = harness(view("refused", "unverifiable_citation", events));
+    await submit(h);
+    expect(await screen.findByRole("list", { name: "Run trace" })).toHaveTextContent(faultCode);
+  });
+
+  it.each([
+    "reply_not_json_private",
+    "not_disclosed_secret",
+    "cross_manifest_raw",
+    "no_citations",
+    "provider_timeout_detail",
+    "root_unique_excerpts_exceeded_extra",
+  ])("does not render the similar but unknown code %s", async (faultCode) => {
+    const events = [{
+      kind: "verifier_summary", sequence: 1,
+      checks: [{ evidence_id: HASH, passed: false, fault_code: faultCode }],
+      duration_ms: 1,
+    }] as unknown as RunEvent[];
+    const h = harness(view("refused", "unverifiable_citation", events));
+    await submit(h);
+    expect((await screen.findByRole("list", { name: "Run trace" })).textContent).not.toContain(faultCode);
   });
 });

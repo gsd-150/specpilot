@@ -13,6 +13,13 @@ const ARGUMENT_KEYS = new Set([
   "document_id", "clauses", "term",
 ]);
 const ERROR_CODES = new Set([
+  // answer/reply.py shape faults, chain.py fallback, and verify.py citation faults
+  "reply_too_large", "reply_not_json", "reply_not_an_object",
+  "reply_missing_sufficient", "reply_missing_answer", "reply_answer_too_long",
+  "reply_missing_citations", "reply_too_many_citations",
+  "reply_citation_not_a_string", "reply_citation_malformed", "reply_unreadable",
+  "not_disclosed", "cross_manifest", "no_citation",
+  // MCP contracts and local evidence validation
   "invalid_argument", "not_found", "invalid_reference", "tool_timeout",
   "backend_unavailable", "invalid_tool_result_scope", "invalid_tool_result",
   "no_evidence_retrieved", "evidence_insufficient", "unverifiable_citation",
