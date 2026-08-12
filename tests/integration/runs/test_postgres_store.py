@@ -526,6 +526,75 @@ async def test_invalid_public_identifiers_fail_before_sql(clean_ledger: str) -> 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("wrapper", [" {}", "{} ", "\t{}", "{}\n"])
+async def test_owner_authorization_identifiers_are_not_canonicalized(
+    clean_ledger: str, wrapper: str
+) -> None:
+    """Catches whitespace normalization aliasing a distinct authorization ID."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    wrapped_session = wrapper.format(created.session_id)
+    try:
+        foreign = await store.read_owned(created.run_id, wrapped_session)
+    except RunStoreValidationError as error:
+        assert str(error) == "invalid_run_data"
+        assert wrapped_session not in repr(error)
+    else:
+        assert foreign is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("wrapper", [" {}", "{} ", "\t{}", "{}\n"])
+async def test_lease_authorization_identifiers_are_not_canonicalized(
+    clean_ledger: str, wrapper: str
+) -> None:
+    """Catches a normalized owner alias authorizing lease mutations."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    wrapped_queue_owner = wrapper.format("queue-delivery")
+    try:
+        claim = await store.claim(created.run_id, wrapped_queue_owner, lease_seconds=30)
+    except RunStoreValidationError as error:
+        assert str(error) == "invalid_run_data"
+        assert wrapped_queue_owner not in repr(error)
+    else:
+        assert claim is False
+
+    assert await store.claim(created.run_id, "worker-a", lease_seconds=30)
+    wrapped_worker = wrapper.format("worker-a")
+    event = PlanSummaryEvent(
+        sequence=1, plan_id="plan-a", step_count=1, max_tool_calls=1
+    )
+    operations = (
+        lambda: store.heartbeat(created.run_id, wrapped_worker, lease_seconds=30),
+        lambda: store.append(created.run_id, wrapped_worker, event),
+        lambda: store.complete(
+            created.run_id,
+            wrapped_worker,
+            TerminalEvent(
+                sequence=1, status=RunStatus.FAILED, reason="provider_timeout"
+            ),
+        ),
+    )
+    for operation in operations:
+        try:
+            result = await operation()
+        except RunStoreValidationError as error:
+            assert str(error) == "invalid_run_data"
+            assert wrapped_worker not in repr(error)
+        else:
+            assert result is False
+    view = await store.read_owned(created.run_id, created.session_id)
+    assert view is not None
+    assert view.status is RunStatus.RUNNING
+    assert [event.sequence for event in view.events] == [1, 2]
+
+
+@pytest.mark.anyio
 async def test_owner_read_uses_one_repeatable_snapshot(
     clean_ledger: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

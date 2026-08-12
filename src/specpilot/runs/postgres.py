@@ -416,16 +416,22 @@ def _validated_lease_seconds(value: int) -> int:
 
 def _validated_identifier(value: str) -> str:
     try:
-        return _IDENTIFIER_ADAPTER.validate_python(value)
+        validated = _IDENTIFIER_ADAPTER.validate_python(value)
     except (TypeError, ValueError, ValidationError):
         raise RunStoreValidationError() from None
+    if validated != value:
+        raise RunStoreValidationError()
+    return validated
 
 
 def _validated_uuid(value: UUID) -> UUID:
     try:
-        return _UUID_ADAPTER.validate_python(value, strict=True)
+        validated = _UUID_ADAPTER.validate_python(value, strict=True)
     except (TypeError, ValueError, ValidationError):
         raise RunStoreValidationError() from None
+    if validated != value:
+        raise RunStoreValidationError()
+    return validated
 
 
 def _run_values(run: RunRecord) -> tuple[Any, ...]:
