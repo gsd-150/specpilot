@@ -11,7 +11,7 @@ or a real-provider run.
 
 The deployed deterministic fixture assembly crossed environment loading,
 FastAPI, the leased worker, its configured fixture provider, Streamable HTTP
-MCP, local retrieval, the real
+MCP, the E2E fixture's local deterministic search backend, the real
 PostgreSQL disclosure ledger, and the citation verifier. It reached
 `answered`, recorded exactly one successful `planning` reservation and one
 successful `evidence` reservation, and returned 17 typed trace events. The
@@ -19,9 +19,12 @@ trace contained neither the question nor the fixture excerpt.
 
 ## Fresh end-to-end evidence
 
-Only the dedicated `specpilot_w3_e2e_test` database and isolated Qdrant at
-`127.0.0.1:6334` were used. The database was dropped and recreated before the
-successful run so migrations 001 through 005 were applied in filename order.
+The E2E case consumed only the dedicated `specpilot_w3_e2e_test` PostgreSQL
+database and its local deterministic fixture search backend. The database was
+dropped and recreated before the successful run so migrations 001 through 005
+were applied in filename order. The isolated Qdrant service at
+`127.0.0.1:6334` was available and its URL was present in the pytest
+environment, but this one API E2E case did not call it.
 
 ```text
 SPECPILOT_TEST_DSN=postgresql://localhost:5432/specpilot_w3_e2e_test \
@@ -54,6 +57,9 @@ SPECPILOT_TEST_QDRANT_URL=http://127.0.0.1:6334 \
 
 The two skips are the repository's pre-existing unit dependency skips. No
 integration, database, Qdrant, API end-to-end, or fixture-smoke case skipped.
+Unlike the focused API E2E above, this complete invocation executed the real
+`tests/integration/qdrant` cases against the isolated service; those tests are
+the Qdrant consumption evidence for Part 2.
 
 Additional gates:
 
