@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RunStatus, RunView } from "./api";
@@ -252,6 +252,204 @@ describe("useRunPolling", () => {
     await act(async () => refreshPromise);
   });
 
+  it("manual refresh replaces a pending automatic timer and resumes the cadence", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("running")))
+      .mockResolvedValueOnce(response(view("running")))
+      .mockResolvedValue(response(view("running")));
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 20,
+      deadlineMs: 100,
+    }));
+    await flush();
+    await act(async () => vi.advanceTimersByTimeAsync(5));
+    await act(async () => hook.result.current.refresh());
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(19));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["success", () => Promise.resolve(response(view("running"))), "connected"],
+    ["error", () => Promise.resolve(new Response("hidden", { status: 503 })), "service_unavailable"],
+  ] as const)("resumes automatic polling after manual %s", async (_name, manual, expectedState) => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("running")))
+      .mockImplementationOnce(manual)
+      .mockResolvedValue(response(view("answered")));
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 10,
+      deadlineMs: 100,
+    }));
+    await flush();
+    await act(async () => hook.result.current.refresh());
+    expect(hook.result.current.connectionState).toBe(expectedState);
+    await act(async () => vi.advanceTimersByTimeAsync(10));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves automatic intent when its timer fires during a manual request", async () => {
+    const manual = deferred<Response>();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("running")))
+      .mockReturnValueOnce(manual.promise)
+      .mockResolvedValue(response(view("answered")));
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 10,
+      deadlineMs: 100,
+    }));
+    await flush();
+    let refreshPromise!: Promise<void>;
+    act(() => {
+      refreshPromise = hook.result.current.refresh();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(10));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    manual.resolve(response(view("running")));
+    await act(async () => refreshPromise);
+    await act(async () => vi.advanceTimersByTimeAsync(10));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not resume automatic polling after a manual terminal response", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("running")))
+      .mockResolvedValueOnce(response(view("refused")));
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 10,
+      deadlineMs: 100,
+    }));
+    await flush();
+    await act(async () => hook.result.current.refresh());
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a hanging manual refresh after a terminal response", async () => {
+    const hanging = deferred<Response>();
+    let manualSignal: AbortSignal | undefined;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("answered")))
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
+        manualSignal = init?.signal as AbortSignal;
+        return hanging.promise;
+      });
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 10,
+      deadlineMs: 25,
+    }));
+    await flush();
+    act(() => { void hook.result.current.refresh(); });
+    await act(async () => vi.advanceTimersByTimeAsync(25));
+    expect(manualSignal?.aborted).toBe(true);
+    expect(hook.result.current.serverRun?.status).toBe("answered");
+    expect(hook.result.current.connectionState).toBe("poll_timeout");
+  });
+
+  it("uses only the remaining activation deadline for a pre-deadline manual request", async () => {
+    const hanging = deferred<Response>();
+    let manualSignal: AbortSignal | undefined;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("running")))
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
+        manualSignal = init?.signal as AbortSignal;
+        return hanging.promise;
+      });
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 100,
+      deadlineMs: 25,
+    }));
+    await flush();
+    await act(async () => vi.advanceTimersByTimeAsync(20));
+    act(() => { void hook.result.current.refresh(); });
+    await act(async () => vi.advanceTimersByTimeAsync(5));
+    expect(manualSignal?.aborted).toBe(true);
+    expect(hook.result.current.connectionState).toBe("poll_timeout");
+  });
+
+  it("coalesces repeated refreshes to at most one queued manual request", async () => {
+    const first = deferred<Response>();
+    const queued = deferred<Response>();
+    const fetcher = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(queued.promise);
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 100,
+      deadlineMs: 1_000,
+    }));
+    await flush();
+    let p1!: Promise<void>;
+    let p2!: Promise<void>;
+    let p3!: Promise<void>;
+    act(() => {
+      p1 = hook.result.current.refresh();
+      p2 = hook.result.current.refresh();
+      p3 = hook.result.current.refresh();
+    });
+    expect(p1).toBe(p2);
+    expect(p2).toBe(p3);
+    first.resolve(response(view("running")));
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    queued.resolve(response(view("answered")));
+    await act(async () => p1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts a queued manual request on unmount without resuming automatic polling", async () => {
+    const first = deferred<Response>();
+    const queued = deferred<Response>();
+    let queuedSignal: AbortSignal | undefined;
+    const fetcher = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
+        queuedSignal = init?.signal as AbortSignal;
+        return queued.promise;
+      });
+    vi.stubGlobal("fetch", fetcher);
+    const hook = renderHook(() => useRunPolling({
+      runId: RUN_ID,
+      token: "credential",
+      intervalMs: 10,
+      deadlineMs: 1_000,
+    }));
+    await flush();
+    let refreshPromise!: Promise<void>;
+    act(() => { refreshPromise = hook.result.current.refresh(); });
+    first.resolve(response(view("running")));
+    await flush();
+    hook.unmount();
+    expect(queuedSignal?.aborted).toBe(true);
+    queued.resolve(response(view("running")));
+    await refreshPromise;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("aborts on unmount and ignores completion from the abandoned request", async () => {
     const pending = deferred<Response>();
     let signal: AbortSignal | undefined;
@@ -293,6 +491,26 @@ describe("useRunPolling", () => {
 
     expect(hook.result.current.serverRun?.run_id).toBe(OTHER_RUN_ID);
     expect(JSON.stringify(fetcher.mock.calls[1])).not.toContain("old-token");
+  });
+
+  it("synchronously hides the previous owner trace when identity changes", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(view("refused", RUN_ID)))
+      .mockReturnValueOnce(deferred<Response>().promise);
+    vi.stubGlobal("fetch", fetcher);
+    const snapshots: Array<{ identity: string; runId: string | null; state: string }> = [];
+    function Harness({ runId, token }: { runId: string; token: string }): null {
+      const result = useRunPolling({ runId, token, intervalMs: 10, deadlineMs: 1_000 });
+      snapshots.push({ identity: runId, runId: result.serverRun?.run_id ?? null, state: result.connectionState });
+      return null;
+    }
+    const hook = render(<Harness runId={RUN_ID} token="old-token" />);
+    await flush();
+    expect(snapshots.at(-1)?.runId).toBe(RUN_ID);
+
+    snapshots.length = 0;
+    hook.rerender(<Harness runId={OTHER_RUN_ID} token="new-token" />);
+    expect(snapshots[0]).toEqual({ identity: OTHER_RUN_ID, runId: null, state: "connecting" });
   });
 
   it.each([

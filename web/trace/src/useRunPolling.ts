@@ -48,8 +48,15 @@ export function useRunPolling({
   intervalMs,
   deadlineMs,
 }: RunPollingOptions): RunPollingResult {
-  const [serverRun, setServerRun] = useState<RunView | null>(null);
-  const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const activationKey = JSON.stringify([runId, token ?? null]);
+  const [serverState, setServerState] = useState<{
+    key: string;
+    run: RunView | null;
+  }>({ key: activationKey, run: null });
+  const [connection, setConnection] = useState<{
+    key: string;
+    state: ConnectionState;
+  }>({ key: activationKey, state: "connecting" });
   const refreshRef = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
@@ -61,39 +68,64 @@ export function useRunPolling({
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     let inFlight: Promise<void> | undefined;
+    let queuedManual: Promise<void> | undefined;
+    const deadlineAt = performance.now() + deadlineMs;
 
-    setServerRun(null);
-    setConnectionState("connecting");
+    setServerState({ key: activationKey, run: null });
+    setConnection({ key: activationKey, state: "connecting" });
 
     const clearPollTimer = (): void => {
       if (pollTimer !== undefined) clearTimeout(pollTimer);
       pollTimer = undefined;
     };
 
+    const scheduleAuto = (): void => {
+      clearPollTimer();
+      if (!active || expired || terminal || queuedManual !== undefined) return;
+      const remaining = deadlineAt - performance.now();
+      if (remaining <= 0) return;
+      pollTimer = setTimeout(() => {
+        pollTimer = undefined;
+        void execute(false);
+      }, Math.min(intervalMs, remaining));
+    };
+
     const execute = (manual: boolean): Promise<void> => {
       if (!active) return Promise.resolve();
       if (inFlight !== undefined) {
-        return manual
-          ? inFlight.then(() => active ? execute(true) : undefined)
-          : inFlight;
+        if (!manual) return inFlight;
+        if (queuedManual !== undefined) return queuedManual;
+        const predecessor = inFlight;
+        const queued = predecessor
+          .then(() => active ? execute(true) : undefined)
+          .finally(() => {
+            if (queuedManual === queued) queuedManual = undefined;
+            scheduleAuto();
+          });
+        queuedManual = queued;
+        return queued;
       }
 
+      if (manual) clearPollTimer();
       controller = new AbortController();
       const requestController = controller;
-      if (manual && expired) {
+      if (manual) {
+        const remaining = expired || terminal
+          ? deadlineMs
+          : Math.max(0, deadlineAt - performance.now());
         requestTimer = setTimeout(() => {
           requestController.abort();
-          if (active) setConnectionState("poll_timeout");
-        }, deadlineMs);
+          if (active) setConnection({ key: activationKey, state: "poll_timeout" });
+        }, remaining);
       }
 
       const request = getRun(runId, { token, signal: requestController.signal })
         .then((run) => {
           if (!active || requestController.signal.aborted) return;
-          setServerRun(run);
-          setConnectionState("connected");
-          terminal = TERMINAL.has(run.status as TerminalStatus);
-          if (terminal) {
+          setServerState({ key: activationKey, run });
+          setConnection({ key: activationKey, state: "connected" });
+          terminal = terminal || TERMINAL.has(run.status as TerminalStatus);
+          if (TERMINAL.has(run.status as TerminalStatus)) {
             clearPollTimer();
             if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
             deadlineTimer = undefined;
@@ -101,30 +133,28 @@ export function useRunPolling({
         })
         .catch((error: unknown) => {
           if (!active || requestController.signal.aborted) return;
-          setConnectionState(errorState(error));
+          setConnection({ key: activationKey, state: errorState(error) });
         })
         .finally(() => {
           if (requestTimer !== undefined) clearTimeout(requestTimer);
           requestTimer = undefined;
           if (controller === requestController) controller = undefined;
           if (inFlight === request) inFlight = undefined;
-          if (!manual && active && !expired && !terminal) {
-            pollTimer = setTimeout(() => {
-              pollTimer = undefined;
-              void execute(false);
-            }, intervalMs);
-          }
+          if (queuedManual === undefined) scheduleAuto();
         });
       inFlight = request;
       return request;
     };
 
-    refreshRef.current = () => execute(true);
+    refreshRef.current = () => {
+      clearPollTimer();
+      return execute(true);
+    };
     deadlineTimer = setTimeout(() => {
       expired = true;
       clearPollTimer();
       controller?.abort();
-      if (active && !terminal) setConnectionState("poll_timeout");
+      if (active && !terminal) setConnection({ key: activationKey, state: "poll_timeout" });
     }, deadlineMs);
     void execute(false);
 
@@ -136,8 +166,14 @@ export function useRunPolling({
       if (requestTimer !== undefined) clearTimeout(requestTimer);
       controller?.abort();
     };
-  }, [deadlineMs, intervalMs, runId, token]);
+  }, [activationKey, deadlineMs, intervalMs, runId, token]);
 
   const refresh = useCallback(() => refreshRef.current(), []);
-  return { serverRun, connectionState, refresh };
+  return {
+    serverRun: serverState.key === activationKey ? serverState.run : null,
+    connectionState: connection.key === activationKey
+      ? connection.state
+      : "connecting",
+    refresh,
+  };
 }
