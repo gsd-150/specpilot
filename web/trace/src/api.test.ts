@@ -150,6 +150,26 @@ describe("HTTP client", () => {
     vi.unstubAllEnvs();
   });
 
+  it("uses the repository virtualenv Python for the Playwright fixture server by default", async () => {
+    vi.stubEnv("SPECPILOT_PYTHON", undefined);
+    vi.resetModules();
+    const config = (await import("../playwright.config")).default;
+    expect(config.webServer).toMatchObject({
+      command: ".venv/bin/python -m uvicorn tests.browser.fixture_app:create_fixture_app --factory --host 127.0.0.1 --port 8765",
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it("uses SPECPILOT_PYTHON for the Playwright fixture server when provided", async () => {
+    vi.stubEnv("SPECPILOT_PYTHON", "python");
+    vi.resetModules();
+    const config = (await import("../playwright.config")).default;
+    expect(config.webServer).toMatchObject({
+      command: "python -m uvicorn tests.browser.fixture_app:create_fixture_app --factory --host 127.0.0.1 --port 8765",
+    });
+    vi.unstubAllEnvs();
+  });
+
   it("creates a run without placing credentials in the URL", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ run_id: UUID, status: "queued" }), { status: 202, headers: { "content-type": "application/json" } }));
     await createRun({ question: "question", request_id: UUID, evaluation_root_id: "root-1", task_level: "L1", source_manifest_id: HASH, corpus_manifest_id: HASH }, { token: "secret", fetcher });

@@ -264,19 +264,16 @@ async def _health(dsn: str) -> bool:
     return row == (1,)
 
 
-async def _qdrant_health() -> bool:
-    url = "http://127.0.0.1:6334/healthz"
-    async with httpx.AsyncClient(trust_env=False) as client:
-        return (await client.get(url)).status_code == 200
-
-
 async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
     clean_ledger: str,
     tmp_path: Path,
     qdrant_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert qdrant_url == "http://127.0.0.1:6334"
+    # The fixture keeps the complete integration gate explicit about Qdrant.
+    # This API path deliberately uses the deterministic local search backend;
+    # the Qdrant integration cases in the same suite consume the configured URL.
+    del qdrant_url
     async with _runtime(clean_ledger, tmp_path, monkeypatch) as (runtime, issuer):
         token = issuer.issue(
             session_id="e2e-owner", profile="fixture", ttl_seconds=300
