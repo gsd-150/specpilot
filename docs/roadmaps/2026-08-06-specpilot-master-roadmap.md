@@ -72,6 +72,21 @@
 >
 > 本块不改变任何 cap、契约或已记录的合规决定。
 
+## Current state — 2026-08-13
+
+The bounded W3 MCP/API/read-only trace slice is complete on
+`feat/w3-mcp-api-trace` and published as draft PR
+[#1](https://github.com/gsd-150/specpilot/pull/1). Both the PR-triggered and
+push-triggered GitHub Actions runs pass all seven jobs, including PostgreSQL and
+Qdrant integration, the local fake-provider browser flow, packaging, and Docker
+image builds. The slice is still pending review and integration into `main`.
+
+This status is deliberately narrower than declaring every later milestone
+complete: L2/Compliance, SSE/reconnect, checkpoint recovery, the complete W5
+demo matrix, locked evaluation, and the remaining annotation floors are still
+open. The 2026-08-07 section below remains a historical snapshot rather than
+the live delivery state.
+
 ## Current state — 2026-08-07
 
 W0 and R0 are complete on `feat/w0-foundation`. All ten W0 tasks are done except

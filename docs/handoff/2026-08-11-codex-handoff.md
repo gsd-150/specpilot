@@ -20,16 +20,17 @@ section a recommendation rather than a menu.
 | | |
 | --- | --- |
 | Feature branch | `feat/w3-mcp-api-trace` |
-| Feature HEAD | `cf610d8` "docs: close the W3 MCP API trace slice" |
-| Local main | `f8f0b1d`, before all 50 W3 feature commits |
-| Working tree | clean at the W3 handoff reconciliation commit |
+| Verified code HEAD | `6d5ad3f` "fix: remove local-only CI assumptions" |
+| Local main | `f8f0b1d`; W3 is not merged into the default branch |
+| Working tree | clean after the current handoff update |
 | Git remote | `origin` exists and local `main` tracks `origin/main` |
-| Feature publication | no upstream tracking branch; remote head and CI status not verified |
+| Feature publication | tracks `origin/feat/w3-mcp-api-trace`; draft PR [#1](https://github.com/gsd-150/specpilot/pull/1) is open |
+| CI | PR and push runs for `6d5ad3f` both passed all seven jobs, including integration, browser, and image builds |
 
-The feature branch is implemented and locally verified, but it is not merged
-into local `main`. A failed GitHub DNS lookup during the 2026-08-13 audit means
-this record does not claim whether a similarly named remote branch exists or
-whether CI has run.
+The feature branch is implemented, published, and verified locally and in
+GitHub Actions, but it is not merged into `main`. The remaining publication
+boundary is review, moving the draft PR to ready when appropriate, and merging
+it into the default branch.
 
 ### Test suite
 
@@ -38,15 +39,16 @@ Fresh local W3 checks on 2026-08-13:
 | command | result |
 | --- | --- |
 | `make check` | Ruff clean; strict mypy clean over 94 source files; 1,419 unit tests passed, 2 restricted-fixture tests skipped |
-| `npm test -- --run` | 104 passed |
+| `npm test -- --run` | 106 passed |
 | `npm run build` | TypeScript and Vite production build passed |
 
-PostgreSQL and Qdrant were not running during that audit, so those fresh checks
-do not prove the integration suite. The W3 release report records an earlier
-fresh-database and isolated-Qdrant run of 248 integration tests with zero skips,
-17 separately invoked Qdrant tests, five fixture-smoke tests, 104 frontend tests,
-and one Playwright browser closure. Treat those as dated release evidence, not
-as a substitute for rerunning the following full gate:
+The CI-portability repair was then verified against disposable PostgreSQL and
+Qdrant services: the complete integration suite passed 248 tests with zero
+skips, and the real Playwright fixture flow passed one browser case. GitHub's
+PR and push workflows independently passed the same seven-job matrix, including
+the database/Qdrant integration gate, browser flow, and API/MCP/ingestion image
+builds. The W3 release report retains the earlier release-gate evidence for
+provenance. For any later code change, rerun the following full local gate:
 
 ```bash
 createdb specpilot_scratch \
@@ -165,17 +167,12 @@ recovery, the full W5 fixture matrix, and locked W6 evaluation. See
 ## Open items, and what each one actually blocks
 
 1. **W3 is not integrated into `main`.** The implementation and reconciled
-   handoff are complete on `feat/w3-mcp-api-trace`, ahead of local `main`. The
-   feature branch has no configured upstream. Review, publish, run CI, and
-   integrate it before treating W3 as delivered from the repository's default
+   handoff are complete on the published `feat/w3-mcp-api-trace` branch. Draft
+   PR #1 is mergeable and its CI is green; review, mark it ready when
+   appropriate, and merge it before treating W3 as delivered from the default
    branch.
 
-2. **Docker image evidence is still open.** The release attempt stopped before
-   reading project code because the Docker daemon could not resolve Docker Hub.
-   Python packaging and installed-resource checks passed, but they are not an
-   image build.
-
-3. **No rule for requirements that span consecutive paragraphs.** The one known
+2. **No rule for requirements that span consecutive paragraphs.** The one known
    instance is *closed*: the §8.2.3 pooling completeness audit on 2026-08-09
    (run `603777f3…`) adjudicated all 20 L1 items, extended `l1-dev-010`'s gold
    with §15.4.5 ¶2, removed nothing, and left L1 `awaiting_adjudication` at 0.
@@ -185,19 +182,19 @@ recovery, the full W5 fixture matrix, and locked W6 evaluation. See
    caught if another completeness audit happens to run. This is a protocol gap,
    not a data defect.
 
-4. **`deep_review_coverage: 1.0` is not evidence a deep review happened**, and
+3. **`deep_review_coverage: 1.0` is not evidence a deep review happened**, and
    the live plan says so about its own design. Sampled items took a median of 24
    seconds against 22 for the rest — indistinguishable.
 
-5. **Deferred integrity check** (`2026-08-08-gold-provenance-v2.md`): source-aware
+4. **Deferred integrity check** (`2026-08-08-gold-provenance-v2.md`): source-aware
    entry verifies Gold IDs but does not verify that each supplied
    `gold_section_paths` value matches its Gold ID's actual section path.
 
-6. **Unanswerable floors unmet**: L1 locked 2/5, L2 dev 1/2. §8.1 requires these
+5. **Unanswerable floors unmet**: L1 locked 2/5, L2 dev 1/2. §8.1 requires these
    to be deliberately constructed, not harvested from failed scenario-first
    items.
 
-7. **Post-W3 product work remains.** SSE and reconnect semantics, L2/Compliance,
+6. **Post-W3 product work remains.** SSE and reconnect semantics, L2/Compliance,
    checkpoint recovery, the complete W5 demo matrix, and locked W6 evaluation
    are not part of the completed W3 slice.
 
@@ -207,23 +204,24 @@ recovery, the full W5 fixture matrix, and locked W6 evaluation. See
 
 Ordered by delivery risk and the September–October interview deadline.
 
-### 1. Publish and integrate the W3 branch
+### 1. Review and integrate PR #1
 
-Review `feat/w3-mcp-api-trace`, confirm ignored restricted material cannot enter
-the diff, push the branch, let CI execute its database/Qdrant/smoke/frontend
-matrix, then integrate it into `main`. Do not describe W3 as shipped from the
-default branch until this boundary is closed.
+The branch is published and both PR and push CI runs are green. Review the PR,
+move it out of draft when appropriate, and integrate it into `main`. Do not
+describe W3 as shipped from the default branch until this boundary is closed.
 
 `.gitignore` was checked on 2026-08-11 and already excludes everything that must
 not leave: `artifacts/restricted/` (the RFC sources and annotation records),
 `manifests/local/`, `data/` (weights and caches), and `tmp/`. Confirm with
 `git status --ignored --short` before publishing the feature branch.
 
-### 2. Close the environment evidence gap
+### 2. Preserve the verified environment boundary
 
-On a fresh PostgreSQL database and isolated Qdrant, rerun the complete suite,
-then build the API and MCP images where Docker Hub DNS works. Keep migrations
-003–005 explicit; do not point this verification at `specpilot_live`.
+The earlier local Docker Hub DNS failure remains useful environment history,
+but it is no longer a release blocker: disposable PostgreSQL/Qdrant verification
+passed and GitHub CI built the API, MCP, and ingestion images. Keep migrations
+003–005 explicit, continue using fresh services for release gates, and never
+point verification at `specpilot_live`.
 
 ### 3. The defence pass — before any new depth
 

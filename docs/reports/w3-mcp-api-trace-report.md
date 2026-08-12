@@ -59,7 +59,7 @@ new operating-system temporary virtual environment outside the checkout
 installed the wheel and its declared dependencies and loaded `create_app`, the
 MCP app factory, packaged policy, `/trace`, and both static assets successfully.
 
-## Packaging limitation
+## Packaging evidence
 
 The API Docker build was attempted twice after supplying ignored empty mount
 directories so Compose could resolve the service. Both attempts reached step 1
@@ -69,8 +69,15 @@ Docker daemon could not resolve `registry-1.docker.io`: its DNS query to
 `node:22.12-bookworm-slim` base. This is a local Docker DNS/environment failure,
 not a passing image-build result. CI now runs `npm ci`, frontend tests, and the
 frontend build before Python packaging, and the multi-stage Dockerfile copies
-only built assets and the wheel into the Python runtime image; a real CI image
-build is still required to close this environment-specific gap.
+only built assets and the wheel into the Python runtime image.
+
+After this release report was written, draft PR #1 closed the environment-
+specific evidence gap. Its PR-triggered and push-triggered GitHub Actions runs
+both built the API, MCP, and ingestion images successfully. The same portability
+repair made Compose artifact mounts runner-local, made Playwright honor
+`SPECPILOT_PYTHON`, and removed the API integration test's assumption that
+Qdrant must use host port 6334. Current Vitest verification passes 106 tests;
+the 104-test result above remains the original release-gate record.
 
 ## Operator boundary and remaining work
 
