@@ -270,6 +270,28 @@ describe("sanitized timeline", () => {
     expect(await screen.findByRole("list", { name: "Run trace" })).toHaveTextContent(faultCode);
   });
 
+  it("renders the local evidence call-budget code exactly", async () => {
+    const events = [{
+      kind: "tool_finished", sequence: 1, step_id: "provider-step",
+      tool: "search_clauses", argument_keys: ["query"], result_count: 0,
+      duration_ms: 0, retry_count: 0, error_code: "tool_call_budget_exceeded",
+    }] as unknown as RunEvent[];
+    const h = harness(view("running", null, events));
+    await submit(h);
+    expect(await screen.findByRole("list", { name: "Run trace" })).toHaveTextContent("tool_call_budget_exceeded");
+  });
+
+  it("does not render a lookalike local evidence call-budget code", async () => {
+    const events = [{
+      kind: "tool_finished", sequence: 1, step_id: "provider-step",
+      tool: "search_clauses", argument_keys: ["query"], result_count: 0,
+      duration_ms: 0, retry_count: 0, error_code: "tool_call_budget_exceeded_secret",
+    }] as unknown as RunEvent[];
+    const h = harness(view("running", null, events));
+    await submit(h);
+    expect((await screen.findByRole("list", { name: "Run trace" })).textContent).not.toContain("tool_call_budget_exceeded_secret");
+  });
+
   it.each([
     "reply_not_json_private",
     "not_disclosed_secret",

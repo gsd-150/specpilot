@@ -10,7 +10,7 @@ const STATUSES = new Set(["queued", "running", "answered", "refused", "egress_bl
 const STAGES = new Set(["planning", "evidence", "compliance", "verifier", "judge"]);
 const ARGUMENT_KEYS = new Set([
   "query", "corpus_manifest_id", "document_ids", "normative_levels", "limit",
-  "document_id", "clauses", "term",
+  "document_id", "clauses", "clause_id", "clause_ids", "term",
 ]);
 const ERROR_CODES = new Set([
   // answer/reply.py shape faults, chain.py fallback, and verify.py citation faults
@@ -21,7 +21,8 @@ const ERROR_CODES = new Set([
   "not_disclosed", "cross_manifest", "no_citation",
   // MCP contracts and local evidence validation
   "invalid_argument", "not_found", "invalid_reference", "tool_timeout",
-  "backend_unavailable", "invalid_tool_result_scope", "invalid_tool_result",
+  "backend_unavailable", "tool_call_budget_exceeded", "invalid_tool_result_scope",
+  "invalid_tool_result",
   "no_evidence_retrieved", "evidence_insufficient", "unverifiable_citation",
   "invalid_tool_plan", "provider_http_error", "provider_malformed_response",
   "provider_model_mismatch", "provider_model_not_found", "provider_rate_limited",
