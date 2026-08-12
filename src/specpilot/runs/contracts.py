@@ -56,7 +56,7 @@ TerminalReason = Annotated[
     ),
 ]
 Sequence = Annotated[int, Field(ge=1, le=10_000)]
-Count = Annotated[int, Field(ge=0, le=1_000_000)]
+Count = Annotated[int, Field(strict=True, ge=0, le=1_000_000)]
 DurationMs = Annotated[int, Field(ge=0, le=3_600_000)]
 CostMicrounits = Annotated[int, Field(strict=True, ge=0, le=1_000_000_000)]
 
@@ -176,8 +176,8 @@ class EgressSummaryEvent(_RunEventBase):
     stage: EgressStage
     reservation_id: UUID | None
     ledger_id: UUID | None
-    admitted: bool
-    replayed: bool
+    admitted: Annotated[bool, Field(strict=True)]
+    replayed: Annotated[bool, Field(strict=True)]
     request_tokens: Count | None
     request_bytes: Count | None
     # Null means the provider boundary supplied no authoritative price. It is
@@ -199,6 +199,7 @@ class EgressSummaryEvent(_RunEventBase):
             raise ValueError("a blocked egress summary requires a stable error code")
         if (
             self.reservation_id is not None
+            or self.ledger_id is not None
             or self.replayed
             or self.request_tokens is not None
             or self.request_bytes is not None

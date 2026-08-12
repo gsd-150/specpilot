@@ -240,6 +240,7 @@ def test_blocked_egress_requires_explicitly_unavailable_attempt_metadata() -> No
     base = blocked.model_dump(mode="json")
     for update in (
         {"reservation_id": "00000000-0000-0000-0000-000000000007"},
+        {"ledger_id": "00000000-0000-0000-0000-000000000008"},
         {"replayed": True},
         {"request_tokens": 0},
         {"request_bytes": 0},
@@ -251,6 +252,40 @@ def test_blocked_egress_requires_explicitly_unavailable_attempt_metadata() -> No
     del base["replayed"]
     with pytest.raises(ValidationError, match="replayed"):
         contracts.EgressSummaryEvent.model_validate(base)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("admitted", "true"),
+        ("admitted", 1),
+        ("replayed", "false"),
+        ("replayed", 0),
+        ("request_tokens", "10"),
+        ("request_tokens", True),
+        ("request_bytes", "100"),
+        ("request_bytes", False),
+    ],
+)
+def test_egress_primitives_are_strict_sql_parity(
+    field: str, invalid: object
+) -> None:
+    contracts = _contracts()
+    payload = contracts.EgressSummaryEvent(
+        sequence=7,
+        stage="planning",
+        reservation_id=uuid.UUID("00000000-0000-0000-0000-000000000007"),
+        ledger_id=None,
+        admitted=True,
+        replayed=False,
+        request_tokens=10,
+        request_bytes=100,
+        cost_microunits=None,
+        error_code=None,
+    ).model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match=field):
+        contracts.EgressSummaryEvent.model_validate({**payload, field: invalid})
 
 
 @pytest.mark.parametrize(

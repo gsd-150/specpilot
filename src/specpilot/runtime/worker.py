@@ -564,19 +564,13 @@ def _blocked_egress_event(stage: EgressStage, error_code: str) -> EgressSummaryE
 
 
 def _answer_egress_event(outcome: AnswerOutcome) -> EgressSummaryEvent | None:
-    if outcome.reservation_id is None or outcome.request_size is None:
+    if outcome.reservation_id is None:
         return None
-    return EgressSummaryEvent(
-        sequence=1,
-        stage=EgressStage.EVIDENCE,
-        reservation_id=UUID(outcome.reservation_id),
-        ledger_id=None,
-        admitted=True,
+    return _admitted_egress_event(
+        EgressStage.EVIDENCE,
+        reservation_id=outcome.reservation_id,
         replayed=outcome.replayed,
-        request_tokens=outcome.request_size.request_tokens,
-        request_bytes=outcome.request_size.request_bytes,
-        cost_microunits=None,
-        error_code=None,
+        request_size=outcome.request_size,
     )
 
 

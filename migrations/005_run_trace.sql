@@ -450,6 +450,7 @@ BEGIN
                     AND (
                         nullable_reason
                         OR jsonb_typeof(event_payload -> 'reservation_id') <> 'null'
+                        OR jsonb_typeof(event_payload -> 'ledger_id') <> 'null'
                         OR (event_payload ->> 'replayed')::boolean
                         OR jsonb_typeof(event_payload -> 'request_tokens') <> 'null'
                         OR jsonb_typeof(event_payload -> 'request_bytes') <> 'null'

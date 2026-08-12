@@ -163,14 +163,16 @@ class FakeAnswerer:
         return self.outcome
 
 
-def refused_outcome(*, provider_error: str | None = None) -> AnswerOutcome:
+def refused_outcome(
+    *, provider_error: str | None = None, replayed: bool = False
+) -> AnswerOutcome:
     return AnswerOutcome(
         verified=VerifiedAnswer(
             verdict=AnswerVerdict.REFUSED,
             refusal_reason=RefusalReason.EVIDENCE_INSUFFICIENT,
         ),
         reservation_id="00000000-0000-0000-0000-000000000001",
-        replayed=False,
+        replayed=replayed,
         request_size=None,
         provider_error=provider_error,
         parse_fault=None,
@@ -285,7 +287,7 @@ async def test_worker_claims_then_runs_each_stage_once_and_writes_typed_trace() 
     assert any(isinstance(event, AnswerOutcomeEvent) for event in store.events)
     assert (
         len([event for event in store.events if isinstance(event, EgressSummaryEvent)])
-        == 1
+        == 2
     )
     assert any(isinstance(event, VerifierSummaryEvent) for event in store.events)
     assert not any(isinstance(event, ToolFinishedEvent) for event in store.events)
@@ -342,11 +344,14 @@ async def test_claim_loser_makes_no_planner_or_provider_call() -> None:
 
 
 async def test_provider_error_wins_over_refused_answer_in_worker() -> None:
-    answerer = FakeAnswerer(refused_outcome(provider_error="provider_timeout"))
+    private = "answer-provider-failure-question-must-not-leak"
+    answerer = FakeAnswerer(
+        refused_outcome(provider_error="provider_timeout", replayed=True)
+    )
     made, store, _, _, _ = worker(answerer=answerer)
 
     await made.start()
-    await made.submit(job())
+    await made.submit(job(private))
     terminal = await wait_terminal(store)
     await made.aclose()
 
@@ -361,6 +366,21 @@ async def test_provider_error_wins_over_refused_answer_in_worker() -> None:
         and event.phase is AgentStepPhase.FINISHED
     ]
     assert [event.error_code for event in answer_finished] == ["provider_timeout"]
+    egress = [event for event in store.events if isinstance(event, EgressSummaryEvent)]
+    assert len(egress) == 2
+    answer_egress = egress[-1]
+    assert answer_egress.stage.value == "evidence"
+    assert answer_egress.reservation_id == UUID(
+        "00000000-0000-0000-0000-000000000001"
+    )
+    assert answer_egress.admitted is True
+    assert answer_egress.replayed is True
+    assert answer_egress.request_tokens is None
+    assert answer_egress.request_bytes is None
+    assert answer_egress.cost_microunits is None
+    assert answer_egress.error_code is None
+    assert store.events.index(answer_egress) < store.events.index(answer_finished[0])
+    assert all(private not in event.model_dump_json() for event in store.events)
 
 
 async def test_job_cannot_replace_worker_owned_answer_transport() -> None:
