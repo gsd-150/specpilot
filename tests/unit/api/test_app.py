@@ -40,6 +40,8 @@ class FakePermit:
 
     async def cancel(self) -> None:
         self.used = True
+        if self.worker.permit_cancel_error is not None:
+            raise self.worker.permit_cancel_error
 
 
 @dataclass
@@ -50,17 +52,32 @@ class FakeWorker:
     jobs: list[RunJob] = field(default_factory=list)
     starts: int = 0
     closes: int = 0
+    start_error: BaseException | None = None
+    close_error: BaseException | None = None
+    close_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    close_release: asyncio.Event | None = None
+    reserve_error: BaseException | None = None
+    permit_cancel_error: BaseException | None = None
 
     async def start(self) -> None:
         self.starts += 1
+        if self.start_error is not None:
+            raise self.start_error
 
     async def reserve(self) -> FakePermit:
+        if self.reserve_error is not None:
+            raise self.reserve_error
         if self.full:
             raise WorkerQueueFull("worker_queue_full")
         return FakePermit(self)
 
     async def aclose(self) -> None:
+        self.close_entered.set()
+        if self.close_release is not None:
+            await self.close_release.wait()
         self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 @dataclass
@@ -71,11 +88,17 @@ class FakeStore:
     delivery_failures: int = 0
     create_entered: asyncio.Event = field(default_factory=asyncio.Event)
     create_release: asyncio.Event | None = None
+    create_error: BaseException | None = None
+    read_error: BaseException | None = None
+    reconcile_error: BaseException | None = None
+    fail_delivery_error: BaseException | None = None
 
     async def create(self, run: RunRecord) -> RunRecord:
         self.create_entered.set()
         if self.create_release is not None:
             await self.create_release.wait()
+        if self.create_error is not None:
+            raise self.create_error
         self.creates += 1
         view = RunView(
             run_id=run.run_id, request_id=run.request_id, task_level="L1",
@@ -87,16 +110,53 @@ class FakeStore:
         return run
 
     async def read_owned(self, run_id: UUID, session_id: str) -> RunView | None:
+        if self.read_error is not None:
+            raise self.read_error
         stored = self.runs.get(run_id)
         return stored[1] if stored is not None and stored[0] == session_id else None
 
     async def reconcile_expired(self) -> int:
         self.reconciles += 1
+        if self.reconcile_error is not None:
+            raise self.reconcile_error
         return 0
 
     async def fail_delivery(self, run_id: UUID, event: object) -> bool:
         self.delivery_failures += 1
+        if self.fail_delivery_error is not None:
+            raise self.fail_delivery_error
         return True
+
+
+@dataclass
+class FakeHook:
+    start_error: BaseException | None = None
+    starts: int = 0
+    closes: int = 0
+
+    async def start(self) -> None:
+        self.starts += 1
+        if self.start_error is not None:
+            raise self.start_error
+
+    async def aclose(self) -> None:
+        self.closes += 1
+
+
+@dataclass
+class HostileIssuer:
+    marker: str
+
+    def issue(self, *, session_id: str, profile: str, ttl_seconds: int) -> str:
+        raise RuntimeError(self.marker)
+
+
+@dataclass
+class HostileVerifier:
+    marker: str
+
+    def verify(self, token: str) -> object:
+        raise RuntimeError(self.marker)
 
 
 def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
@@ -190,6 +250,50 @@ async def test_bearer_precedes_cookie_and_both_use_identical_verification() -> N
     assert bad_bearer.json() == {"detail": "invalid_session"}
 
 
+async def test_valid_bearer_precedes_a_different_valid_cookie_owner() -> None:
+    made = runtime()
+    app, client = await client_for(made)
+    issuer = made.demo_issuer
+    assert issuer is not None
+    bearer = issuer.issue(session_id="bearer-owner", profile="fixture", ttl_seconds=300)
+    cookie = issuer.issue(session_id="cookie-owner", profile="fixture", ttl_seconds=300)
+    client.cookies.set("specpilot_session", cookie)
+    async with app.router.lifespan_context(app), client:
+        created = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {bearer}"}, json=payload()
+        )
+    run_id = UUID(created.json()["run_id"])
+    assert made.store.runs[run_id][0] == "bearer-owner"
+
+
+async def test_expired_session_is_stable_and_does_not_fall_back_to_cookie() -> None:
+    secret = b"s" * 32
+    issuer = SessionIssuer(secret=secret, audience="specpilot-api", clock=lambda: NOW)
+    expired = issuer.issue(session_id="owner-a", profile="fixture", ttl_seconds=1)
+    made = runtime()
+    object.__setattr__(
+        made,
+        "verifier",
+        SessionVerifier(
+            secret=secret,
+            audience="specpilot-api",
+            profile="fixture",
+            clock=lambda: datetime(2026, 8, 12, 0, 0, 2, tzinfo=UTC),
+        ),
+    )
+    valid_cookie = issuer.issue(
+        session_id="cookie-owner", profile="fixture", ttl_seconds=300
+    )
+    app, client = await client_for(made)
+    client.cookies.set("specpilot_session", valid_cookie)
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {expired}"}, json=payload()
+        )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "expired_session"}
+
+
 async def test_backpressure_happens_before_creation_and_is_sanitized() -> None:
     made = runtime()
     made.worker.full = True
@@ -236,6 +340,8 @@ async def test_demo_route_is_fixture_loopback_only_and_sets_secure_cookie() -> N
         "HttpOnly" in cookie
         and "SameSite=strict" in cookie
         and "Max-Age=300" in cookie
+        and "Path=/" in cookie
+        and "Secure" in cookie
     )
     assert response.json() == {"status": "created"}
 
@@ -253,6 +359,123 @@ async def test_health_and_lifespan_are_closed_and_sanitized() -> None:
     assert response.json() == {"status": "ok", "postgres": "ok", "mcp": "ok"}
     assert made.store.reconciles == made.worker.starts == made.worker.closes == 1
     assert set(response.json()) == {"status", "postgres", "mcp"}
+
+
+async def test_health_probe_exception_is_degraded_and_marker_free() -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+
+    async def hostile() -> bool:
+        raise RuntimeError(marker)
+
+    object.__setattr__(made, "postgres_health", hostile)
+    app, client = await client_for(made)
+    async with app.router.lifespan_context(app), client:
+        response = await client.get("/health")
+    assert response.json() == {
+        "status": "degraded",
+        "postgres": "down",
+        "mcp": "ok",
+    }
+    assert marker not in response.text
+
+
+async def test_demo_issuer_exception_is_stable_and_marker_free() -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+    object.__setattr__(made, "demo_issuer", HostileIssuer(marker))
+    app, client = await client_for(made)
+    async with app.router.lifespan_context(app), client:
+        response = await client.post("/sessions/demo")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service_unavailable"}
+    assert marker not in response.text
+
+
+async def test_session_verifier_exception_is_stable_and_marker_free() -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+
+    object.__setattr__(made, "verifier", HostileVerifier(marker))
+    app, client = await client_for(made)
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": "Bearer opaque"}, json=payload()
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service_unavailable"}
+    assert marker not in response.text
+
+
+@pytest.mark.parametrize("boundary", ["create", "read", "build", "deliver"])
+async def test_generic_api_exception_is_stable_marker_free_and_terminalizes(
+    boundary: str,
+) -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+    if boundary == "create":
+        made.store.create_error = RuntimeError(marker)
+    elif boundary == "read":
+        made.store.read_error = RuntimeError(marker)
+    elif boundary == "build":
+        binding = made.binding
+
+        def hostile_build(run_id: UUID, question: str, request: object) -> RunJob:
+            raise RuntimeError(marker)
+
+        object.__setattr__(made, "binding", ApiRunBinding(
+            profile=binding.profile,
+            source_manifest_id=binding.source_manifest_id,
+            corpus_manifest_id=binding.corpus_manifest_id,
+            policy_hash=binding.policy_hash,
+            configuration_hash=binding.configuration_hash,
+            prompt_id=binding.prompt_id,
+            prompt_hash=binding.prompt_hash,
+            provider_id=binding.provider_id,
+            model_id=binding.model_id,
+            build_job=hostile_build,
+        ))
+    else:
+        made.worker.delivery_error = True
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        if boundary == "read":
+            response = await client.get(
+                f"/runs/{uuid4()}", headers={"Authorization": f"Bearer {token}"}
+            )
+        else:
+            response = await client.post(
+                "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+            )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service_unavailable"}
+    assert marker not in response.text
+    if boundary in {"build", "deliver"}:
+        assert made.store.delivery_failures == 1
+    else:
+        assert made.store.delivery_failures == 0
+
+
+async def test_permit_cancel_exception_is_stable_and_marker_free() -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+    made.worker.permit_cancel_error = RuntimeError(marker)
+    made.store.create_error = RuntimeError("sanitized-in-test")
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+        )
+    assert response.status_code == 503
+    assert marker not in response.text
 
 
 async def test_invalid_body_never_echoes_question_or_validation_input() -> None:
@@ -325,6 +548,94 @@ async def test_concurrent_lifespans_share_one_worker_lifecycle() -> None:
     assert made.worker.closes == 0
     await second.__aexit__(None, None, None)
     assert made.worker.closes == 1
+
+
+async def test_cancelled_last_shutdown_finishes_close_before_propagating() -> None:
+    made = runtime()
+    made.worker.close_release = asyncio.Event()
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    closing = asyncio.create_task(context.__aexit__(None, None, None))
+    await made.worker.close_entered.wait()
+    closing.cancel()
+    contender = app.router.lifespan_context(app)
+    entering = asyncio.create_task(contender.__aenter__())
+    await asyncio.sleep(0)
+    assert not entering.done()
+    made.worker.close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable"):
+        await entering
+    assert made.worker.closes == 1
+
+
+@pytest.mark.parametrize("boundary", ["reconcile", "start", "close"])
+async def test_lifespan_failures_are_stable_and_cleanup_owned_resources(
+    boundary: str,
+) -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+    if boundary == "reconcile":
+        made.store.reconcile_error = RuntimeError(marker)
+    elif boundary == "start":
+        made.worker.start_error = RuntimeError(marker)
+    else:
+        made.worker.close_error = RuntimeError(marker)
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    if boundary == "close":
+        await context.__aenter__()
+        operation = context.__aexit__(None, None, None)
+    else:
+        operation = context.__aenter__()
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable") as caught:
+        await operation
+    assert marker not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    if boundary == "start":
+        assert made.worker.closes == 1
+
+
+async def test_cancelled_start_cleans_worker_and_propagates() -> None:
+    made = runtime()
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def blocked_start() -> None:
+        made.worker.starts += 1
+        entered.set()
+        await release.wait()
+
+    made.worker.start = blocked_start  # type: ignore[method-assign]
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    starting = asyncio.create_task(context.__aenter__())
+    await entered.wait()
+    starting.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert made.worker.closes == 1
+
+
+async def test_lifespan_closes_started_hooks_on_partial_start() -> None:
+    marker = "private-question token provider model /private/path postgresql://dsn"
+    made = runtime()
+    started = FakeHook()
+    failed = FakeHook(start_error=RuntimeError(marker))
+    object.__setattr__(made, "lifecycle_hooks", (started, failed))
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable") as caught:
+        await context.__aenter__()
+    assert started.starts == started.closes == 1
+    assert failed.starts == 1
+    assert failed.closes == 0
+    assert made.worker.closes == 1
+    assert marker not in repr(caught.value)
 
 
 async def test_capacity_one_concurrent_posts_create_exactly_one_run() -> None:

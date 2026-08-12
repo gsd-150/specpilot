@@ -21,13 +21,21 @@ from specpilot.api.contracts import (
 )
 from specpilot.api.dependencies import ApiRuntime
 from specpilot.runs.contracts import RunRecord, RunStatus, TerminalEvent
-from specpilot.runs.postgres import RunStoreError
 from specpilot.runtime import WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionClaims, SessionTokenError
 
 _DELIVERY_FAILURE = "queue_delivery_failed"
 _DELIVERY_PLACEHOLDER = "queue-delivery"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_SERVICE_UNAVAILABLE = "service_unavailable"
+_LIFECYCLE_UNAVAILABLE = "api_lifecycle_unavailable"
+
+
+class ApiLifecycleUnavailable(RuntimeError):
+    """Stable lifecycle failure without dependency exception context."""
+
+    def __init__(self) -> None:
+        super().__init__(_LIFECYCLE_UNAVAILABLE)
 
 
 def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
@@ -36,14 +44,75 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
 
     lifespan_lock = asyncio.Lock()
     lifespan_users = 0
+    lifecycle_state = "new"
+    started_hooks = 0
+
+    async def close_worker() -> None:
+        nonlocal lifecycle_state, started_hooks
+
+        async def close_owned() -> None:
+            nonlocal started_hooks
+            first_error = False
+            while started_hooks:
+                hook = runtime.lifecycle_hooks[started_hooks - 1]
+                try:
+                    await hook.aclose()
+                except Exception:
+                    first_error = True
+                started_hooks -= 1
+            try:
+                await runtime.worker.aclose()
+            except Exception:
+                first_error = True
+            if first_error:
+                raise ApiLifecycleUnavailable() from None
+
+        close_task = asyncio.create_task(close_owned())
+        cancelled = False
+        close_failed = False
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            cancelled = True
+            try:
+                await close_task
+            except Exception:
+                close_failed = True
+        except Exception:
+            close_failed = True
+        lifecycle_state = "closed"
+        if cancelled:
+            raise asyncio.CancelledError
+        if close_failed:
+            raise ApiLifecycleUnavailable() from None
+
+    async def start_runtime() -> None:
+        nonlocal lifecycle_state, started_hooks
+        failed = False
+        try:
+            await runtime.store.reconcile_expired()
+            await runtime.worker.start()
+            for hook in runtime.lifecycle_hooks:
+                await hook.start()
+                started_hooks += 1
+        except asyncio.CancelledError:
+            await close_worker()
+            raise
+        except Exception:
+            failed = True
+        if failed:
+            await close_worker()
+            raise ApiLifecycleUnavailable() from None
+        lifecycle_state = "active"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        nonlocal lifespan_users
+        nonlocal lifecycle_state, lifespan_users
         async with lifespan_lock:
             if lifespan_users == 0:
-                await runtime.store.reconcile_expired()
-                await runtime.worker.start()
+                if lifecycle_state == "closed":
+                    raise ApiLifecycleUnavailable() from None
+                await start_runtime()
             lifespan_users += 1
         try:
             yield
@@ -51,7 +120,8 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             async with lifespan_lock:
                 lifespan_users -= 1
                 if lifespan_users == 0:
-                    await runtime.worker.aclose()
+                    lifecycle_state = "closing"
+                    await close_worker()
 
     app = FastAPI(title="SpecPilot", version="0.1.0", lifespan=lifespan)
 
@@ -69,7 +139,10 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         try:
             return runtime.verifier.verify(token)
         except SessionTokenError as error:
-            raise HTTPException(status_code=401, detail=str(error)) from None
+            code = str(error)
+        except Exception:
+            raise _service_unavailable() from None
+        raise HTTPException(status_code=401, detail=code) from None
 
     @app.post(
         "/chat", response_model=ChatAccepted, status_code=status.HTTP_202_ACCEPTED
@@ -81,9 +154,13 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         try:
             permit = await runtime.worker.reserve()
         except (WorkerQueueFull, WorkerUnavailable):
-            raise HTTPException(status_code=503, detail="service_unavailable") from None
+            raise _service_unavailable() from None
+        except Exception:
+            raise _service_unavailable() from None
         run_id = uuid4()
         created = False
+        delivered = False
+        service_failed = False
         try:
             run = _new_run(run_id, request, session, runtime)
             create_task = asyncio.create_task(runtime.store.create(run))
@@ -98,28 +175,26 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             created = True
             job = runtime.binding.build_job(run_id, request.question, request)
             await permit.deliver(job)
+            delivered = True
         except BaseException as error:
             if created:
-                with suppress(RunStoreError):
-                    await asyncio.shield(
-                        runtime.store.fail_delivery(
-                            run_id,
-                            TerminalEvent(
-                                sequence=1,
-                                status=RunStatus.INTERRUPTED,
-                                reason=_DELIVERY_FAILURE,
-                            ),
-                        )
-                    )
+                await _finish_failed_delivery(runtime, run_id)
             if isinstance(error, asyncio.CancelledError):
                 raise
-            if isinstance(error, (WorkerUnavailable, RunStoreError)):
-                raise HTTPException(
-                    status_code=503, detail="service_unavailable"
-                ) from None
-            raise
+            service_failed = True
         finally:
-            await permit.cancel()
+            if not delivered:
+                cancel_task = asyncio.create_task(permit.cancel())
+                try:
+                    await asyncio.shield(cancel_task)
+                except asyncio.CancelledError:
+                    with suppress(Exception):
+                        await cancel_task
+                    raise
+                except Exception:
+                    service_failed = True
+        if service_failed:
+            raise _service_unavailable()
         return ChatAccepted(run_id=run_id)
 
     @app.get("/runs/{run_id}")
@@ -129,8 +204,8 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     ) -> object:
         try:
             view = await runtime.store.read_owned(run_id, session.session_id)
-        except RunStoreError:
-            raise HTTPException(status_code=503, detail="service_unavailable") from None
+        except Exception:
+            raise _service_unavailable() from None
         if view is None:
             raise HTTPException(status_code=404, detail="run_not_found")
         return view
@@ -158,9 +233,12 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             status_code=status.HTTP_201_CREATED,
         )
         async def demo_session(response: Response) -> DemoSessionCreated:
-            token = demo_issuer.issue(
-                session_id=f"demo-{uuid4()}", profile="fixture", ttl_seconds=300
-            )
+            try:
+                token = demo_issuer.issue(
+                    session_id=f"demo-{uuid4()}", profile="fixture", ttl_seconds=300
+                )
+            except Exception:
+                raise _service_unavailable() from None
             response.set_cookie(
                 "specpilot_session",
                 token,
@@ -246,4 +324,29 @@ async def _probe(probe: Callable[[], Awaitable[bool]]) -> bool:
         return False
 
 
-__all__ = ["create_app"]
+async def _finish_failed_delivery(runtime: ApiRuntime, run_id: UUID) -> None:
+    task = asyncio.create_task(
+        runtime.store.fail_delivery(
+            run_id,
+            TerminalEvent(
+                sequence=1,
+                status=RunStatus.INTERRUPTED,
+                reason=_DELIVERY_FAILURE,
+            ),
+        )
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await task
+        raise
+    except Exception:
+        return
+
+
+def _service_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail=_SERVICE_UNAVAILABLE)
+
+
+__all__ = ["ApiLifecycleUnavailable", "create_app"]

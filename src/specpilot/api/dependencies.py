@@ -37,6 +37,12 @@ class ApiWorker(Protocol):
     async def aclose(self) -> None: ...
 
 
+class ApiLifecycleHook(Protocol):
+    async def start(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
 HealthProbe = Callable[[], Awaitable[bool]]
 JobFactory = Callable[[UUID, str, ChatRequest], RunJob]
 
@@ -65,6 +71,7 @@ class ApiRuntime:
     postgres_health: HealthProbe
     mcp_health: HealthProbe
     demo_issuer: SessionIssuer | None = None
+    lifecycle_hooks: tuple[ApiLifecycleHook, ...] = ()
 
 
 __all__ = ["ApiRunBinding", "ApiRuntime"]
