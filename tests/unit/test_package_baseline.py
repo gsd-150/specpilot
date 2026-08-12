@@ -11,4 +11,8 @@ def test_package_exposes_version() -> None:
 def test_health_exposes_no_runtime_details() -> None:
     response = TestClient(create_app()).get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "degraded",
+        "postgres": "down",
+        "mcp": "down",
+    }

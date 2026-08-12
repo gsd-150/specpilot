@@ -333,6 +333,17 @@ class PostgresRunStore:
         except psycopg.Error:
             raise RunStoreUnavailable() from None
 
+    async def fail_delivery(self, run_id: UUID, event: TerminalEvent) -> bool:
+        """Close one queued API delivery without exposing a generic lease owner."""
+        validated_run_id = _validated_uuid(run_id)
+        validated = _validated_terminal(event)
+        if (
+            validated.status is not RunStatus.INTERRUPTED
+            or validated.reason != "queue_delivery_failed"
+        ):
+            raise RunStoreValidationError()
+        return await self.complete(validated_run_id, _QUEUE_LEASE_OWNER, validated)
+
     async def reconcile_expired(self, now: datetime | None = None) -> int:
         effective_now = self._now() if now is None else _aware_utc(now)
         connection = await self._connect()

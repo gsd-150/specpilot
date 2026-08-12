@@ -28,6 +28,7 @@ from specpilot.runs.contracts import (
     VerifierSummaryEvent,
 )
 from specpilot.runtime.worker import (
+    DeliveryPermit,
     RunJob,
     RunWorker,
     WorkerQueueFull,
@@ -255,6 +256,59 @@ async def wait_terminal(store: FakeStore) -> TerminalEvent:
             return store.terminals[0]
         await asyncio.sleep(0.001)
     raise AssertionError("worker did not finish")
+
+
+async def test_reserve_atomically_occupies_the_only_queue_slot() -> None:
+    made, *_ = worker(queue_capacity=1)
+    await made.start()
+
+    permit = await made.reserve()
+    with pytest.raises(WorkerQueueFull, match="worker_queue_full"):
+        await made.reserve()
+
+    await permit.cancel()
+    replacement = await made.reserve()
+    await replacement.cancel()
+    await made.aclose()
+
+
+async def test_delivery_permit_is_one_shot_and_delivers_exactly_once() -> None:
+    made, store, planner, *_ = worker(queue_capacity=1)
+    submitted = job()
+    await made.start()
+    permit = await made.reserve()
+
+    await permit.deliver(submitted)
+    with pytest.raises(WorkerUnavailable, match="delivery_permit_used"):
+        await permit.deliver(submitted)
+    await wait_terminal(store)
+    await made.aclose()
+
+    assert planner.calls == 1
+
+
+async def test_cancelled_reserve_caller_does_not_leak_capacity() -> None:
+    made, *_ = worker(queue_capacity=1)
+    await made.start()
+    permit = await made.reserve()
+    cancel = asyncio.create_task(permit.cancel())
+    await cancel
+
+    replacement = await made.reserve()
+    await replacement.cancel()
+    await made.aclose()
+
+
+async def test_worker_close_invalidates_reserved_permit_without_leaking() -> None:
+    made, *_ = worker(queue_capacity=1)
+    await made.start()
+    permit = await made.reserve()
+    await made.aclose()
+
+    with pytest.raises(WorkerUnavailable, match="worker_closed"):
+        await permit.deliver(job())
+    await permit.cancel()
+    assert isinstance(permit, DeliveryPermit)
 
 
 async def test_worker_claims_then_runs_each_stage_once_and_writes_typed_trace() -> None:

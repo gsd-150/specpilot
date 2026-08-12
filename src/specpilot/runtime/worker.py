@@ -82,6 +82,28 @@ class WorkerQueueFull(WorkerError):
     pass
 
 
+class DeliveryPermit:
+    """One queue-capacity reservation that can deliver at most one job."""
+
+    __slots__ = ("_state", "_worker")
+
+    def __init__(self, worker: RunWorker) -> None:
+        self._worker = worker
+        self._state = "reserved"
+
+    async def deliver(self, job: RunJob) -> None:
+        if self._state != "reserved":
+            raise WorkerUnavailable("delivery_permit_used")
+        self._worker._deliver_permit(self, job)
+        self._state = "delivered"
+
+    async def cancel(self) -> None:
+        if self._state != "reserved":
+            return
+        self._state = "cancelled"
+        self._worker._release_permit(self)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RunJob:
     """Ephemeral work: the question exists here and nowhere durable."""
@@ -122,9 +144,11 @@ class RunWorker:
         self._lease_seconds = lease_seconds
         self._heartbeat_interval = heartbeat_interval_seconds
         self._queue_capacity = queue_capacity
-        self._send, self._receive = anyio.create_memory_object_stream[RunJob](
-            queue_capacity
-        )
+        self._send, self._receive = anyio.create_memory_object_stream[
+            tuple[DeliveryPermit, RunJob]
+        ](float("inf"))
+        self._capacity = anyio.CapacityLimiter(queue_capacity)
+        self._permits: set[DeliveryPermit] = set()
         self._supervisor_task: asyncio.Task[None] | None = None
         self._supervisor_ready = asyncio.Event()
         self._started = False
@@ -147,24 +171,49 @@ class RunWorker:
                     await supervisor
                 if self._supervisor_task is supervisor:
                     self._supervisor_task = None
-                self._send, self._receive = anyio.create_memory_object_stream[RunJob](
-                    self._queue_capacity
-                )
+                self._send, self._receive = anyio.create_memory_object_stream[
+                    tuple[DeliveryPermit, RunJob]
+                ](float("inf"))
                 self._supervisor_ready = asyncio.Event()
                 raise
             self._started = True
 
     async def submit(self, job: RunJob) -> None:
+        permit = await self.reserve()
+        try:
+            await permit.deliver(job)
+        except BaseException:
+            await permit.cancel()
+            raise
+
+    async def reserve(self) -> DeliveryPermit:
         if self._closed:
             raise WorkerUnavailable("worker_closed")
         if not self._started:
             raise WorkerUnavailable("worker_not_started")
+        permit = DeliveryPermit(self)
         try:
-            self._send.send_nowait(job)
+            self._capacity.acquire_on_behalf_of_nowait(permit)
         except anyio.WouldBlock:
             raise WorkerQueueFull("worker_queue_full") from None
+        self._permits.add(permit)
+        return permit
+
+    def _deliver_permit(self, permit: DeliveryPermit, job: RunJob) -> None:
+        if self._closed:
+            raise WorkerUnavailable("worker_closed")
+        if permit not in self._permits:
+            raise WorkerUnavailable("delivery_permit_used")
+        try:
+            self._send.send_nowait((permit, job))
         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
             raise WorkerUnavailable("worker_closed") from None
+
+    def _release_permit(self, permit: DeliveryPermit) -> None:
+        if permit not in self._permits:
+            return
+        self._permits.remove(permit)
+        self._capacity.release_on_behalf_of(permit)
 
     async def aclose(self) -> None:
         async with self._lifecycle_lock:
@@ -179,6 +228,8 @@ class RunWorker:
                     await supervisor
             self._supervisor_task = None
             self._started = False
+            for permit in tuple(self._permits):
+                self._release_permit(permit)
 
     async def _supervise(self) -> None:
         """Own the receive stream from entry through exit in one task."""
@@ -187,7 +238,10 @@ class RunWorker:
             await self._consume()
 
     async def _consume(self) -> None:
-        async for job in self._receive:
+        async for permit, job in self._receive:
+            # Capacity bounds waiting delivery, not the one job currently
+            # owned by the consumer. Release atomically on dequeue.
+            self._release_permit(permit)
             await self._run_safely(job)
 
     async def _run_safely(self, job: RunJob) -> None:
@@ -604,6 +658,7 @@ def _verifier_event(outcome: AnswerOutcome, *, started: float) -> VerifierSummar
 
 
 __all__ = [
+    "DeliveryPermit",
     "RunJob",
     "RunWorker",
     "WorkerError",

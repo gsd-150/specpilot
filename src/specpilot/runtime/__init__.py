@@ -1,6 +1,7 @@
 """In-process asynchronous run execution."""
 
 from specpilot.runtime.worker import (
+    DeliveryPermit,
     RunJob,
     RunWorker,
     WorkerError,
@@ -9,6 +10,7 @@ from specpilot.runtime.worker import (
 )
 
 __all__ = [
+    "DeliveryPermit",
     "RunJob",
     "RunWorker",
     "WorkerError",
