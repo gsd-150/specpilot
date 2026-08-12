@@ -8,5 +8,9 @@ export default defineConfig({
     cwd: "../..",
     url: "http://127.0.0.1:8765/health",
     reuseExistingServer: false,
+    env: {
+      SPECPILOT_API_PROFILE: "fixture",
+      SPECPILOT_API_BIND_HOST: "127.0.0.1",
+    },
   },
 });

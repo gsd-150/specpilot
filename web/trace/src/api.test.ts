@@ -4,6 +4,7 @@ import { createRun, decodeRun, getRun } from "./api";
 
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
 const HASH = "a".repeat(64);
+const NIL_UUID = "00000000-0000-0000-0000-000000000001";
 
 function run(events: unknown[] = []): Record<string, unknown> {
   return {
@@ -77,6 +78,26 @@ describe("decodeRun", () => {
     const decoded = decodeRun({ ...run(events), status: "answered", completed_at: "2026-08-12T00:00:02Z" });
     expect(decoded.events.map((event) => event.kind)).toHaveLength(11);
   });
+
+  it("accepts the canonical UUID forms emitted by Python", () => {
+    const decoded = decodeRun({ ...run(), run_id: NIL_UUID, request_id: NIL_UUID });
+    expect(decoded.run_id).toBe(NIL_UUID);
+  });
+
+  it.each([
+    ["non-RFC3339 timestamp", { created_at: "August 12, 2026" }],
+    ["timezone-free timestamp", { created_at: "2026-08-12T00:00:00" }],
+    ["start before creation", { started_at: "2026-08-11T23:59:59Z" }],
+    ["completion before start", { completed_at: "2026-08-12T00:00:00Z" }],
+    ["queued with a start", { status: "queued", started_at: "2026-08-12T00:00:01Z" }],
+    ["running without a start", { started_at: null }],
+    ["running with a reason", { reason: "provider_timeout" }],
+    ["answered with a reason", { status: "answered", reason: "provider_timeout", completed_at: "2026-08-12T00:00:02Z" }],
+    ["refused with provider reason", { status: "refused", reason: "provider_timeout", completed_at: "2026-08-12T00:00:02Z" }],
+    ["interrupted with completion", { status: "interrupted", reason: "lease_expired", completed_at: "2026-08-12T00:00:02Z" }],
+  ])("rejects RunView invariant: %s", (_name, mutation) => {
+    expect(() => decodeRun({ ...run(), ...mutation })).toThrow();
+  });
 });
 
 describe("HTTP client", () => {
@@ -91,6 +112,25 @@ describe("HTTP client", () => {
     const fetcher = vi.fn();
     await expect(getRun("../runs?token=secret", { fetcher })).rejects.toThrow("invalid run id");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("accepts a canonical nil-version UUID path without normalization", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...run(), run_id: NIL_UUID }), { status: 200, headers: { "content-type": "application/json" } }));
+    await getRun(NIL_UUID, { fetcher });
+    expect(fetcher).toHaveBeenCalledWith(`/runs/${NIL_UUID}`, expect.anything());
+  });
+
+  it("rejects uppercase UUID path input rather than transforming it", async () => {
+    await expect(getRun(UUID.toUpperCase(), { fetcher: vi.fn() })).rejects.toThrow("invalid run id");
+  });
+
+  it("forces the Playwright fixture server profile despite a real parent environment", async () => {
+    vi.stubEnv("SPECPILOT_API_PROFILE", "real");
+    const config = (await import("../playwright.config")).default;
+    expect(config.webServer).toMatchObject({
+      env: { SPECPILOT_API_PROFILE: "fixture", SPECPILOT_API_BIND_HOST: "127.0.0.1" },
+    });
+    vi.unstubAllEnvs();
   });
 
   it("creates a run without placing credentials in the URL", async () => {

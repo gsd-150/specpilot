@@ -43,7 +43,9 @@ export interface ChatAccepted { run_id: string; status: "queued" }
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export interface ClientOptions { token?: string; fetcher?: Fetcher }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Python emits UUID JSON in canonical lowercase form and accepts every UUID
+// version/variant, including values whose version nibble is zero.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const IDENT_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const REASON_RE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -51,6 +53,10 @@ const ARGUMENT_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const STATUSES = ["queued", "running", "answered", "refused", "egress_blocked", "failed", "interrupted"] as const;
 const TERMINAL = ["answered", "refused", "egress_blocked", "failed", "interrupted"] as const;
 const STAGES = ["planning", "evidence", "compliance", "verifier", "judge"] as const;
+const REFUSAL_REASONS = ["no_evidence_retrieved", "evidence_insufficient", "unverifiable_citation", "invalid_tool_plan"] as const;
+const FAILURE_REASONS = ["provider_http_error", "provider_malformed_response", "provider_model_mismatch", "provider_model_not_found", "provider_rate_limited", "provider_timeout", "provider_unauthorized", "provider_unavailable", "provider_unreachable", "provider_cancelled", "provider_unclassified_error", "no_adapter_for_route", "transport_replay_refused", "queue_delivery_failed"] as const;
+const EGRESS_REASONS = ["authorization_clock_invalid", "claim_count_exceeded", "claim_payload_mismatch", "claim_unique_excerpts_exceeded", "claim_unique_tokens_exceeded", "claim_unique_bytes_exceeded", "corpus_document_cap_missing", "corpus_document_unique_excerpts_exceeded", "corpus_document_unique_tokens_exceeded", "corpus_document_unique_bytes_exceeded", "corpus_manifest_mismatch", "corpus_usage_mismatch", "corpus_unique_excerpts_exceeded", "corpus_unique_tokens_exceeded", "corpus_unique_bytes_exceeded", "disclosure_fact_mismatch", "document_id_mismatch", "document_version_mismatch", "evaluation_root_mismatch", "excerpt_bytes_exceeded", "excerpt_tokens_exceeded", "judge_unique_excerpts_exceeded", "judge_unique_tokens_exceeded", "judge_unique_bytes_exceeded", "judge_transmitted_tokens_exceeded", "judge_transmitted_bytes_exceeded", "online_unique_excerpts_exceeded", "online_unique_tokens_exceeded", "online_unique_bytes_exceeded", "online_transmitted_tokens_exceeded", "online_transmitted_bytes_exceeded", "payload_version_mismatch", "policy_snapshot_mismatch", "projected_text_tokens_exceeded", "reservation_accounting_mismatch", "reservation_primitive_invalid", "root_unique_excerpts_exceeded", "root_unique_tokens_exceeded", "root_unique_bytes_exceeded", "root_transmitted_tokens_exceeded", "root_transmitted_bytes_exceeded", "route_unauthorized", "source_manifest_mismatch", "source_manifest_unresolvable", "source_manifest_untrusted", "stage_payload_mismatch", "stage_route_mismatch", "task_level_mismatch", "toc_call_exceeded", "toc_run_exceeded", "token_accounting_unavailable", "token_counter_incompatible"] as const;
+const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid trace object");
@@ -88,7 +94,7 @@ function hash(value: unknown, label: string): string { return string(value, labe
 function identifier(value: unknown, label: string): string { return string(value, label, IDENT_RE); }
 function reason(value: unknown, label: string): string | null { return nullableString(value, label, REASON_RE, 64); }
 function timestamp(value: unknown, label: string): string {
-  if (typeof value !== "string" || !/(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error(`invalid ${label}`);
+  if (typeof value !== "string" || !RFC3339_RE.test(value) || !Number.isFinite(Date.parse(value))) throw new Error(`invalid ${label}`);
   return value;
 }
 function nullableTimestamp(value: unknown, label: string): string | null { return value === null ? null : timestamp(value, label); }
@@ -120,7 +126,23 @@ export function decodeRun(value: unknown): RunView {
   const taskLevel = enumeration(r.task_level, ["L1"] as const, "task level");
   const events = list(r.events, "events", 10_000).map(decodeEvent);
   if (events.some((event, index) => index > 0 && event.sequence <= events[index - 1]!.sequence)) throw new Error("invalid event order");
-  return { run_id: uuid(r.run_id, "run id"), request_id: uuid(r.request_id, "request id"), task_level: taskLevel, profile: identifier(r.profile, "profile"), corpus_manifest_id: hash(r.corpus_manifest_id, "corpus manifest id"), status: enumeration(r.status, STATUSES, "status"), reason: reason(r.reason, "reason"), created_at: timestamp(r.created_at, "created at"), started_at: nullableTimestamp(r.started_at, "started at"), completed_at: nullableTimestamp(r.completed_at, "completed at"), events };
+  const view: RunView = { run_id: uuid(r.run_id, "run id"), request_id: uuid(r.request_id, "request id"), task_level: taskLevel, profile: identifier(r.profile, "profile"), corpus_manifest_id: hash(r.corpus_manifest_id, "corpus manifest id"), status: enumeration(r.status, STATUSES, "status"), reason: reason(r.reason, "reason"), created_at: timestamp(r.created_at, "created at"), started_at: nullableTimestamp(r.started_at, "started at"), completed_at: nullableTimestamp(r.completed_at, "completed at"), events };
+  const nonterminal = view.status === "queued" || view.status === "running";
+  if (nonterminal && view.reason !== null) throw new Error("invalid nonterminal reason");
+  if (view.status === "queued" && view.started_at !== null) throw new Error("invalid queued start");
+  if (view.status === "running" && view.started_at === null) throw new Error("invalid running start");
+  if (nonterminal && view.completed_at !== null) throw new Error("invalid nonterminal completion");
+  if (view.status === "answered" && (view.reason !== null || view.completed_at === null)) throw new Error("invalid answered view");
+  if (view.status === "refused" && (view.reason === null || !REFUSAL_REASONS.includes(view.reason as typeof REFUSAL_REASONS[number]) || view.completed_at === null)) throw new Error("invalid refused view");
+  if (view.status === "failed" && (view.reason === null || !FAILURE_REASONS.includes(view.reason as typeof FAILURE_REASONS[number]) || view.completed_at === null)) throw new Error("invalid failed view");
+  if (view.status === "egress_blocked" && (view.reason === null || !EGRESS_REASONS.includes(view.reason as typeof EGRESS_REASONS[number]) || view.completed_at === null)) throw new Error("invalid egress-blocked view");
+  if (view.status === "interrupted" && (view.reason !== "lease_expired" || view.completed_at !== null)) throw new Error("invalid interrupted view");
+  const created = Date.parse(view.created_at);
+  const started = view.started_at === null ? null : Date.parse(view.started_at);
+  const completed = view.completed_at === null ? null : Date.parse(view.completed_at);
+  if (started !== null && started < created) throw new Error("invalid start chronology");
+  if (completed !== null && completed < (started ?? created)) throw new Error("invalid completion chronology");
+  return view;
 }
 
 function init(token: string | undefined, method = "GET", body?: unknown): RequestInit {
