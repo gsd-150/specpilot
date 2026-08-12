@@ -10,9 +10,8 @@
 # the base service's `profiles` list. The invariant is now textual and easy to
 # check: no `ports:` key appears anywhere below.
 #
-# W3 status: MCP serves the five local tools only when explicit frozen-artifact
-# inputs validate; otherwise its health endpoint stays unavailable. The API is
-# still a health skeleton until the later W3 slice owns browser-facing runs.
+# W3 status: MCP and API load only explicit deployment bindings. Missing or
+# invalid inputs leave a sanitized unavailable health surface.
 
 name: specpilot
 
@@ -91,6 +90,21 @@ services:
       dockerfile: docker/api.Dockerfile
     profiles: ["demo", "real"]
     networks: [internal]
+    environment:
+      SPECPILOT_API_PROFILE: ${SPECPILOT_API_PROFILE}
+      SPECPILOT_API_DSN: ${SPECPILOT_API_DSN}
+      SPECPILOT_API_MCP_URL: ${SPECPILOT_API_MCP_URL}
+      SPECPILOT_API_SESSION_SECRET: ${SPECPILOT_API_SESSION_SECRET}
+      SPECPILOT_API_SESSION_AUDIENCE: ${SPECPILOT_API_SESSION_AUDIENCE}
+      SPECPILOT_API_BIND_HOST: ${SPECPILOT_API_BIND_HOST}
+      SPECPILOT_API_CONFIGURATION_HASH: ${SPECPILOT_API_CONFIGURATION_HASH}
+      SPECPILOT_API_PROMPT_ID: ${SPECPILOT_API_PROMPT_ID}
+      SPECPILOT_API_PROMPT_HASH: ${SPECPILOT_API_PROMPT_HASH}
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR}
+      SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR}
+      SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON}
+      SPECPILOT_MAIN_API_KEY: ${SPECPILOT_MAIN_API_KEY}
     depends_on:
       mcp:
         condition: service_healthy

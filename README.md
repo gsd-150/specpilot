@@ -43,6 +43,21 @@ psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 \
 The packaged policy change still requires the explicit successor/rebind flow
 below. Neither migration nor policy rebinding is automatic.
 
+Migration 005 adds owner-bound asynchronous run metadata and its sanitized,
+typed event stream. It never stores the question or corpus excerpts. Apply it
+from the same checked-out repository only after migration 004:
+
+```bash
+psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 \
+  -f migrations/005_run_trace.sql
+```
+
+Neither the API image nor the wheel applies migrations, and
+`specpilot_live` is never migrated or rebound automatically. An operator must
+apply migrations 003--005 and complete the explicit policy successor/rebind
+below before enabling the new `planning` stage against an existing corpus
+ledger.
+
 ## Rebinding a corpus ledger to a successor policy
 
 Migration 003 is a separate, versioned operations artifact from the repository
@@ -95,6 +110,13 @@ docker compose -f compose.yaml -f compose.demo.yaml --profile demo up --wait
 ```
 
 `--profile real` publishes nothing at all.
+
+The API runtime has no deployment defaults. Compose passes only the named
+`SPECPILOT_API_*`, frozen-manifest `SPECPILOT_MCP_*`, and real-profile provider
+credential variables from the operator environment; invalid or missing values
+produce only a sanitized unavailable health response. The fixture profile must
+bind to loopback. The real profile may bind inside the container but remains
+unpublished by the base Compose file.
 
 On colima the published port binds to the VM's loopback, not the Mac's, so check
 it from inside the VM: `colima ssh -- curl http://127.0.0.1:8000/health`. On

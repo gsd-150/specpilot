@@ -76,3 +76,31 @@ def test_mcp_service_declares_only_exact_internal_transport_identities() -> None
         "'[\"http://127.0.0.1:8080\",\"http://mcp:8080\"]'"
     ) in block
     assert ":*" not in block
+
+
+def test_api_service_passes_only_approved_environment_names_without_defaults() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    block = text[text.index("  api:") : text.index("\n\n  fixture-init:")]
+    expected = {
+        "SPECPILOT_API_PROFILE",
+        "SPECPILOT_API_DSN",
+        "SPECPILOT_API_MCP_URL",
+        "SPECPILOT_API_SESSION_SECRET",
+        "SPECPILOT_API_SESSION_AUDIENCE",
+        "SPECPILOT_API_BIND_HOST",
+        "SPECPILOT_API_CONFIGURATION_HASH",
+        "SPECPILOT_API_PROMPT_ID",
+        "SPECPILOT_API_PROMPT_HASH",
+        "SPECPILOT_MCP_CORPUS_MANIFEST_DIR",
+        "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
+        "SPECPILOT_MCP_SOURCE_MANIFEST_DIR",
+        "SPECPILOT_MCP_SOURCES_JSON",
+        "SPECPILOT_MAIN_API_KEY",
+    }
+    declarations = dict(
+        re.findall(r"^\s{6}(SPECPILOT_[A-Z0-9_]+):\s+\$\{([^}]+)\}$", block, re.M)
+    )
+
+    assert set(declarations) == expected
+    assert declarations == {name: name for name in expected}
+    assert ":-" not in block
