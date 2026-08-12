@@ -391,7 +391,10 @@ def test_raw_sql_rejects_each_prohibited_key_inside_each_nested_container(
         ("plan_summary", "step_count", 0),
         ("plan_summary", "step_count", "not-an-integer"),
         ("agent_step", "agent", "unknown"),
+        ("agent_step", "agent", None),
+        ("agent_step", "phase", None),
         ("tool_finished", "tool", "write_clause"),
+        ("tool_finished", "tool", None),
         ("tool_finished", "error_code", "x" * 65),
         ("candidate_summary", "candidates", "not-an-array"),
         ("candidate_summary", "candidates", ["not-an-object"]),
@@ -473,6 +476,43 @@ def test_raw_sql_accepts_uuid_text_that_pydantic_accepts(clean_ledger: str) -> N
             sequence=7,
             payload=payload,
         )
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "invalid"),
+    [
+        ("state_transition", "previous_status", 7),
+        ("state_transition", "reason", 7),
+        ("agent_step", "error_code", 7),
+        ("tool_finished", "error_code", 7),
+        ("egress_summary", "error_code", 7),
+        ("answer_outcome", "refusal_reason", 7),
+        ("answer_outcome", "provider_error", 7),
+        ("answer_outcome", "parse_fault_code", 7),
+        ("terminal", "reason", 7),
+    ],
+)
+def test_raw_sql_optional_strings_reject_wrong_types_when_present(
+    clean_ledger: str,
+    kind: str,
+    field: str,
+    invalid: object,
+) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()[kind]
+    payload[field] = invalid
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind=kind,
+                sequence=int(payload["sequence"]),
+                payload=payload,
+            )
 
 
 def test_run_state_timestamp_and_lease_constraints_fail_closed(

@@ -111,6 +111,51 @@ def test_run_event_kind_allowlist_is_exact() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("model_name", "payload", "field"),
+    [
+        (
+            "AgentStepEvent",
+            {
+                "kind": "agent_step",
+                "sequence": 1,
+                "agent": None,
+                "step_id": "step-1",
+                "phase": "started",
+                "duration_ms": None,
+                "error_code": None,
+            },
+            "agent",
+        ),
+        (
+            "AgentStepEvent",
+            {
+                "kind": "agent_step",
+                "sequence": 1,
+                "agent": "orchestrator",
+                "step_id": "step-1",
+                "phase": None,
+                "duration_ms": None,
+                "error_code": None,
+            },
+            "phase",
+        ),
+        (
+            "ToolFinishedEvent",
+            _tool_event(tool=None),
+            "tool",
+        ),
+    ],
+)
+def test_required_enum_null_rejection_matches_sql_boundary(
+    model_name: str, payload: dict[str, object], field: str
+) -> None:
+    contracts = _contracts()
+
+    with pytest.raises(ValidationError, match=field):
+        getattr(contracts, model_name).model_validate(payload)
+
+
 def test_trace_counts_durations_retries_and_sequences_are_bounded() -> None:
     contracts = _contracts()
 

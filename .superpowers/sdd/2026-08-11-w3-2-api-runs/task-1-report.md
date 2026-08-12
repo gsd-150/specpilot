@@ -215,3 +215,46 @@ fields.  Four of 90 cases initially passed because SQL `NOT IN` propagated
 NULL and PostgreSQL CHECK accepts NULL.  Explicit JSON string-type guards were
 added for status, stage, and verdict before enum comparison; the fresh 90-case
 GREEN above includes those regressions.
+
+## Review fix round 2
+
+A final narrow audit found the same PostgreSQL three-valued-logic gap on three
+remaining required enum fields: `agent_step.agent`, `agent_step.phase`, and
+`tool_finished.tool`.  Pydantic rejected JSON null, while the raw SQL CHECK
+returned NULL from `NOT IN` and therefore admitted the row.
+
+### RED
+
+The focused parity command reported:
+
+```text
+3 failed, 36 passed in 2.56s
+```
+
+The only failures were the three requested raw INSERT cases.  The companion
+Pydantic cases passed, proving the database boundary was the mismatch.
+
+### Fix and audit
+
+- Added explicit `jsonb_typeof(...) = 'string'` guards before the remaining
+  agent, phase, and tool membership checks.
+- Audited all status, stage, verdict, tool, agent, and phase membership checks;
+  every required enum now proves string type before membership comparison.
+- Added raw wrong-type tests for every optional string field when present.
+  Existing helper validators already check JSON string type before length,
+  pattern, hash, UUID, or reason validation, so JSON null/wrong types return
+  ordinary CHECK failures without casts or function exceptions.
+
+### GREEN
+
+After rebuilding only the exact dedicated database:
+
+```text
+105 passed in 4.24s
+```
+
+Standard verification:
+
+```text
+make check  # Ruff passed; mypy passed for 84 files; 1172 passed, 2 skips
+```

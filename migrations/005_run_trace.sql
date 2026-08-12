@@ -314,10 +314,12 @@ BEGIN
                     'kind', 'sequence', 'agent', 'step_id', 'phase',
                     'duration_ms', 'error_code'
                 ])
+                OR jsonb_typeof(event_payload -> 'agent') <> 'string'
                 OR event_payload ->> 'agent' NOT IN (
                     'orchestrator', 'evidence_agent', 'answer', 'verifier'
                 )
                 OR NOT specpilot_trace_identifier(event_payload -> 'step_id', 128)
+                OR jsonb_typeof(event_payload -> 'phase') <> 'string'
                 OR event_payload ->> 'phase' NOT IN ('started', 'finished')
                 OR NOT (
                     jsonb_typeof(event_payload -> 'duration_ms') = 'null'
@@ -343,6 +345,7 @@ BEGIN
                     'result_count', 'duration_ms', 'retry_count', 'error_code'
                 ])
                 OR NOT specpilot_trace_identifier(event_payload -> 'step_id', 128)
+                OR jsonb_typeof(event_payload -> 'tool') <> 'string'
                 OR event_payload ->> 'tool' NOT IN (
                     'search_clauses', 'get_clause', 'get_toc',
                     'expand_references', 'lookup_term'
