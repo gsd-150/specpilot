@@ -97,6 +97,7 @@ class FakeStore:
     read_error: BaseException | None = None
     reconcile_error: BaseException | None = None
     fail_delivery_error: BaseException | None = None
+    fail_delivery_attempts: int = 0
 
     async def create(self, run: RunRecord) -> RunRecord:
         self.create_entered.set()
@@ -127,6 +128,7 @@ class FakeStore:
         return 0
 
     async def fail_delivery(self, run_id: UUID, event: object) -> bool:
+        self.fail_delivery_attempts += 1
         self.delivery_failures += 1
         if self.fail_delivery_error is not None:
             raise self.fail_delivery_error
@@ -543,6 +545,48 @@ async def test_non_exception_base_error_cleans_then_propagates_original(
     assert made.worker.jobs == []
 
 
+@pytest.mark.parametrize("original", [KeyboardInterrupt(), SystemExit(29)])
+async def test_original_control_flow_wins_over_both_cleanup_failures(
+    original: BaseException,
+) -> None:
+    made = runtime()
+    made.worker.delivery_base_error = original
+    made.store.fail_delivery_error = SystemExit(31)
+    made.worker.permit_cancel_error = KeyboardInterrupt()
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        with pytest.raises(type(original)) as caught:
+            await client.post(
+                "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+            )
+    assert caught.value is original
+    assert made.store.fail_delivery_attempts == 1
+    assert made.worker.permit_cancels == 1
+
+
+async def test_ordinary_failure_stays_503_when_both_cleanups_fail() -> None:
+    made = runtime()
+    made.worker.delivery_base_error = RuntimeError("primary-private")
+    made.store.fail_delivery_error = SystemExit(37)
+    made.worker.permit_cancel_error = KeyboardInterrupt()
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service_unavailable"}
+    assert made.store.fail_delivery_attempts == made.worker.permit_cancels == 1
+
+
 async def test_cancelled_create_waits_for_commit_then_terminalizes_run() -> None:
     made = runtime()
     made.store.create_release = asyncio.Event()
@@ -599,6 +643,55 @@ async def test_cancelled_last_shutdown_finishes_close_before_propagating() -> No
     with pytest.raises(RuntimeError, match="api_lifecycle_unavailable"):
         await entering
     assert made.worker.closes == 1
+
+
+async def test_shutdown_cancellation_wins_over_cleanup_base_error() -> None:
+    made = runtime()
+    made.worker.close_release = asyncio.Event()
+    cleanup_error = SystemExit(41)
+    made.worker.close_error = cleanup_error
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    closing = asyncio.create_task(context.__aexit__(None, None, None))
+    await made.worker.close_entered.wait()
+    closing.cancel()
+    made.worker.close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert made.worker.closes == 1
+    contender = app.router.lifespan_context(app)
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable"):
+        await contender.__aenter__()
+
+
+async def test_close_first_ordinary_error_wins_over_later_system_exit() -> None:
+    made = runtime()
+    first = FakeHook(close_error=SystemExit(43))
+    second = FakeHook(close_error=RuntimeError("private-first"))
+    object.__setattr__(made, "lifecycle_hooks", (first, second))
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable") as caught:
+        await context.__aexit__(None, None, None)
+    assert caught.value.__context__ is None
+    assert first.closes == second.closes == made.worker.closes == 1
+
+
+async def test_close_first_system_exit_wins_over_later_ordinary_error() -> None:
+    made = runtime()
+    original = SystemExit(47)
+    first = FakeHook(close_error=RuntimeError("private-later"))
+    second = FakeHook(close_error=original)
+    object.__setattr__(made, "lifecycle_hooks", (first, second))
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    with pytest.raises(SystemExit) as caught:
+        await context.__aexit__(None, None, None)
+    assert caught.value is original
+    assert first.closes == second.closes == made.worker.closes == 1
 
 
 @pytest.mark.parametrize("boundary", ["reconcile", "start", "close"])

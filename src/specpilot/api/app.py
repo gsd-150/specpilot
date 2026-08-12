@@ -50,42 +50,37 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     async def close_worker() -> None:
         nonlocal lifecycle_state, started_hooks
 
-        async def close_owned() -> tuple[BaseException | None, bool]:
+        async def close_owned() -> BaseException | None:
             nonlocal started_hooks
-            first_base_error: BaseException | None = None
-            ordinary_error = False
+            first_error: BaseException | None = None
             while started_hooks:
                 hook = runtime.lifecycle_hooks[started_hooks - 1]
                 try:
                     await hook.aclose()
-                except Exception:
-                    ordinary_error = True
                 except BaseException as error:
-                    if first_base_error is None:
-                        first_base_error = error
+                    if first_error is None:
+                        first_error = error
                 started_hooks -= 1
             try:
                 await runtime.worker.aclose()
-            except Exception:
-                ordinary_error = True
             except BaseException as error:
-                if first_base_error is None:
-                    first_base_error = error
-            return first_base_error, ordinary_error
+                if first_error is None:
+                    first_error = error
+            return first_error
 
         close_task = asyncio.create_task(close_owned())
         cancelled = False
         try:
-            base_error, close_failed = await asyncio.shield(close_task)
+            cleanup_error = await asyncio.shield(close_task)
         except asyncio.CancelledError:
             cancelled = True
-            base_error, close_failed = await close_task
+            cleanup_error = await close_task
         lifecycle_state = "closed"
-        if base_error is not None:
-            raise base_error
         if cancelled:
             raise asyncio.CancelledError
-        if close_failed:
+        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+            raise cleanup_error
+        if cleanup_error is not None:
             raise ApiLifecycleUnavailable() from None
 
     async def start_runtime() -> None:
@@ -163,6 +158,8 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         created = False
         delivered = False
         service_failed = False
+        original_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
         try:
             run = _new_run(run_id, request, session, runtime)
             create_task = asyncio.create_task(runtime.store.create(run))
@@ -179,22 +176,28 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             await permit.deliver(job)
             delivered = True
         except BaseException as error:
+            original_error = error
             if created:
                 await _finish_failed_delivery(runtime, run_id)
-            if not isinstance(error, Exception):
-                raise
-            service_failed = True
+            service_failed = isinstance(error, Exception)
         finally:
             if not delivered:
-                cancel_task = asyncio.create_task(permit.cancel())
+                cancel_task = asyncio.create_task(_capture_cleanup(permit.cancel()))
                 try:
-                    await asyncio.shield(cancel_task)
+                    cleanup_error = await asyncio.shield(cancel_task)
                 except asyncio.CancelledError:
-                    with suppress(Exception):
-                        await cancel_task
-                    raise
-                except Exception:
-                    service_failed = True
+                    cleanup_error = await cancel_task
+                    if original_error is None:
+                        raise
+        if original_error is not None and not isinstance(original_error, Exception):
+            raise original_error
+        if original_error is not None:
+            service_failed = True
+            cleanup_error = None
+        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+            raise cleanup_error
+        if cleanup_error is not None:
+            service_failed = True
         if service_failed:
             raise _service_unavailable()
         return ChatAccepted(run_id=run_id)
@@ -326,25 +329,35 @@ async def _probe(probe: Callable[[], Awaitable[bool]]) -> bool:
         return False
 
 
-async def _finish_failed_delivery(runtime: ApiRuntime, run_id: UUID) -> None:
+async def _finish_failed_delivery(
+    runtime: ApiRuntime, run_id: UUID
+) -> BaseException | None:
     task = asyncio.create_task(
-        runtime.store.fail_delivery(
-            run_id,
-            TerminalEvent(
-                sequence=1,
-                status=RunStatus.INTERRUPTED,
-                reason=_DELIVERY_FAILURE,
-            ),
+        _capture_cleanup(
+            runtime.store.fail_delivery(
+                run_id,
+                TerminalEvent(
+                    sequence=1,
+                    status=RunStatus.INTERRUPTED,
+                    reason=_DELIVERY_FAILURE,
+                ),
+            )
         )
     )
     try:
-        await asyncio.shield(task)
+        return await asyncio.shield(task)
     except asyncio.CancelledError:
-        with suppress(Exception):
-            await task
+        await task
         raise
-    except Exception:
-        return
+
+
+async def _capture_cleanup(operation: Awaitable[object]) -> BaseException | None:
+    """Turn cleanup failure into data so a child task cannot stop the event loop."""
+    try:
+        await operation
+    except BaseException as error:
+        return error
+    return None
 
 
 def _service_unavailable() -> HTTPException:
