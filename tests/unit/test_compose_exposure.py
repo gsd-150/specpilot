@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,9 +94,7 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
         "SPECPILOT_API_CONFIGURATION_HASH",
         "SPECPILOT_API_PROMPT_ID",
         "SPECPILOT_API_PROMPT_HASH",
-        "SPECPILOT_MCP_CORPUS_MANIFEST_DIR",
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
-        "SPECPILOT_MCP_SOURCE_MANIFEST_DIR",
         "SPECPILOT_MCP_SOURCES_JSON",
         "SPECPILOT_MAIN_API_KEY",
     }
@@ -104,3 +105,52 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
     assert set(declarations) == expected
     assert declarations == {name: name for name in expected}
     assert ":-" not in block
+
+
+def test_api_and_mcp_share_three_explicit_read_only_artifact_mounts() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    mcp = text[text.index("  mcp:") : text.index("\n\n  api:")]
+    api = text[text.index("  api:") : text.index("\n\n  fixture-init:")]
+    expected = {
+        "${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro",
+        "${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro",
+        "${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro",
+    }
+    for mount in expected:
+        assert mount in mcp
+        assert mount in api
+    for block in (mcp, api):
+        assert "SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus" in block
+        assert "SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests" in block
+        assert "SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST:" not in block
+        assert "SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST:" not in block
+        assert "SPECPILOT_MCP_SOURCE_DATA_DIR_HOST:" not in block
+
+
+def _compose_config(*files: Path) -> dict[str, object]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST": "/tmp/corpus",
+            "SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST": "/tmp/manifests",
+            "SPECPILOT_MCP_SOURCE_DATA_DIR_HOST": "/tmp/sources",
+        }
+    )
+    command = ["docker", "compose"]
+    for file in files:
+        command.extend(("-f", str(file)))
+    command.extend(("--profile", "demo", "config", "--format", "json"))
+    completed = subprocess.run(
+        command, check=True, capture_output=True, text=True, env=environment
+    )
+    return json.loads(completed.stdout)
+
+
+def test_base_and_real_api_have_egress_but_demo_override_removes_it() -> None:
+    base = _compose_config(COMPOSE)
+    demo = _compose_config(COMPOSE, DEMO_OVERRIDE)
+    base_api = base["services"]["api"]  # type: ignore[index]
+    demo_api = demo["services"]["api"]  # type: ignore[index]
+
+    assert set(base_api["networks"]) == {"internal", "egress"}
+    assert set(demo_api["networks"]) == {"internal", "demo"}

@@ -63,10 +63,14 @@ services:
       dockerfile: docker/mcp.Dockerfile
     profiles: ["demo", "real"]
     networks: [internal]
+    volumes:
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
+      - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
+      - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
     environment:
-      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR:-}
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
       SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID:-}
-      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR:-}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
       SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON:-[]}
       SPECPILOT_MCP_ALLOWED_HOSTS_JSON: '["127.0.0.1:8080","mcp:8080"]'
       SPECPILOT_MCP_ALLOWED_ORIGINS_JSON: '["http://127.0.0.1:8080","http://mcp:8080"]'
@@ -89,7 +93,11 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     profiles: ["demo", "real"]
-    networks: [internal]
+    networks: [internal, egress]
+    volumes:
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
+      - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
+      - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
     environment:
       SPECPILOT_API_PROFILE: ${SPECPILOT_API_PROFILE}
       SPECPILOT_API_DSN: ${SPECPILOT_API_DSN}
@@ -100,9 +108,9 @@ services:
       SPECPILOT_API_CONFIGURATION_HASH: ${SPECPILOT_API_CONFIGURATION_HASH}
       SPECPILOT_API_PROMPT_ID: ${SPECPILOT_API_PROMPT_ID}
       SPECPILOT_API_PROMPT_HASH: ${SPECPILOT_API_PROMPT_HASH}
-      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR}
+      SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
       SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID}
-      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR}
+      SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
       SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON}
       SPECPILOT_MAIN_API_KEY: ${SPECPILOT_MAIN_API_KEY}
     depends_on:

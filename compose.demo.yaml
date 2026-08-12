@@ -21,7 +21,7 @@ networks:
 
 services:
   api:
-    networks:
+    networks: !override
       - internal
       - demo
     ports:
