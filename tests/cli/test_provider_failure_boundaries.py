@@ -73,6 +73,35 @@ def test_route_smoke_reports_provider_failure_as_failed(
     assert captured.err.strip() == "failed:provider_timeout"
 
 
+def test_route_smoke_reports_gate_rejection_as_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def reject(*args: object, **kwargs: object) -> object:
+        raise EgressPolicyViolation("route_unauthorized", "closed gate")
+
+    monkeypatch.setattr(
+        "specpilot.providers.transport.PolicyBoundTransport.send", reject
+    )
+
+    code = cli.main(
+        [
+            "provider",
+            "route-smoke",
+            "--fixture-only",
+            "--route",
+            "main",
+            "--ledger-dsn",
+            "postgresql://unused",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_REFUSED
+    assert captured.out == ""
+    assert captured.err.strip() == "blocked:route_unauthorized"
+
+
 def test_route_smoke_reports_closed_replay_as_failed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

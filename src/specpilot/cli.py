@@ -2824,7 +2824,7 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     try:
         receipt = await transport.send(request, idempotency_key="route-smoke-1")
     except EgressPolicyViolation as error:
-        return _refuse(f"refused:{error.code}")
+        return _refuse(f"blocked:{error.code}")
     except TransportReplayError as error:
         return _refuse(f"failed:{error.code}", EXIT_IO)
     except NoAdapterForRoute as error:
