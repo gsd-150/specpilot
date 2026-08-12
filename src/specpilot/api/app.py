@@ -50,37 +50,39 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     async def close_worker() -> None:
         nonlocal lifecycle_state, started_hooks
 
-        async def close_owned() -> None:
+        async def close_owned() -> tuple[BaseException | None, bool]:
             nonlocal started_hooks
-            first_error = False
+            first_base_error: BaseException | None = None
+            ordinary_error = False
             while started_hooks:
                 hook = runtime.lifecycle_hooks[started_hooks - 1]
                 try:
                     await hook.aclose()
                 except Exception:
-                    first_error = True
+                    ordinary_error = True
+                except BaseException as error:
+                    if first_base_error is None:
+                        first_base_error = error
                 started_hooks -= 1
             try:
                 await runtime.worker.aclose()
             except Exception:
-                first_error = True
-            if first_error:
-                raise ApiLifecycleUnavailable() from None
+                ordinary_error = True
+            except BaseException as error:
+                if first_base_error is None:
+                    first_base_error = error
+            return first_base_error, ordinary_error
 
         close_task = asyncio.create_task(close_owned())
         cancelled = False
-        close_failed = False
         try:
-            await asyncio.shield(close_task)
+            base_error, close_failed = await asyncio.shield(close_task)
         except asyncio.CancelledError:
             cancelled = True
-            try:
-                await close_task
-            except Exception:
-                close_failed = True
-        except Exception:
-            close_failed = True
+            base_error, close_failed = await close_task
         lifecycle_state = "closed"
+        if base_error is not None:
+            raise base_error
         if cancelled:
             raise asyncio.CancelledError
         if close_failed:
@@ -88,20 +90,20 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
 
     async def start_runtime() -> None:
         nonlocal lifecycle_state, started_hooks
-        failed = False
+        ordinary_failed = False
         try:
             await runtime.store.reconcile_expired()
             await runtime.worker.start()
             for hook in runtime.lifecycle_hooks:
                 await hook.start()
                 started_hooks += 1
-        except asyncio.CancelledError:
-            await close_worker()
-            raise
-        except Exception:
-            failed = True
-        if failed:
-            await close_worker()
+        except BaseException as error:
+            with suppress(BaseException):
+                await close_worker()
+            if not isinstance(error, Exception):
+                raise error
+            ordinary_failed = True
+        if ordinary_failed:
             raise ApiLifecycleUnavailable() from None
         lifecycle_state = "active"
 
@@ -179,7 +181,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         except BaseException as error:
             if created:
                 await _finish_failed_delivery(runtime, run_id)
-            if isinstance(error, asyncio.CancelledError):
+            if not isinstance(error, Exception):
                 raise
             service_failed = True
         finally:

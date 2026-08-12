@@ -34,12 +34,15 @@ class FakePermit:
         self.used = True
         if self.worker.cancel_delivery:
             raise asyncio.CancelledError
+        if self.worker.delivery_base_error is not None:
+            raise self.worker.delivery_base_error
         if self.worker.delivery_error:
             raise WorkerUnavailable("worker_closed")
         self.worker.jobs.append(job)
 
     async def cancel(self) -> None:
         self.used = True
+        self.worker.permit_cancels += 1
         if self.worker.permit_cancel_error is not None:
             raise self.worker.permit_cancel_error
 
@@ -58,6 +61,8 @@ class FakeWorker:
     close_release: asyncio.Event | None = None
     reserve_error: BaseException | None = None
     permit_cancel_error: BaseException | None = None
+    delivery_base_error: BaseException | None = None
+    permit_cancels: int = 0
 
     async def start(self) -> None:
         self.starts += 1
@@ -131,6 +136,7 @@ class FakeStore:
 @dataclass
 class FakeHook:
     start_error: BaseException | None = None
+    close_error: BaseException | None = None
     starts: int = 0
     closes: int = 0
 
@@ -141,6 +147,8 @@ class FakeHook:
 
     async def aclose(self) -> None:
         self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 @dataclass
@@ -513,6 +521,28 @@ async def test_cancelled_delivery_terminalizes_created_run_and_propagates() -> N
     assert made.worker.jobs == []
 
 
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(17)])
+async def test_non_exception_base_error_cleans_then_propagates_original(
+    error: BaseException,
+) -> None:
+    made = runtime()
+    made.worker.delivery_base_error = error
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        with pytest.raises(type(error)) as caught:
+            await client.post(
+                "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+            )
+    assert caught.value is error
+    assert made.store.creates == made.store.delivery_failures == 1
+    assert made.worker.permit_cancels == 1
+    assert made.worker.jobs == []
+
+
 async def test_cancelled_create_waits_for_commit_then_terminalizes_run() -> None:
     made = runtime()
     made.store.create_release = asyncio.Event()
@@ -636,6 +666,44 @@ async def test_lifespan_closes_started_hooks_on_partial_start() -> None:
     assert failed.closes == 0
     assert made.worker.closes == 1
     assert marker not in repr(caught.value)
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(19)])
+async def test_lifespan_start_base_error_cleans_then_propagates_original(
+    error: BaseException,
+) -> None:
+    made = runtime()
+    started = FakeHook()
+    failed = FakeHook(start_error=error)
+    object.__setattr__(made, "lifecycle_hooks", (started, failed))
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    with pytest.raises(type(error)) as caught:
+        await context.__aenter__()
+    assert caught.value is error
+    assert started.closes == 1
+    assert made.worker.closes == 1
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(23)])
+async def test_lifespan_close_base_error_finishes_all_cleanup_then_propagates(
+    error: BaseException,
+) -> None:
+    made = runtime()
+    first = FakeHook()
+    failed = FakeHook(close_error=error)
+    object.__setattr__(made, "lifecycle_hooks", (first, failed))
+    app = create_app(runtime=made)
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    with pytest.raises(type(error)) as caught:
+        await context.__aexit__(None, None, None)
+    assert caught.value is error
+    assert failed.closes == first.closes == 1
+    assert made.worker.closes == 1
+    contender = app.router.lifespan_context(app)
+    with pytest.raises(RuntimeError, match="api_lifecycle_unavailable"):
+        await contender.__aenter__()
 
 
 async def test_capacity_one_concurrent_posts_create_exactly_one_run() -> None:
