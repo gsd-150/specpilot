@@ -9,6 +9,529 @@
 
 BEGIN;
 
+-- CHECK expressions call these immutable validators so malformed JSON types
+-- fail as ordinary constraint violations.  Each helper guards jsonb_typeof
+-- before extracting/casting; raw inserts cannot turn a bad payload into an
+-- unexpected cast error or hide arbitrary keys in a nested object.
+CREATE FUNCTION specpilot_trace_exact_object(value jsonb, allowed_keys text[])
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+BEGIN
+    IF jsonb_typeof(value) <> 'object' THEN
+        RETURN false;
+    END IF;
+    RETURN NOT EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(value) AS found(key)
+        WHERE NOT (found.key = ANY (allowed_keys))
+    );
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_identifier(value jsonb, maximum integer)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    rendered text;
+BEGIN
+    IF jsonb_typeof(value) <> 'string' THEN
+        RETURN false;
+    END IF;
+    rendered := value #>> '{}';
+    RETURN char_length(rendered) BETWEEN 1 AND maximum
+        AND rendered ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]*$';
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_reason(value jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT CASE
+        WHEN jsonb_typeof(value) <> 'string' THEN false
+        ELSE value #>> '{}' ~ '^[a-z][a-z0-9_]{0,63}$'
+    END
+$$;
+
+CREATE FUNCTION specpilot_trace_sha256(value jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT CASE
+        WHEN jsonb_typeof(value) <> 'string' THEN false
+        ELSE value #>> '{}' ~ '^[0-9a-f]{64}$'
+    END
+$$;
+
+CREATE FUNCTION specpilot_trace_uuid(value jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT CASE
+        WHEN jsonb_typeof(value) <> 'string' THEN false
+        ELSE value #>> '{}' ~*
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    END
+$$;
+
+CREATE FUNCTION specpilot_trace_integer(
+    value jsonb,
+    minimum numeric,
+    maximum numeric
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    rendered text;
+    parsed numeric;
+BEGIN
+    IF jsonb_typeof(value) <> 'number' THEN
+        RETURN false;
+    END IF;
+    rendered := value::text;
+    IF rendered !~ '^-?(0|[1-9][0-9]*)$' THEN
+        RETURN false;
+    END IF;
+    parsed := rendered::numeric;
+    RETURN parsed BETWEEN minimum AND maximum;
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_argument_keys(value jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    item jsonb;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 16 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element)
+    LOOP
+        IF jsonb_typeof(item) <> 'string'
+            OR char_length(item #>> '{}') NOT BETWEEN 1 AND 64
+            OR item #>> '{}' !~ '^[A-Za-z][A-Za-z0-9_]*$'
+        THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_candidates(value jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    item jsonb;
+    score numeric;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 20 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element)
+    LOOP
+        IF NOT specpilot_trace_exact_object(item, ARRAY['candidate_id', 'score'])
+            OR NOT (item ?& ARRAY['candidate_id', 'score'])
+            OR NOT specpilot_trace_identifier(item -> 'candidate_id', 128)
+            OR jsonb_typeof(item -> 'score') <> 'number'
+        THEN
+            RETURN false;
+        END IF;
+        score := (item ->> 'score')::numeric;
+        IF score < -1000000000000 OR score > 1000000000000 THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_evidence(value jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    item jsonb;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 5 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element)
+    LOOP
+        IF NOT specpilot_trace_exact_object(
+                item, ARRAY['evidence_id', 'content_hash']
+            )
+            OR NOT (item ?& ARRAY['evidence_id', 'content_hash'])
+            OR NOT specpilot_trace_sha256(item -> 'evidence_id')
+            OR NOT specpilot_trace_sha256(item -> 'content_hash')
+        THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_trace_checks(value jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    item jsonb;
+    passed boolean;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 20 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element)
+    LOOP
+        IF NOT specpilot_trace_exact_object(
+                item, ARRAY['evidence_id', 'passed', 'fault_code']
+            )
+            OR NOT (item ?& ARRAY['evidence_id', 'passed', 'fault_code'])
+            OR jsonb_typeof(item -> 'passed') <> 'boolean'
+            OR NOT (
+                jsonb_typeof(item -> 'evidence_id') = 'null'
+                OR specpilot_trace_sha256(item -> 'evidence_id')
+            )
+            OR NOT (
+                jsonb_typeof(item -> 'fault_code') = 'null'
+                OR specpilot_trace_reason(item -> 'fault_code')
+            )
+        THEN
+            RETURN false;
+        END IF;
+        passed := (item ->> 'passed')::boolean;
+        IF (passed AND jsonb_typeof(item -> 'fault_code') <> 'null')
+            OR (NOT passed AND jsonb_typeof(item -> 'fault_code') = 'null')
+        THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_valid_run_event(
+    event_kind text,
+    event_sequence integer,
+    event_payload jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    nullable_reason boolean;
+    status_value text;
+    verdict_value text;
+    admitted_value boolean;
+BEGIN
+    IF jsonb_typeof(event_payload) <> 'object'
+        OR NOT (event_payload ?& ARRAY['kind', 'sequence'])
+        OR jsonb_typeof(event_payload -> 'kind') <> 'string'
+        OR event_payload ->> 'kind' <> event_kind
+        OR NOT specpilot_trace_integer(event_payload -> 'sequence', 1, 10000)
+        OR (event_payload ->> 'sequence')::integer <> event_sequence
+    THEN
+        RETURN false;
+    END IF;
+
+    CASE event_kind
+        WHEN 'state_transition' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY['kind', 'sequence', 'previous_status', 'status', 'reason']
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'previous_status', 'status', 'reason'
+                ])
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'previous_status') = 'null'
+                    OR event_payload ->> 'previous_status' IN (
+                        'queued', 'running', 'answered', 'refused',
+                        'egress_blocked', 'failed', 'interrupted'
+                    )
+                )
+                OR jsonb_typeof(event_payload -> 'status') <> 'string'
+                OR event_payload ->> 'status' NOT IN (
+                    'queued', 'running', 'answered', 'refused',
+                    'egress_blocked', 'failed', 'interrupted'
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'reason') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'reason')
+                )
+            THEN RETURN false; END IF;
+        WHEN 'plan_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY['kind', 'sequence', 'plan_id', 'step_count', 'max_tool_calls']
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'plan_id', 'step_count', 'max_tool_calls'
+                ])
+                OR NOT specpilot_trace_identifier(event_payload -> 'plan_id', 128)
+                OR NOT specpilot_trace_integer(event_payload -> 'step_count', 1, 4)
+                OR NOT specpilot_trace_integer(event_payload -> 'max_tool_calls', 1, 6)
+            THEN RETURN false; END IF;
+        WHEN 'agent_step' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY[
+                        'kind', 'sequence', 'agent', 'step_id', 'phase',
+                        'duration_ms', 'error_code'
+                    ]
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'agent', 'step_id', 'phase',
+                    'duration_ms', 'error_code'
+                ])
+                OR event_payload ->> 'agent' NOT IN (
+                    'orchestrator', 'evidence_agent', 'answer', 'verifier'
+                )
+                OR NOT specpilot_trace_identifier(event_payload -> 'step_id', 128)
+                OR event_payload ->> 'phase' NOT IN ('started', 'finished')
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'duration_ms') = 'null'
+                    OR specpilot_trace_integer(
+                        event_payload -> 'duration_ms', 0, 3600000
+                    )
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'error_code') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'error_code')
+                )
+            THEN RETURN false; END IF;
+        WHEN 'tool_finished' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY[
+                        'kind', 'sequence', 'step_id', 'tool', 'argument_keys',
+                        'result_count', 'duration_ms', 'retry_count', 'error_code'
+                    ]
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'step_id', 'tool', 'argument_keys',
+                    'result_count', 'duration_ms', 'retry_count', 'error_code'
+                ])
+                OR NOT specpilot_trace_identifier(event_payload -> 'step_id', 128)
+                OR event_payload ->> 'tool' NOT IN (
+                    'search_clauses', 'get_clause', 'get_toc',
+                    'expand_references', 'lookup_term'
+                )
+                OR NOT specpilot_trace_argument_keys(event_payload -> 'argument_keys')
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'result_count', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'duration_ms', 0, 3600000
+                )
+                OR NOT specpilot_trace_integer(event_payload -> 'retry_count', 0, 1)
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'error_code') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'error_code')
+                )
+            THEN RETURN false; END IF;
+        WHEN 'candidate_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload, ARRAY['kind', 'sequence', 'candidates']
+                )
+                OR NOT (event_payload ?& ARRAY['kind', 'sequence', 'candidates'])
+                OR NOT specpilot_trace_candidates(event_payload -> 'candidates')
+            THEN RETURN false; END IF;
+        WHEN 'evidence_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload, ARRAY['kind', 'sequence', 'evidence']
+                )
+                OR NOT (event_payload ?& ARRAY['kind', 'sequence', 'evidence'])
+                OR NOT specpilot_trace_evidence(event_payload -> 'evidence')
+            THEN RETURN false; END IF;
+        WHEN 'egress_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY[
+                        'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
+                        'admitted', 'request_tokens', 'request_bytes',
+                        'cost_microunits', 'error_code'
+                    ]
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
+                    'admitted', 'request_tokens', 'request_bytes',
+                    'cost_microunits', 'error_code'
+                ])
+                OR jsonb_typeof(event_payload -> 'stage') <> 'string'
+                OR event_payload ->> 'stage' NOT IN (
+                    'planning', 'evidence', 'compliance', 'verifier', 'judge'
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'reservation_id') = 'null'
+                    OR specpilot_trace_uuid(event_payload -> 'reservation_id')
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'ledger_id') = 'null'
+                    OR specpilot_trace_uuid(event_payload -> 'ledger_id')
+                )
+                OR jsonb_typeof(event_payload -> 'admitted') <> 'boolean'
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'request_tokens', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'request_bytes', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'cost_microunits', 0, 1000000000
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'error_code') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'error_code')
+                )
+            THEN RETURN false; END IF;
+            admitted_value := (event_payload ->> 'admitted')::boolean;
+            nullable_reason := jsonb_typeof(event_payload -> 'error_code') = 'null';
+            IF (admitted_value AND NOT nullable_reason)
+                OR (NOT admitted_value AND nullable_reason)
+            THEN RETURN false; END IF;
+        WHEN 'usage_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY[
+                        'kind', 'sequence', 'stage', 'prompt_tokens',
+                        'completion_tokens', 'request_bytes', 'duration_ms',
+                        'cost_microunits'
+                    ]
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'stage', 'prompt_tokens',
+                    'completion_tokens', 'request_bytes', 'duration_ms',
+                    'cost_microunits'
+                ])
+                OR jsonb_typeof(event_payload -> 'stage') <> 'string'
+                OR event_payload ->> 'stage' NOT IN (
+                    'planning', 'evidence', 'compliance', 'verifier', 'judge'
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'prompt_tokens', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'completion_tokens', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'request_bytes', 0, 1000000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'duration_ms', 0, 3600000
+                )
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'cost_microunits', 0, 1000000000
+                )
+            THEN RETURN false; END IF;
+        WHEN 'answer_outcome' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload,
+                    ARRAY[
+                        'kind', 'sequence', 'verdict', 'refusal_reason',
+                        'provider_error', 'reservation_id', 'replayed',
+                        'parse_fault_code'
+                    ]
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'verdict', 'refusal_reason',
+                    'provider_error', 'reservation_id', 'replayed',
+                    'parse_fault_code'
+                ])
+                OR jsonb_typeof(event_payload -> 'verdict') <> 'string'
+                OR event_payload ->> 'verdict' NOT IN ('answered', 'refused')
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'refusal_reason') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'refusal_reason')
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'provider_error') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'provider_error')
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'reservation_id') = 'null'
+                    OR specpilot_trace_uuid(event_payload -> 'reservation_id')
+                )
+                OR jsonb_typeof(event_payload -> 'replayed') <> 'boolean'
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'parse_fault_code') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'parse_fault_code')
+                )
+            THEN RETURN false; END IF;
+            verdict_value := event_payload ->> 'verdict';
+            nullable_reason :=
+                jsonb_typeof(event_payload -> 'refusal_reason') = 'null';
+            IF (verdict_value = 'answered' AND NOT nullable_reason)
+                OR (verdict_value = 'refused' AND nullable_reason)
+            THEN RETURN false; END IF;
+        WHEN 'verifier_summary' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload, ARRAY['kind', 'sequence', 'checks', 'duration_ms']
+                )
+                OR NOT (event_payload ?& ARRAY[
+                    'kind', 'sequence', 'checks', 'duration_ms'
+                ])
+                OR NOT specpilot_trace_checks(event_payload -> 'checks')
+                OR NOT specpilot_trace_integer(
+                    event_payload -> 'duration_ms', 0, 3600000
+                )
+            THEN RETURN false; END IF;
+        WHEN 'terminal' THEN
+            IF NOT specpilot_trace_exact_object(
+                    event_payload, ARRAY['kind', 'sequence', 'status', 'reason']
+                )
+                OR NOT (event_payload ?& ARRAY['kind', 'sequence', 'status', 'reason'])
+                OR jsonb_typeof(event_payload -> 'status') <> 'string'
+                OR event_payload ->> 'status' NOT IN (
+                    'answered', 'refused', 'egress_blocked', 'failed', 'interrupted'
+                )
+                OR NOT (
+                    jsonb_typeof(event_payload -> 'reason') = 'null'
+                    OR specpilot_trace_reason(event_payload -> 'reason')
+                )
+            THEN RETURN false; END IF;
+            status_value := event_payload ->> 'status';
+            nullable_reason := jsonb_typeof(event_payload -> 'reason') = 'null';
+            IF (status_value = 'answered' AND NOT nullable_reason)
+                OR (status_value <> 'answered' AND nullable_reason)
+            THEN RETURN false; END IF;
+        ELSE
+            RETURN false;
+    END CASE;
+    RETURN true;
+END;
+$$;
+
 CREATE TABLE specpilot_run (
     run_id               uuid PRIMARY KEY,
     request_id           uuid        NOT NULL UNIQUE,
@@ -143,98 +666,7 @@ CREATE TABLE specpilot_run_event (
         )
     ),
     CONSTRAINT specpilot_run_event_payload_check CHECK (
-        jsonb_typeof(payload) = 'object'
-        AND payload ?& ARRAY['kind', 'sequence']
-        AND payload ->> 'kind' = kind
-        AND (payload ->> 'sequence')::integer = sequence
-        AND CASE kind
-            WHEN 'state_transition' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'previous_status', 'status', 'reason'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'previous_status', 'status', 'reason'
-                ]::text[] = '{}'::jsonb
-            WHEN 'plan_summary' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'plan_id', 'step_count', 'max_tool_calls'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'plan_id', 'step_count', 'max_tool_calls'
-                ]::text[] = '{}'::jsonb
-            WHEN 'agent_step' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'agent', 'step_id', 'phase',
-                    'duration_ms', 'error_code'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'agent', 'step_id', 'phase',
-                    'duration_ms', 'error_code'
-                ]::text[] = '{}'::jsonb
-            WHEN 'tool_finished' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'step_id', 'tool', 'argument_keys',
-                    'result_count', 'duration_ms', 'retry_count', 'error_code'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'step_id', 'tool', 'argument_keys',
-                    'result_count', 'duration_ms', 'retry_count', 'error_code'
-                ]::text[] = '{}'::jsonb
-            WHEN 'candidate_summary' THEN
-                payload ?& ARRAY['kind', 'sequence', 'candidates']
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'candidates'
-                ]::text[] = '{}'::jsonb
-            WHEN 'evidence_summary' THEN
-                payload ?& ARRAY['kind', 'sequence', 'evidence']
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'evidence'
-                ]::text[] = '{}'::jsonb
-            WHEN 'egress_summary' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
-                    'admitted', 'request_tokens', 'request_bytes',
-                    'cost_microunits', 'error_code'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'stage', 'reservation_id', 'ledger_id',
-                    'admitted', 'request_tokens', 'request_bytes',
-                    'cost_microunits', 'error_code'
-                ]::text[] = '{}'::jsonb
-            WHEN 'usage_summary' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'stage', 'prompt_tokens',
-                    'completion_tokens', 'request_bytes', 'duration_ms',
-                    'cost_microunits'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'stage', 'prompt_tokens',
-                    'completion_tokens', 'request_bytes', 'duration_ms',
-                    'cost_microunits'
-                ]::text[] = '{}'::jsonb
-            WHEN 'answer_outcome' THEN
-                payload ?& ARRAY[
-                    'kind', 'sequence', 'verdict', 'refusal_reason',
-                    'provider_error', 'reservation_id', 'replayed',
-                    'parse_fault_code'
-                ]
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'verdict', 'refusal_reason',
-                    'provider_error', 'reservation_id', 'replayed',
-                    'parse_fault_code'
-                ]::text[] = '{}'::jsonb
-            WHEN 'verifier_summary' THEN
-                payload ?& ARRAY['kind', 'sequence', 'checks', 'duration_ms']
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'checks', 'duration_ms'
-                ]::text[] = '{}'::jsonb
-            WHEN 'terminal' THEN
-                payload ?& ARRAY['kind', 'sequence', 'status', 'reason']
-                AND payload - ARRAY[
-                    'kind', 'sequence', 'status', 'reason'
-                ]::text[] = '{}'::jsonb
-            ELSE false
-        END
+        specpilot_valid_run_event(kind, sequence, payload)
     )
 );
 

@@ -32,6 +32,101 @@ _EVENT_KINDS = {
 }
 
 
+def _valid_event_payloads() -> dict[str, dict[str, object]]:
+    return {
+        "state_transition": {
+            "kind": "state_transition",
+            "sequence": 1,
+            "previous_status": "queued",
+            "status": "running",
+            "reason": None,
+        },
+        "plan_summary": {
+            "kind": "plan_summary",
+            "sequence": 2,
+            "plan_id": "plan-1",
+            "step_count": 2,
+            "max_tool_calls": 3,
+        },
+        "agent_step": {
+            "kind": "agent_step",
+            "sequence": 3,
+            "agent": "evidence_agent",
+            "step_id": "step-1",
+            "phase": "finished",
+            "duration_ms": 20,
+            "error_code": None,
+        },
+        "tool_finished": {
+            "kind": "tool_finished",
+            "sequence": 4,
+            "step_id": "step-1",
+            "tool": "search_clauses",
+            "argument_keys": ["query", "corpus_manifest_id"],
+            "result_count": 2,
+            "duration_ms": 20,
+            "retry_count": 1,
+            "error_code": None,
+        },
+        "candidate_summary": {
+            "kind": "candidate_summary",
+            "sequence": 5,
+            "candidates": [{"candidate_id": "candidate-1", "score": 42.75}],
+        },
+        "evidence_summary": {
+            "kind": "evidence_summary",
+            "sequence": 6,
+            "evidence": [{"evidence_id": "a" * 64, "content_hash": "b" * 64}],
+        },
+        "egress_summary": {
+            "kind": "egress_summary",
+            "sequence": 7,
+            "stage": "evidence",
+            "reservation_id": "00000000-0000-0000-0000-000000000007",
+            "ledger_id": None,
+            "admitted": True,
+            "request_tokens": 10,
+            "request_bytes": 100,
+            "cost_microunits": 3,
+            "error_code": None,
+        },
+        "usage_summary": {
+            "kind": "usage_summary",
+            "sequence": 8,
+            "stage": "evidence",
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "request_bytes": 100,
+            "duration_ms": 20,
+            "cost_microunits": 3,
+        },
+        "answer_outcome": {
+            "kind": "answer_outcome",
+            "sequence": 9,
+            "verdict": "refused",
+            "refusal_reason": "evidence_insufficient",
+            "provider_error": "provider_timeout",
+            "reservation_id": "00000000-0000-0000-0000-000000000009",
+            "replayed": False,
+            "parse_fault_code": None,
+        },
+        "verifier_summary": {
+            "kind": "verifier_summary",
+            "sequence": 10,
+            "checks": [
+                {"evidence_id": "a" * 64, "passed": False, "fault_code": "x"}
+            ],
+            "duration_ms": 20,
+        },
+        "terminal": {
+            "kind": "terminal",
+            "sequence": 11,
+            "status": "failed",
+            "reason": "provider_timeout",
+        },
+    }
+
+
 def _constraint_definition(connection: object, table: str, name: str) -> str:
     row = connection.execute(  # type: ignore[attr-defined]
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
@@ -209,6 +304,175 @@ def test_event_payload_check_rejects_plaintext_extra_and_mismatched_metadata(
                     "(run_id, sequence, kind, payload) VALUES (%s, %s, %s, %s)",
                     (run_id, sequence, kind, json.dumps(payload)),
                 )
+
+
+def _insert_event_payload(
+    connection: object,
+    run_id: uuid.UUID,
+    *,
+    kind: str,
+    sequence: int,
+    payload: object,
+) -> None:
+    connection.execute(  # type: ignore[attr-defined]
+        "INSERT INTO specpilot_run_event (run_id, sequence, kind, payload) "
+        "VALUES (%s, %s, %s, %s)",
+        (run_id, sequence, kind, json.dumps(payload)),
+    )
+
+
+def test_raw_sql_accepts_every_closed_event_shape_and_raw_bm25_score(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        for kind, payload in _valid_event_payloads().items():
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind=kind,
+                sequence=int(payload["sequence"]),
+                payload=payload,
+            )
+        assert connection.execute(
+            "SELECT count(*) FROM specpilot_run_event WHERE run_id = %s", (run_id,)
+        ).fetchone() == (11,)
+
+
+@pytest.mark.parametrize("container", ["candidates", "evidence", "checks"])
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "query",
+        "excerpt",
+        "candidate_body",
+        "provider_response",
+        "credential",
+        "secret",
+        "local_path",
+    ],
+)
+def test_raw_sql_rejects_each_prohibited_key_inside_each_nested_container(
+    clean_ledger: str,
+    container: str,
+    forbidden_key: str,
+) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    kind = {
+        "candidates": "candidate_summary",
+        "evidence": "evidence_summary",
+        "checks": "verifier_summary",
+    }[container]
+    payload = _valid_event_payloads()[kind]
+    nested = dict(payload[container][0])  # type: ignore[index,arg-type]
+    nested[forbidden_key] = "must-not-persist"
+    payload[container] = [nested]
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind=kind,
+                sequence=int(payload["sequence"]),
+                payload=payload,
+            )
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "invalid"),
+    [
+        ("state_transition", "status", "unknown"),
+        ("state_transition", "status", None),
+        ("plan_summary", "step_count", 0),
+        ("plan_summary", "step_count", "not-an-integer"),
+        ("agent_step", "agent", "unknown"),
+        ("tool_finished", "tool", "write_clause"),
+        ("tool_finished", "error_code", "x" * 65),
+        ("candidate_summary", "candidates", "not-an-array"),
+        ("candidate_summary", "candidates", ["not-an-object"]),
+        (
+            "candidate_summary",
+            "candidates",
+            [{"candidate_id": "candidate-1", "score": 1_000_000_000_001}],
+        ),
+        ("evidence_summary", "evidence", {"not": "an-array"}),
+        ("evidence_summary", "evidence", [7]),
+        ("egress_summary", "stage", "unknown"),
+        ("egress_summary", "stage", None),
+        ("egress_summary", "admitted", "true"),
+        ("usage_summary", "prompt_tokens", -1),
+        ("usage_summary", "duration_ms", "not-an-integer"),
+        ("answer_outcome", "verdict", "unknown"),
+        ("answer_outcome", "verdict", None),
+        ("answer_outcome", "replayed", 0),
+        ("verifier_summary", "checks", False),
+        ("verifier_summary", "checks", ["not-an-object"]),
+        ("terminal", "status", "running"),
+        ("terminal", "status", None),
+    ],
+)
+def test_raw_sql_rejects_wrong_event_values_as_check_violations(
+    clean_ledger: str,
+    kind: str,
+    field: str,
+    invalid: object,
+) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()[kind]
+    payload[field] = invalid
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind=kind,
+                sequence=int(payload["sequence"]),
+                payload=payload,
+            )
+
+
+def test_raw_sql_rejects_noninteger_payload_sequence_without_cast_error(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    payload = _valid_event_payloads()["plan_summary"]
+    payload["sequence"] = "not-an-integer"
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        with pytest.raises(CheckViolation):
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind="plan_summary",
+                sequence=2,
+                payload=payload,
+            )
+
+
+def test_raw_sql_accepts_uuid_text_that_pydantic_accepts(clean_ledger: str) -> None:
+    import psycopg
+
+    payload = _valid_event_payloads()["egress_summary"]
+    payload["reservation_id"] = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        _insert_event_payload(
+            connection,
+            run_id,
+            kind="egress_summary",
+            sequence=7,
+            payload=payload,
+        )
 
 
 def test_run_state_timestamp_and_lease_constraints_fail_closed(

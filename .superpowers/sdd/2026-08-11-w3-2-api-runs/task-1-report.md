@@ -124,3 +124,94 @@ schema; no production constraint was loosened for that failure.
 ## Concerns
 
 None.
+
+## Review fix round 1
+
+Review found that the first SQL CHECK closed only the event payload's top
+level.  Raw inserts could still place arbitrary fields inside candidates,
+evidence, or verifier checks, and SQL did not enforce the Pydantic scalar,
+enum, and bound contracts.  Review also found that normalized score bounds did
+not fit real BM25/hybrid retrieval, and `RunView` did not enforce temporal or
+event-order invariants.
+
+### Fix-round RED
+
+Unit command:
+
+```text
+.venv/bin/python -m pytest tests/unit/runs/test_contracts.py -q
+```
+
+Result before the fix:
+
+```text
+6 failed, 30 passed in 0.13s
+```
+
+The six expected failures covered a raw score above one, answered/failed views
+without completion, queued with completion, and out-of-order/duplicate event
+sequences.
+
+Fresh raw PostgreSQL command:
+
+```text
+SPECPILOT_TEST_DSN=postgresql://localhost:5432/specpilot_w3_api_test \
+  .venv/bin/python -m pytest tests/integration/runs/test_migration.py -q
+```
+
+Result before the fix:
+
+```text
+36 failed, 7 passed in 2.73s
+```
+
+These were independent raw insert failures that the old SQL accepted: every
+combination of three nested containers and seven prohibited field classes,
+plus representative malformed containers, objects, enums, bounds, and scalar
+types.
+
+A later compatibility RED proved uppercase UUID text accepted by Pydantic was
+rejected by SQL.  It failed 1 of 21 focused cases and led to a case-insensitive
+UUID format check.
+
+### Fix-round implementation
+
+- Replaced the shallow JSONB CHECK body with immutable, type-safe SQL validator
+  functions called by the table CHECK.  They inspect type before any cast, close
+  nested object keys, validate all 11 event kinds, and enforce the public model
+  enums, nullability relationships, identifier/hash formats, array sizes, and
+  numeric bounds.
+- Allowed finite raw candidate scores in `[-1e12, 1e12]` in both Pydantic and
+  SQL.  This is a corruption guard, not score normalization; real BM25 values
+  above one remain intact.
+- Made `RunView` enforce run-state timestamp consistency while preserving the
+  derived `interrupted` view with no completion timestamp, and require strictly
+  increasing unique event sequence numbers.
+- Added malformed numeric/boolean/sequence strings to prove SQL produces clean
+  CHECK violations instead of cast errors, all 11 valid event shapes, raw BM25
+  compatibility, UUID format parity, and exact nested plaintext rejection.
+
+### Fix-round GREEN and verification
+
+After dropping and recreating only `specpilot_w3_api_test`, the focused command
+reported:
+
+```text
+90 passed in 3.56s
+```
+
+Static and standard gates:
+
+```text
+.venv/bin/python -m ruff check .  # All checks passed
+.venv/bin/python -m mypy src      # 84 source files, no issues
+make check                         # 1169 passed, 2 pre-existing skips
+```
+
+No Task 2 store, writer, or endpoint code was added in this fix round.
+
+The last fail-closed RED added explicit JSON null values for required enum
+fields.  Four of 90 cases initially passed because SQL `NOT IN` propagated
+NULL and PostgreSQL CHECK accepts NULL.  Explicit JSON string-type guards were
+added for status, stage, and verdict before enum comparison; the fresh 90-case
+GREEN above includes those regressions.

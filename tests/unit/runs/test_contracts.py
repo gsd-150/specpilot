@@ -278,3 +278,115 @@ def test_run_record_rejects_incoherent_terminal_and_lease_timestamps() -> None:
             lease_owner=None,
             lease_expires_at=None,
         )
+
+
+def test_candidate_score_accepts_raw_bm25_values_above_one() -> None:
+    contracts = _contracts()
+
+    summary = contracts.CandidateScoreSummary(
+        candidate_id="candidate-a", score=42.75
+    )
+    assert summary.score == 42.75
+
+
+@pytest.mark.parametrize("score", [1_000_000_000_001.0, float("inf"), float("nan")])
+def test_candidate_score_rejects_nonfinite_or_implausible_raw_values(
+    score: float,
+) -> None:
+    contracts = _contracts()
+
+    with pytest.raises(ValidationError, match="score"):
+        contracts.CandidateScoreSummary(candidate_id="candidate-a", score=score)
+
+
+def _run_view(
+    contracts: object,
+    *,
+    status: str,
+    reason: str | None,
+    started_at: datetime | None,
+    completed_at: datetime | None,
+    events: tuple[object, ...] = (),
+):  # type: ignore[no-untyped-def]
+    return contracts.RunView(  # type: ignore[attr-defined,no-any-return]
+        run_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        request_id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+        task_level="L1",
+        profile="fixture",
+        corpus_manifest_id="b" * 64,
+        status=status,
+        reason=reason,
+        created_at=datetime(2026, 8, 12, 1, 0, tzinfo=UTC),
+        started_at=started_at,
+        completed_at=completed_at,
+        events=events,
+    )
+
+
+@pytest.mark.parametrize("status", ["answered", "failed"])
+def test_run_view_rejects_completed_status_without_completion_time(status: str) -> None:
+    contracts = _contracts()
+    reason = None if status == "answered" else "provider_timeout"
+
+    with pytest.raises(ValidationError, match="completion"):
+        _run_view(
+            contracts,
+            status=status,
+            reason=reason,
+            started_at=datetime(2026, 8, 12, 1, 1, tzinfo=UTC),
+            completed_at=None,
+        )
+
+
+def test_run_view_rejects_queued_status_with_completion_time() -> None:
+    contracts = _contracts()
+
+    with pytest.raises(ValidationError, match="completed"):
+        _run_view(
+            contracts,
+            status="queued",
+            reason=None,
+            started_at=None,
+            completed_at=datetime(2026, 8, 12, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_run_view_allows_read_derived_interrupted_without_completion_time() -> None:
+    contracts = _contracts()
+
+    view = _run_view(
+        contracts,
+        status="interrupted",
+        reason="lease_expired",
+        started_at=None,
+        completed_at=None,
+    )
+    assert view.status is contracts.RunStatus.INTERRUPTED
+    assert view.completed_at is None
+
+
+@pytest.mark.parametrize("sequences", [(2, 1), (1, 1)])
+def test_run_view_rejects_out_of_order_or_duplicate_event_sequences(
+    sequences: tuple[int, int],
+) -> None:
+    contracts = _contracts()
+    events = tuple(
+        contracts.PlanSummaryEvent(
+            kind="plan_summary",
+            sequence=sequence,
+            plan_id=f"plan-{index}",
+            step_count=1,
+            max_tool_calls=1,
+        )
+        for index, sequence in enumerate(sequences)
+    )
+
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        _run_view(
+            contracts,
+            status="running",
+            reason=None,
+            started_at=datetime(2026, 8, 12, 1, 1, tzinfo=UTC),
+            completed_at=None,
+            events=events,
+        )

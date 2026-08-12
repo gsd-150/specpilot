@@ -144,7 +144,16 @@ class ToolFinishedEvent(_RunEventBase):
 
 class CandidateScoreSummary(_FrozenModel):
     candidate_id: TraceIdentifier
-    score: Annotated[float, Field(ge=-1.0, le=1.0, allow_inf_nan=False)]
+    # BM25 and hybrid scores are ranking values, not probabilities.  Keep a
+    # broad corruption guard without inventing normalization at the trace edge.
+    score: Annotated[
+        float,
+        Field(
+            ge=-1_000_000_000_000.0,
+            le=1_000_000_000_000.0,
+            allow_inf_nan=False,
+        ),
+    ]
 
 
 class CandidateSummaryEvent(_RunEventBase):
@@ -387,6 +396,33 @@ class RunView(_FrozenModel):
             and self.reason is None
         ):
             raise ValueError("a non-success terminal view requires a stable reason")
+        if self.status in _NONTERMINAL_STATUSES and self.completed_at is not None:
+            raise ValueError("a queued or running view may not be completed")
+        if (
+            self.status
+            in {
+                RunStatus.ANSWERED,
+                RunStatus.REFUSED,
+                RunStatus.EGRESS_BLOCKED,
+                RunStatus.FAILED,
+            }
+            and self.completed_at is None
+        ):
+            raise ValueError("a completed terminal view requires a completion time")
+        if self.status is RunStatus.QUEUED and self.started_at is not None:
+            raise ValueError("a queued view has not started")
+        if self.status is RunStatus.RUNNING and self.started_at is None:
+            raise ValueError("a running view requires a start time")
+        if self.started_at is not None and self.started_at < self.created_at:
+            raise ValueError("view start time precedes creation")
+        if self.completed_at is not None:
+            floor = self.started_at or self.created_at
+            if self.completed_at < floor:
+                raise ValueError("view completion time precedes run activity")
+        sequences = tuple(event.sequence for event in self.events)
+        pairs = zip(sequences, sequences[1:], strict=False)
+        if any(current <= previous for previous, current in pairs):
+            raise ValueError("run event sequences must be strictly increasing")
         return self
 
 
