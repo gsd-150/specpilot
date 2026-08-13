@@ -56,12 +56,20 @@ class RecoveryRequest(_FrozenModel):
     remaining_attempts: Annotated[int, Field(ge=0, le=_L2_ATTEMPT_BUDGET)]
 
     @model_validator(mode="after")
-    def _require_direct_source_for_direct_recovery(self) -> RecoveryRequest:
+    def _require_closed_kind_reason_and_source(self) -> RecoveryRequest:
+        expected = _RECOVERY_KIND_BY_REASON.get(self.reason_code)
+        if expected is None or self.kind is not expected:
+            raise ValueError("recovery kind must match a closed reason code")
         if (
             self.kind in {RecoveryKind.GET_CLAUSE, RecoveryKind.EXPAND_REFERENCES}
             and self.source_clause_id is None
         ):
             raise ValueError("direct recovery requires source_clause_id")
+        if (
+            self.kind is RecoveryKind.SCOPED_SEARCH
+            and self.source_clause_id is not None
+        ):
+            raise ValueError("scoped recovery cannot carry source_clause_id")
         return self
 
 
@@ -69,6 +77,14 @@ class RecoveryRequest(_FrozenModel):
 class RecoverySelection:
     kind: RecoveryKind
     reason_code: str
+
+
+_RECOVERY_KIND_BY_REASON: dict[str, RecoveryKind] = {
+    DeterministicFault.NOT_DISCLOSED.value: RecoveryKind.SCOPED_SEARCH,
+    DeterministicFault.DOCUMENT_SCOPE_MISMATCH.value: RecoveryKind.SCOPED_SEARCH,
+    DeterministicFault.CONTENT_HASH_MISMATCH.value: RecoveryKind.GET_CLAUSE,
+    SemanticReason.EXCEPTION_MISSING.value: RecoveryKind.EXPAND_REFERENCES,
+}
 
 
 @dataclass(frozen=True, slots=True)

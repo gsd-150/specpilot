@@ -81,6 +81,8 @@ class EvidenceAgent:
         if attempts_used < 0 or attempts_used > attempt_budget:
             raise EvidenceCollectionError("tool_call_budget_exceeded")
         bounded = validate_tool_plan(plan, max_call_cost=attempt_budget)
+        if bounded.base_call_cost > attempt_budget - attempts_used:
+            raise EvidenceCollectionError("tool_call_budget_exceeded")
         _require_corpus_scope(bounded, corpus_manifest_id)
         outputs: dict[str, tuple[str, ...]] = {}
         evidence: list[Evidence] = []

@@ -163,6 +163,73 @@ async def test_l2_budget_allows_exactly_two_attempts_after_six_are_persisted() -
     assert [call.error_code for call in result.calls] == [None, None]
 
 
+async def test_plan_that_costs_more_than_remaining_budget_makes_no_mcp_call() -> None:
+    """Removing the preflight would spend a partial plan after a process resume."""
+    client = ScriptedClient([])
+    plan = ToolPlan.model_validate(
+        {
+            "plan_id": "p1",
+            "steps": [
+                {
+                    "step_id": "expand",
+                    "tool": "expand_references",
+                    "args": {
+                        "corpus_manifest_id": CORPUS_ID,
+                        "document_id": DOCUMENT_ID,
+                        "clauses": {
+                            "kind": "direct",
+                            "clause_ids": [CLAUSE_ID, "clause-2", "clause-3"],
+                        },
+                    },
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(EvidenceCollectionError, match="tool_call_budget_exceeded"):
+        await EvidenceAgent(client, UnitResolver(unit())).collect(
+            plan,
+            CORPUS_ID,
+            attempt_budget=8,
+            attempts_used=6,
+        )
+
+    assert client.calls == []
+
+
+async def test_exhausted_l2_budget_cannot_be_reset_to_make_another_call() -> None:
+    """Removing carried attempts would let an exhausted run start again at zero."""
+    client = ScriptedClient([])
+    plan = ToolPlan.model_validate(
+        {
+            "plan_id": "p1",
+            "steps": [
+                {
+                    "step_id": "expand",
+                    "tool": "expand_references",
+                    "args": {
+                        "corpus_manifest_id": CORPUS_ID,
+                        "document_id": DOCUMENT_ID,
+                        "clauses": {"kind": "direct", "clause_ids": [CLAUSE_ID]},
+                    },
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(EvidenceCollectionError, match="tool_call_budget_exceeded"):
+        await EvidenceAgent(client, UnitResolver(unit())).collect(
+            plan,
+            CORPUS_ID,
+            attempt_budget=8,
+            attempts_used=8,
+        )
+
+    assert client.calls == []
+
+
 async def test_timeout_retry_consumes_the_carried_l2_attempt_budget() -> None:
     """Removing retry charging would allow a ninth L2 MCP call."""
     client = ScriptedClient([failure("tool_timeout"), success({"clause_ids": []})])

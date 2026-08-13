@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from mcp.types import CallToolResult, TextContent
+from pydantic import ValidationError
 
 from specpilot.answer.evidence import build_evidence_from_unit
 from specpilot.contracts.verdict import SemanticReason
@@ -128,6 +129,37 @@ def test_select_recovery_is_once_per_run_and_requires_budget() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason_code", "source_clause_id"),
+    [
+        (RecoveryKind.SCOPED_SEARCH, DeterministicFault.CONTENT_HASH_MISMATCH, None),
+        (RecoveryKind.GET_CLAUSE, DeterministicFault.NOT_DISCLOSED, CLAUSE_ID),
+        (RecoveryKind.EXPAND_REFERENCES, SemanticReason.UNSUPPORTED, CLAUSE_ID),
+        (RecoveryKind.GET_CLAUSE, DeterministicFault.CONTENT_HASH_MISMATCH, None),
+    ],
+)
+def test_illegal_recovery_kind_reason_or_source_is_rejected_before_mcp(
+    kind: RecoveryKind,
+    reason_code: DeterministicFault | SemanticReason,
+    source_clause_id: str | None,
+) -> None:
+    """Removing closed request validation would make recovery caller-controlled."""
+    client = ScriptedClient([])
+
+    with pytest.raises(ValidationError, match="recovery"):
+        RecoveryRequest(
+            kind=kind,
+            claim_id=CLAIM_ID,
+            reason_code=reason_code,
+            source_clause_id=source_clause_id,
+            corpus_manifest_id=MANIFEST_ID,
+            allowed_document_ids=(DOCUMENT_ID,),
+            remaining_attempts=2,
+        )
+
+    assert client.calls == []
     assert (
         select_recovery(
             (DeterministicFault.NOT_DISCLOSED,),
