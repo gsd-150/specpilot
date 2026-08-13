@@ -1,17 +1,17 @@
-"""One bounded L2 attempt, with no persistence or provider construction.
+"""Closed, bounded L2 orchestration with prose-free checkpoint state.
 
-This module deliberately owns the *ordering* of the L2 gates but not the
-database, MCP client, or provider transport.  Those capabilities are injected
-as already-bound services.  Keeping the state machine here makes the two
-important bounds obvious: eight retrieval attempts and one recovery for the
-whole run (not one recovery per claim).
+The orchestrator is intentionally a small state machine rather than a generic
+workflow framework.  It can reconstruct only local evidence from a checkpoint;
+all lost provider prose is deliberately sent again under an explicitly newer
+generation and is charged by the existing transport/ledger.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from specpilot.agents.compliance import (
@@ -23,7 +23,12 @@ from specpilot.agents.contracts import ToolPlan
 from specpilot.agents.evidence import EvidenceResult
 from specpilot.agents.planner import PlannerContext, PlannerResult
 from specpilot.answer.evidence import Evidence
-from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
+from specpilot.checkpoints.contracts import (
+    CheckpointStage,
+    EvidenceCheckpointRef,
+    RunCheckpoint,
+    StageGeneration,
+)
 from specpilot.contracts.verdict import (
     ComplianceCandidate,
     ComplianceResult,
@@ -33,9 +38,7 @@ from specpilot.contracts.verdict import (
 )
 from specpilot.egress.enforcer import EgressPolicyViolation
 from specpilot.providers.transport import ProviderAttemptError
-from specpilot.verifier.deterministic import (
-    DeterministicResult,
-)
+from specpilot.verifier.deterministic import DeterministicResult
 from specpilot.verifier.recovery import RecoveryOutcome
 from specpilot.verifier.semantic import (
     InvalidSemanticReply,
@@ -90,19 +93,14 @@ type RecoveryRunner = Callable[
     Awaitable[RecoveryOutcome],
 ]
 type CheckpointWriter = Callable[[RunCheckpoint], Awaitable[RunCheckpoint]]
+type EvidenceRestorer = Callable[
+    [tuple[EvidenceCheckpointRef, ...]], tuple[Evidence, ...]
+]
 type LeaseIsLive = Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
 class L2RunContext:
-    """All ephemeral dependencies of one L2 attempt.
-
-    ``checkpoint`` is optional so a newly queued run can use the same pure
-    state machine before Task 7 wires the PostgreSQL checkpoint store.  If a
-    writer is supplied, every accepted checkpoint is passed through it before
-    the next outward operation.
-    """
-
     run_id: str
     question: str
     planner: Planner
@@ -115,14 +113,14 @@ class L2RunContext:
     deterministic_verifier: DeterministicVerifier
     recovery_runner: RecoveryRunner
     checkpoint: RunCheckpoint | None = None
+    checkpoint_factory: Callable[[], RunCheckpoint] | None = None
     checkpoint_writer: CheckpointWriter | None = None
+    evidence_restorer: EvidenceRestorer | None = None
     lease_is_live: LeaseIsLive = lambda: True
 
 
 @dataclass(frozen=True, slots=True)
 class L2Outcome:
-    """Prose-free terminal projection for the worker and durable trace."""
-
     results: tuple[ComplianceResult, ...]
     reservation_ids: tuple[str, ...]
     tool_attempts_used: int
@@ -130,6 +128,11 @@ class L2Outcome:
     provider_error: str | None
     parse_fault: str | None
     egress_error: str | None = None
+    compliance: ComplianceOutcome | None = None
+    semantic_outcomes: tuple[tuple[str, SemanticOutcome], ...] = ()
+    recovery_outcomes: tuple[RecoveryOutcome, ...] = ()
+    evidence_calls: tuple[object, ...] = ()
+    checkpoints: tuple[RunCheckpoint, ...] = ()
 
 
 def logical_stage_key(
@@ -139,7 +142,6 @@ def logical_stage_key(
     recovery: bool,
     reconstruction_generation: int,
 ) -> str:
-    """Stable logical identity; only process-loss reconstruction increments g."""
     if claim_id is None:
         return f"{run_id}-{stage}-initial-g{reconstruction_generation}"
     branch = "recovery" if recovery else "initial"
@@ -147,190 +149,220 @@ def logical_stage_key(
 
 
 async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
-    """Run planner → evidence → Compliance → deterministic → semantic.
-
-    A failure in either verifier may use exactly one injected directed recovery.
-    Recovery rebuilds the transient candidate evidence handles and always
-    re-enters deterministic verification before semantic verification.
-    """
+    """Execute exactly the missing portion of the closed checkpoint graph."""
     checkpoint = context.checkpoint
-    reservations: list[str] = list(
+    if checkpoint is None and context.checkpoint_factory is not None:
+        checkpoint = context.checkpoint_factory()
+    reservations = [
         str(item) for item in (checkpoint.reservation_ids if checkpoint else ())
-    )
-    recovery_attempted = bool(checkpoint and checkpoint.recovery_attempted)
-    attempts_used = checkpoint.tool_attempts_used if checkpoint else 0
-    evidence: tuple[Evidence, ...] = ()
-    plan: ToolPlan | None = None
+    ]
+    attempts = checkpoint.tool_attempts_used if checkpoint else 0
+    recovered = bool(checkpoint and checkpoint.recovery_attempted)
+    written: list[RunCheckpoint] = []
+    semantic_outcomes: list[tuple[str, SemanticOutcome]] = []
+    recovery_outcomes: list[RecoveryOutcome] = []
+    evidence_calls: tuple[object, ...] = ()
+    evidence = _restore(context, checkpoint)
+
+    async def write(stage: CheckpointStage, **updates: Any) -> None:
+        nonlocal checkpoint
+        checkpoint = await _advance(context, checkpoint, stage, **updates)
+        if checkpoint is not None:
+            written.append(checkpoint)
 
     try:
-        # Evidence can be reconstructed locally only when a caller provides a
-        # ready plan/evidence cache. Checkpoints intentionally contain no prose,
-        # so the durable planned/evidence stages reissue their lost model stage
-        # under the next reconstruction generation.
-        plan_generation = _generation(checkpoint, "planning", None, False)
-        planning = await context.planner.plan(
-            context.question,
-            replace(
-                context.planner_context,
-                reconstruction_generation=plan_generation,
-            ),
-        )
-        if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
-        plan = planning.plan
-        reservations.append(planning.reservation_id)
-        checkpoint = await _checkpoint(
-            context,
-            checkpoint,
-            CheckpointStage.PLANNED,
-            plan_id=plan.plan_id,
-            plan_hash=_plan_hash(plan),
-            reservation_ids=tuple(reservations),
-            attempts_used=attempts_used,
-            recovery_attempted=recovery_attempted,
-        )
-        if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
+        # No checkpoint means no state was durably accepted yet. Planning is
+        # the first external operation and must be followed by PLANNED.
+        if checkpoint is None:
+            if not context.lease_is_live():
+                return _abandoned(attempts, reservations, recovered, written)
+            planning = await context.planner.plan(
+                context.question,
+                replace(context.planner_context, reconstruction_generation=0),
+            )
+            if not context.lease_is_live():
+                return _abandoned(attempts, reservations, recovered, written)
+            reservations.append(planning.reservation_id)
+            await write(
+                CheckpointStage.PLANNED,
+                plan_id=planning.plan.plan_id,
+                plan_hash=_plan_hash(planning.plan),
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
+                generation=StageGeneration(
+                    stage="planning", claim_id=None, recovery=False, generation=0
+                ),
+            )
+            plan = planning.plan
+        elif checkpoint.stage is CheckpointStage.PLANNED:
+            # The plan's text-bearing tool arguments are deliberately absent;
+            # a process loss sends planning at a newly persisted generation.
+            checkpoint = await _prepare_generation(
+                context, checkpoint, "planning", None, False, written
+            )
+            if not context.lease_is_live():
+                return _abandoned(attempts, reservations, recovered, written)
+            generation = _latest_generation(checkpoint, "planning", None, False)
+            planning = await context.planner.plan(
+                context.question,
+                replace(context.planner_context, reconstruction_generation=generation),
+            )
+            if not context.lease_is_live():
+                return _abandoned(attempts, reservations, recovered, written)
+            reservations.append(planning.reservation_id)
+            await write(
+                CheckpointStage.PLANNED,
+                plan_id=planning.plan.plan_id,
+                plan_hash=_plan_hash(planning.plan),
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
+                allow_same_stage=True,
+            )
+            plan = planning.plan
+        else:
+            # A plan is not safely reconstructible from its hash. The caller
+            # must supply a resume-created context with current plan or begin
+            # from PLANNED. Refuse before any new external operation.
+            return _fault(
+                "checkpoint_plan_unavailable",
+                attempts,
+                reservations,
+                recovered,
+                written,
+            )
 
+        if not context.lease_is_live():
+            return _abandoned(attempts, reservations, recovered, written)
         collected = await context.evidence_agent.collect(
             plan,
             context.planner_context.corpus_manifest_id,
             attempt_budget=_L2_TOOL_BUDGET,
-            attempts_used=attempts_used,
+            attempts_used=attempts,
         )
         if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
-        attempts_used = collected.attempts_used
+            return _abandoned(attempts, reservations, recovered, written)
+        attempts = collected.attempts_used
         evidence = _bounded_evidence(collected.evidence)
-        checkpoint = await _checkpoint(
-            context,
-            checkpoint,
+        evidence_calls = tuple(collected.calls)
+        await write(
             CheckpointStage.EVIDENCE_COLLECTED,
             evidence=evidence,
-            reservation_ids=tuple(reservations),
-            attempts_used=attempts_used,
-            recovery_attempted=recovery_attempted,
+            reservation_ids=reservations,
+            attempts=attempts,
+            recovered=recovered,
+        )
+
+        checkpoint = await _prepare_generation(
+            context, checkpoint, "compliance", None, False, written
         )
         if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
-
-        compliance_generation = _generation(checkpoint, "compliance", None, False)
+            return _abandoned(attempts, reservations, recovered, written)
+        generation = _latest_generation(checkpoint, "compliance", None, False)
         compliance = await context.compliance_agent.evaluate(
             context.question,
             evidence,
             replace(
                 context.compliance_context,
-                # The stage adapter prefixes ``run_id-stage`` itself; give it
-                # the logical suffix, not the full key, to avoid a doubled
-                # prefix at the enforcer boundary.
                 idempotency_key="initial",
-                reconstruction_generation=compliance_generation,
+                reconstruction_generation=generation,
             ),
         )
         if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
+            return _abandoned(attempts, reservations, recovered, written)
         reservations.append(compliance.reservation_id)
-        checkpoint = await _checkpoint(
-            context,
-            checkpoint,
+        await write(
             CheckpointStage.CANDIDATE_BUILT,
-            reservation_ids=tuple(reservations),
-            attempts_used=attempts_used,
-            recovery_attempted=recovery_attempted,
+            reservation_ids=reservations,
+            attempts=attempts,
+            recovered=recovered,
         )
-        if not context.lease_is_live():
-            return _abandoned(attempts_used, reservations, recovery_attempted)
 
         results: list[ComplianceResult] = []
         for candidate in compliance.candidates:
             (
                 result,
                 evidence,
-                attempts_used,
-                recovery_attempted,
-                semantic_id,
-            ) = await _verify_candidate(
-                context,
-                candidate,
-                evidence,
-                attempts_used,
-                recovery_attempted,
+                attempts,
+                recovered,
+                semantic,
+                recovery,
+            ) = await _one_claim(
+                context, checkpoint, candidate, evidence, attempts, recovered, written
             )
-            if semantic_id is not None:
-                reservations.append(semantic_id)
+            if semantic is not None:
+                reservations.append(semantic.reservation_id)
+                semantic_outcomes.append((candidate.claim_id, semantic))
+            if recovery is not None:
+                recovery_outcomes.append(recovery)
             if not context.lease_is_live():
-                return _abandoned(attempts_used, reservations, recovery_attempted)
+                return _abandoned(attempts, reservations, recovered, written)
             results.append(result)
 
-        # A final result is checkpointed only after it is validated.  The
-        # checkpoint contract is intentionally prose-free.
-        if (
-            checkpoint is not None
-            and checkpoint.stage is CheckpointStage.SEMANTIC_VERIFIED
-        ):
-            await _checkpoint(
-                context,
-                checkpoint,
+        if checkpoint is not None:
+            await write(
                 CheckpointStage.COMPLETED,
-                reservation_ids=tuple(reservations),
-                attempts_used=attempts_used,
-                recovery_attempted=recovery_attempted,
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
                 completed_results=tuple(results),
             )
         return L2Outcome(
             tuple(results),
             tuple(reservations),
-            attempts_used,
-            recovery_attempted,
+            attempts,
+            recovered,
             None,
             None,
+            compliance=compliance,
+            semantic_outcomes=tuple(semantic_outcomes),
+            recovery_outcomes=tuple(recovery_outcomes),
+            evidence_calls=evidence_calls,
+            checkpoints=tuple(written),
         )
     except EgressPolicyViolation as error:
-        return L2Outcome(
-            (),
-            tuple(reservations),
-            attempts_used,
-            recovery_attempted,
-            None,
-            None,
-            error.code,
+        return _fault(
+            error.code, attempts, reservations, recovered, written, egress=True
         )
     except ProviderAttemptError as error:
         return L2Outcome(
             (),
             tuple(reservations),
-            attempts_used,
-            recovery_attempted,
+            attempts,
+            recovered,
             error.public_error_code,
             None,
+            checkpoints=tuple(written),
         )
-    except InvalidComplianceReply:
-        return L2Outcome(
-            (),
-            tuple(reservations),
-            attempts_used,
-            recovery_attempted,
-            None,
-            "invalid_compliance_reply",
+    except InvalidComplianceReply as error:
+        reservations.append(error.reservation_id)
+        return _fault(
+            "invalid_compliance_reply", attempts, reservations, recovered, written
         )
-    except InvalidSemanticReply:
-        return L2Outcome(
-            (),
-            tuple(reservations),
-            attempts_used,
-            recovery_attempted,
-            None,
-            "invalid_semantic_reply",
+    except InvalidSemanticReply as error:
+        reservations.append(error.reservation_id)
+        return _fault(
+            "invalid_semantic_reply", attempts, reservations, recovered, written
         )
 
 
-async def _verify_candidate(
+async def _one_claim(
     context: L2RunContext,
+    checkpoint: RunCheckpoint | None,
     candidate: IdentifiedCandidate,
     evidence: tuple[Evidence, ...],
-    attempts_used: int,
-    recovery_attempted: bool,
-) -> tuple[ComplianceResult, tuple[Evidence, ...], int, bool, str | None]:
+    attempts: int,
+    recovered: bool,
+    written: list[RunCheckpoint],
+) -> tuple[
+    ComplianceResult,
+    tuple[Evidence, ...],
+    int,
+    bool,
+    SemanticOutcome | None,
+    RecoveryOutcome | None,
+]:
     if candidate.candidate.proposed_verdict is ComplianceVerdict.INSUFFICIENT_EVIDENCE:
         return (
             _insufficient(
@@ -339,73 +371,87 @@ async def _verify_candidate(
                 "proposed_insufficient",
             ),
             evidence,
-            attempts_used,
-            recovery_attempted,
+            attempts,
+            recovered,
+            None,
             None,
         )
-
-    active = candidate
-    deterministic = context.deterministic_verifier(active.candidate, evidence)
-    checkpoint = context.checkpoint
+    deterministic = context.deterministic_verifier(candidate.candidate, evidence)
     if not deterministic.passed:
-        recovered = await _recover(
-            context,
-            active,
-            evidence,
-            _deterministic_reasons(deterministic),
-            attempts_used,
-            recovery_attempted,
+        replacement = await _recover(
+            context, candidate, evidence, deterministic, attempts, recovered
         )
-        if recovered is None:
+        if replacement is None:
             return (
                 _insufficient(
-                    active.claim_id,
+                    candidate.claim_id,
                     VerificationStatus.DETERMINISTIC_FAILED,
-                    _first_deterministic_reason(deterministic),
+                    _reason(deterministic),
                 ),
                 evidence,
-                attempts_used,
-                recovery_attempted,
+                attempts,
+                recovered,
+                None,
                 None,
             )
-        evidence, attempts_used = recovered
-        recovery_attempted = True
+        evidence, attempts, recovery = replacement
+        recovered = True
         if checkpoint is not None:
-            checkpoint = await _checkpoint(
+            checkpoint = await _advance(
                 context,
                 checkpoint,
                 CheckpointStage.RECOVERY_COMPLETED,
                 evidence=evidence,
-                reservation_ids=tuple(str(item) for item in checkpoint.reservation_ids),
-                attempts_used=attempts_used,
-                recovery_attempted=True,
+                attempts=attempts,
+                recovered=True,
             )
-        active = _rebuild_candidate(active, evidence)
-        deterministic = context.deterministic_verifier(active.candidate, evidence)
+            if checkpoint is not None:
+                written.append(checkpoint)
+        deterministic = context.deterministic_verifier(
+            _rebuilt(candidate, evidence).candidate, evidence
+        )
         if not deterministic.passed:
             return (
                 _insufficient(
-                    active.claim_id,
+                    candidate.claim_id,
                     VerificationStatus.DETERMINISTIC_FAILED,
-                    _first_deterministic_reason(deterministic),
+                    _reason(deterministic),
                 ),
                 evidence,
-                attempts_used,
-                recovery_attempted,
+                attempts,
+                recovered,
                 None,
+                recovery,
             )
-
+    else:
+        recovery = None
     if checkpoint is not None:
-        checkpoint = await _checkpoint(
+        checkpoint = await _advance(
             context,
             checkpoint,
             CheckpointStage.DETERMINISTIC_VERIFIED,
             evidence=evidence,
-            reservation_ids=tuple(str(item) for item in checkpoint.reservation_ids),
-            attempts_used=attempts_used,
-            recovery_attempted=recovery_attempted,
+            attempts=attempts,
+            recovered=recovered,
         )
-    generation = 0
+        if checkpoint is not None:
+            written.append(checkpoint)
+    active = _rebuilt(candidate, evidence) if recovered else candidate
+    checkpoint = await _prepare_generation(
+        context, checkpoint, "verifier", active.claim_id, recovered, written
+    )
+    if not context.lease_is_live():
+        return (
+            _insufficient(
+                active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
+            ),
+            evidence,
+            attempts,
+            recovered,
+            None,
+            recovery,
+        )
+    generation = _latest_generation(checkpoint, "verifier", active.claim_id, recovered)
     semantic = await context.semantic_verifier.verify(
         active,
         evidence,
@@ -413,9 +459,7 @@ async def _verify_candidate(
         replace(
             context.semantic_context,
             idempotency_key=(
-                f"{active.claim_id}-recovery"
-                if recovery_attempted
-                else f"{active.claim_id}-initial"
+                f"{active.claim_id}-{'recovery' if recovered else 'initial'}"
             ),
             reconstruction_generation=generation,
         ),
@@ -426,43 +470,41 @@ async def _verify_candidate(
                 active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
             ),
             evidence,
-            attempts_used,
-            recovery_attempted,
+            attempts,
+            recovered,
             None,
+            recovery,
         )
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
-            await _checkpoint(
+            checkpoint = await _advance(
                 context,
                 checkpoint,
                 CheckpointStage.SEMANTIC_VERIFIED,
                 evidence=evidence,
-                reservation_ids=tuple(str(item) for item in checkpoint.reservation_ids),
-                attempts_used=attempts_used,
-                recovery_attempted=recovery_attempted,
+                attempts=attempts,
+                recovered=recovered,
             )
+            if checkpoint is not None:
+                written.append(checkpoint)
         return (
-            ComplianceResult(
-                claim_id=active.claim_id,
-                verdict=active.candidate.proposed_verdict,
-                verification_status=VerificationStatus.VERIFIED,
-                citations=deterministic.citations,
-            ),
+            _verified(active, deterministic),
             evidence,
-            attempts_used,
-            recovery_attempted,
-            semantic.reservation_id,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
         )
-
-    recovered = await _recover(
+    replacement = await _recover(
         context,
         active,
         evidence,
-        (semantic.decision.reason.value,),
-        attempts_used,
-        recovery_attempted,
+        deterministic,
+        attempts,
+        recovered,
+        semantic_reason=semantic.decision.reason.value,
     )
-    if recovered is None:
+    if replacement is None:
         return (
             _insufficient(
                 active.claim_id,
@@ -470,35 +512,63 @@ async def _verify_candidate(
                 semantic.decision.reason.value,
             ),
             evidence,
-            attempts_used,
-            recovery_attempted,
-            semantic.reservation_id,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
         )
-    evidence, attempts_used = recovered
-    recovery_attempted = True
+    evidence, attempts, recovery = replacement
+    recovered = True
     if checkpoint is not None:
-        checkpoint = await _checkpoint(
+        checkpoint = await _advance(
             context,
             checkpoint,
             CheckpointStage.RECOVERY_COMPLETED,
             evidence=evidence,
-            reservation_ids=tuple(str(item) for item in checkpoint.reservation_ids),
-            attempts_used=attempts_used,
-            recovery_attempted=True,
+            attempts=attempts,
+            recovered=True,
         )
-    active = _rebuild_candidate(active, evidence)
+        if checkpoint is not None:
+            written.append(checkpoint)
+    active = _rebuilt(active, evidence)
     deterministic = context.deterministic_verifier(active.candidate, evidence)
     if not deterministic.passed:
         return (
             _insufficient(
                 active.claim_id,
                 VerificationStatus.DETERMINISTIC_FAILED,
-                _first_deterministic_reason(deterministic),
+                _reason(deterministic),
             ),
             evidence,
-            attempts_used,
-            recovery_attempted,
-            semantic.reservation_id,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
+        )
+    if checkpoint is not None:
+        checkpoint = await _advance(
+            context,
+            checkpoint,
+            CheckpointStage.DETERMINISTIC_VERIFIED,
+            evidence=evidence,
+            attempts=attempts,
+            recovered=True,
+        )
+        if checkpoint is not None:
+            written.append(checkpoint)
+    checkpoint = await _prepare_generation(
+        context, checkpoint, "verifier", active.claim_id, True, written
+    )
+    if not context.lease_is_live():
+        return (
+            _insufficient(
+                active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
+            ),
+            evidence,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
         )
     semantic = await context.semantic_verifier.verify(
         active,
@@ -507,31 +577,30 @@ async def _verify_candidate(
         replace(
             context.semantic_context,
             idempotency_key=f"{active.claim_id}-recovery",
-            reconstruction_generation=0,
+            reconstruction_generation=_latest_generation(
+                checkpoint, "verifier", active.claim_id, True
+            ),
         ),
     )
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
-            await _checkpoint(
+            checkpoint = await _advance(
                 context,
                 checkpoint,
                 CheckpointStage.SEMANTIC_VERIFIED,
                 evidence=evidence,
-                reservation_ids=tuple(str(item) for item in checkpoint.reservation_ids),
-                attempts_used=attempts_used,
-                recovery_attempted=recovery_attempted,
+                attempts=attempts,
+                recovered=True,
             )
+            if checkpoint is not None:
+                written.append(checkpoint)
         return (
-            ComplianceResult(
-                claim_id=active.claim_id,
-                verdict=active.candidate.proposed_verdict,
-                verification_status=VerificationStatus.VERIFIED,
-                citations=deterministic.citations,
-            ),
+            _verified(active, deterministic),
             evidence,
-            attempts_used,
-            recovery_attempted,
-            semantic.reservation_id,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
         )
     return (
         _insufficient(
@@ -540,9 +609,10 @@ async def _verify_candidate(
             semantic.decision.reason.value,
         ),
         evidence,
-        attempts_used,
-        recovery_attempted,
-        semantic.reservation_id,
+        attempts,
+        recovered,
+        semantic,
+        recovery,
     )
 
 
@@ -550,37 +620,142 @@ async def _recover(
     context: L2RunContext,
     candidate: IdentifiedCandidate,
     evidence: tuple[Evidence, ...],
-    reasons: tuple[str, ...],
-    attempts_used: int,
-    recovery_attempted: bool,
-) -> tuple[tuple[Evidence, ...], int] | None:
-    if recovery_attempted or attempts_used >= _L2_TOOL_BUDGET:
+    deterministic: DeterministicResult,
+    attempts: int,
+    recovered: bool,
+    *,
+    semantic_reason: str | None = None,
+) -> tuple[tuple[Evidence, ...], int, RecoveryOutcome] | None:
+    if recovered or attempts >= _L2_TOOL_BUDGET or not context.lease_is_live():
         return None
-    recovered = await context.recovery_runner(
-        candidate, evidence, reasons, attempts_used
+    reasons = (
+        (semantic_reason,)
+        if semantic_reason is not None
+        else tuple(
+            check.fault.value
+            for check in deterministic.checks
+            if check.fault is not None
+        )
     )
-    if not context.lease_is_live() or recovered.attempts_used > _L2_TOOL_BUDGET:
+    outcome = await context.recovery_runner(candidate, evidence, reasons, attempts)
+    if not context.lease_is_live() or outcome.attempts_used > _L2_TOOL_BUDGET:
         return None
-    return _bounded_evidence(recovered.evidence), recovered.attempts_used
+    return _bounded_evidence(outcome.evidence), outcome.attempts_used, outcome
 
 
-def _rebuild_candidate(
-    candidate: IdentifiedCandidate, evidence: tuple[Evidence, ...]
-) -> IdentifiedCandidate:
-    # Recovery never trusts a model to nominate a new Evidence ID. It derives a
-    # fresh, bounded local candidate from the frozen evidence just recovered.
-    rebuilt = ComplianceCandidate(
-        claim=candidate.candidate.claim,
-        proposed_verdict=candidate.candidate.proposed_verdict,
-        # ``execute_recovery`` preserves the old items and appends locally
-        # rebuilt ones.  Prefer the bounded replacement tail so a known-bad
-        # initial handle cannot crowd the recovered evidence back out.
-        evidence_ids=tuple(
-            item.excerpt.content_hash for item in evidence[-_MAX_CANDIDATE_EVIDENCE:]
-        ),
-        rationale=candidate.candidate.rationale,
+async def _prepare_generation(
+    context: L2RunContext,
+    checkpoint: RunCheckpoint | None,
+    stage: Literal["planning", "compliance", "verifier"],
+    claim_id: str | None,
+    recovery: bool,
+    written: list[RunCheckpoint],
+) -> RunCheckpoint | None:
+    if checkpoint is None:
+        return None
+    # Before *every* send record the generation token. New runs record g0;
+    # an interrupted checkpoint advances to g1 before the reconstructed send.
+    existing = [
+        item
+        for item in checkpoint.reconstruction_generations
+        if item.stage == stage
+        and item.claim_id == claim_id
+        and item.recovery == recovery
+    ]
+    generation = 0 if not existing else max(item.generation for item in existing) + 1
+    next_checkpoint = checkpoint.model_copy(
+        update={
+            "checkpoint_version": checkpoint.checkpoint_version + 1,
+            "reconstruction_generations": checkpoint.reconstruction_generations
+            + (
+                StageGeneration(
+                    stage=stage,
+                    claim_id=claim_id,
+                    recovery=recovery,
+                    generation=generation,
+                ),
+            ),
+        }
     )
-    return IdentifiedCandidate(claim_id=candidate.claim_id, candidate=rebuilt)
+    if context.checkpoint_writer is not None:
+        next_checkpoint = await context.checkpoint_writer(next_checkpoint)
+    written.append(next_checkpoint)
+    return next_checkpoint
+
+
+async def _advance(
+    context: L2RunContext,
+    previous: RunCheckpoint | None,
+    stage: CheckpointStage,
+    *,
+    evidence: tuple[Evidence, ...] = (),
+    reservation_ids: list[str] | None = None,
+    attempts: int = 0,
+    recovered: bool = False,
+    plan_id: str | None = None,
+    plan_hash: str | None = None,
+    generation: StageGeneration | None = None,
+    completed_results: tuple[ComplianceResult, ...] = (),
+    allow_same_stage: bool = False,
+) -> RunCheckpoint | None:
+    if previous is None:
+        return None
+    if stage is previous.stage and not allow_same_stage:
+        return previous
+    refs = _refs(evidence) or previous.evidence
+    generations = previous.reconstruction_generations
+    if generation is not None and generation not in generations:
+        generations += (generation,)
+    next_checkpoint = previous.model_copy(
+        update={
+            "checkpoint_version": previous.checkpoint_version + 1,
+            "stage": stage,
+            "plan_id": plan_id if plan_id is not None else previous.plan_id,
+            "plan_hash": plan_hash if plan_hash is not None else previous.plan_hash,
+            "evidence": refs,
+            "reservation_ids": tuple(
+                UUID(value)
+                for value in (
+                    reservation_ids or [str(item) for item in previous.reservation_ids]
+                )
+            ),
+            "tool_attempts_used": attempts,
+            "recovery_attempted": recovered,
+            "completed_claim_ids": tuple(item.claim_id for item in completed_results)
+            or previous.completed_claim_ids,
+            "completed_results": completed_results or previous.completed_results,
+        }
+    )
+    if context.checkpoint_writer is not None:
+        return await context.checkpoint_writer(next_checkpoint)
+    return next_checkpoint
+
+
+def _restore(
+    context: L2RunContext, checkpoint: RunCheckpoint | None
+) -> tuple[Evidence, ...]:
+    if checkpoint is None or context.evidence_restorer is None:
+        return ()
+    return _bounded_evidence(context.evidence_restorer(checkpoint.evidence))
+
+
+def _refs(evidence: tuple[Evidence, ...]) -> tuple[EvidenceCheckpointRef, ...]:
+    return tuple(
+        EvidenceCheckpointRef(
+            evidence_id=item.excerpt.content_hash,
+            content_hash=item.excerpt.content_hash,
+            quote_hash=item.excerpt.quote_hash,
+            clause_id=item.disclosed.clause_id,
+            document_id=item.disclosed.document_id,
+            document_version=item.disclosed.document_version,
+            section_number=item.disclosed.section_number,
+            paragraph_start=item.excerpt.span.paragraph_start,
+            paragraph_end=item.excerpt.span.paragraph_end,
+            token_start=item.excerpt.span.token_start,
+            token_end=item.excerpt.span.token_end,
+        )
+        for item in evidence
+    )
 
 
 def _bounded_evidence(evidence: tuple[Evidence, ...]) -> tuple[Evidence, ...]:
@@ -592,13 +767,35 @@ def _bounded_evidence(evidence: tuple[Evidence, ...]) -> tuple[Evidence, ...]:
     return tuple(unique.values())
 
 
-def _deterministic_reasons(result: DeterministicResult) -> tuple[str, ...]:
-    return tuple(
-        check.fault.value for check in result.checks if check.fault is not None
+def _rebuilt(
+    candidate: IdentifiedCandidate, evidence: tuple[Evidence, ...]
+) -> IdentifiedCandidate:
+    return IdentifiedCandidate(
+        claim_id=candidate.claim_id,
+        candidate=ComplianceCandidate(
+            claim=candidate.candidate.claim,
+            proposed_verdict=candidate.candidate.proposed_verdict,
+            evidence_ids=tuple(
+                item.excerpt.content_hash
+                for item in evidence[-_MAX_CANDIDATE_EVIDENCE:]
+            ),
+            rationale=candidate.candidate.rationale,
+        ),
     )
 
 
-def _first_deterministic_reason(result: DeterministicResult) -> str:
+def _verified(
+    candidate: IdentifiedCandidate, deterministic: DeterministicResult
+) -> ComplianceResult:
+    return ComplianceResult(
+        claim_id=candidate.claim_id,
+        verdict=candidate.candidate.proposed_verdict,
+        verification_status=VerificationStatus.VERIFIED,
+        citations=deterministic.citations,
+    )
+
+
+def _reason(result: DeterministicResult) -> str:
     return next(
         (check.fault.value for check in result.checks if check.fault is not None),
         "no_verified_evidence",
@@ -616,93 +813,60 @@ def _insufficient(
     )
 
 
-def _generation(
+def _latest_generation(
     checkpoint: RunCheckpoint | None, stage: str, claim_id: str | None, recovery: bool
 ) -> int:
     if checkpoint is None:
         return 0
-    generations = [
+    values = [
         item.generation
         for item in checkpoint.reconstruction_generations
         if item.stage == stage
         and item.claim_id == claim_id
         and item.recovery == recovery
     ]
-    return (max(generations) + 1) if generations else 0
-
-
-async def _checkpoint(
-    context: L2RunContext,
-    previous: RunCheckpoint | None,
-    stage: CheckpointStage,
-    *,
-    evidence: tuple[Evidence, ...] = (),
-    reservation_ids: tuple[str, ...],
-    attempts_used: int,
-    recovery_attempted: bool,
-    plan_id: str | None = None,
-    plan_hash: str | None = None,
-    completed_results: tuple[ComplianceResult, ...] = (),
-) -> RunCheckpoint | None:
-    # Task 7 owns creation of the initial durable envelope. This function only
-    # advances a supplied envelope; it cannot accidentally persist prose.
-    if previous is None or context.checkpoint_writer is None:
-        return previous
-    if stage is previous.stage:
-        return previous
-    from specpilot.checkpoints.contracts import EvidenceCheckpointRef
-
-    safe_evidence = tuple(
-        EvidenceCheckpointRef(
-            evidence_id=item.excerpt.content_hash,
-            content_hash=item.excerpt.content_hash,
-            quote_hash=item.excerpt.quote_hash,
-            clause_id=item.disclosed.clause_id,
-            document_id=item.disclosed.document_id,
-            document_version=item.disclosed.document_version,
-            section_number=item.disclosed.section_number,
-            paragraph_start=item.excerpt.span.paragraph_start,
-            paragraph_end=item.excerpt.span.paragraph_end,
-            token_start=item.excerpt.span.token_start,
-            token_end=item.excerpt.span.token_end,
-        )
-        for item in evidence
-    )
-    next_checkpoint = previous.model_copy(
-        update={
-            "checkpoint_version": previous.checkpoint_version + 1,
-            "stage": stage,
-            "plan_id": plan_id if plan_id is not None else previous.plan_id,
-            "plan_hash": plan_hash if plan_hash is not None else previous.plan_hash,
-            "evidence": safe_evidence or previous.evidence,
-            "reservation_ids": tuple(_uuid_values(reservation_ids)),
-            "tool_attempts_used": attempts_used,
-            "recovery_attempted": recovery_attempted,
-            "completed_claim_ids": tuple(item.claim_id for item in completed_results)
-            or previous.completed_claim_ids,
-            "completed_results": completed_results or previous.completed_results,
-        }
-    )
-    return await context.checkpoint_writer(next_checkpoint)
-
-
-def _uuid_values(values: tuple[str, ...]) -> tuple[UUID, ...]:
-    from uuid import UUID
-
-    return tuple(UUID(value) for value in values)
+    return max(values) if values else 0
 
 
 def _plan_hash(plan: ToolPlan) -> str:
-    import hashlib
-
-    return hashlib.sha256(plan.model_dump_json().encode("utf-8")).hexdigest()
+    return hashlib.sha256(plan.model_dump_json().encode()).hexdigest()
 
 
 def _abandoned(
-    attempts_used: int, reservations: list[str], recovery_attempted: bool
+    attempts: int,
+    reservations: list[str],
+    recovered: bool,
+    checkpoints: list[RunCheckpoint],
 ) -> L2Outcome:
     return L2Outcome(
-        (), tuple(reservations), attempts_used, recovery_attempted, None, "lease_lost"
+        (),
+        tuple(reservations),
+        attempts,
+        recovered,
+        None,
+        "lease_lost",
+        checkpoints=tuple(checkpoints),
+    )
+
+
+def _fault(
+    reason: str,
+    attempts: int,
+    reservations: list[str],
+    recovered: bool,
+    checkpoints: list[RunCheckpoint],
+    *,
+    egress: bool = False,
+) -> L2Outcome:
+    return L2Outcome(
+        (),
+        tuple(reservations),
+        attempts,
+        recovered,
+        None,
+        None if egress else reason,
+        reason if egress else None,
+        checkpoints=tuple(checkpoints),
     )
 
 

@@ -278,6 +278,104 @@ async def test_deterministic_failure_recovers_once_then_reruns_every_gate() -> N
     assert outcome.results[0].verification_status.value == "verified"
 
 
+async def test_l2_is_one_run_scoped_recovery_across_three_candidates() -> None:
+    item = evidence()
+    candidates = tuple(
+        IdentifiedCandidate(
+            claim_id=hashlib.sha256(f"claim {index}".encode()).hexdigest(),
+            candidate=ComplianceCandidate(
+                claim=f"claim {index}",
+                proposed_verdict="compliant",
+                evidence_ids=(item.excerpt.content_hash,),
+                rationale="fixture",
+            ),
+        )
+        for index in range(3)
+    )
+    made = context(
+        deterministic=lambda *_: passed(item),
+        semantic=Semantic([False, False, True, True]),
+    )
+
+    # Exact shaped batch fake makes the three candidates visible to the same
+    # run state rather than resetting recovery in a per-claim helper.
+    class BatchCompliance(Compliance):
+        async def evaluate(self, *args: object) -> ComplianceOutcome:
+            base = await super().evaluate(*args)
+            return ComplianceOutcome(
+                batch=ComplianceBatch(
+                    candidates=tuple(item.candidate for item in candidates)
+                ),
+                candidates=candidates,
+                reservation_id=base.reservation_id,
+                replayed=False,
+                request_size=base.request_size,
+            )
+
+    recovery_calls = 0
+
+    async def recover(*args: object) -> RecoveryOutcome:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return RecoveryOutcome((item,), (), 1)
+
+    made = dataclass_replace(
+        made,
+        compliance_agent=BatchCompliance(candidates[0]),
+        recovery_runner=recover,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert len(outcome.results) == 3
+    assert recovery_calls == 1
+    assert outcome.results[0].verification_status.value == "semantic_failed"
+    assert all(
+        result.verification_status.value == "verified" for result in outcome.results[1:]
+    )
+
+
+async def test_eight_call_budget_prevents_recovery_send() -> None:
+    item = evidence()
+    made = context(
+        deterministic=lambda *_: DeterministicResult(
+            checks=(
+                DeterministicCheck(
+                    item.excerpt.content_hash, DeterministicFault.NOT_DISCLOSED
+                ),
+            ),
+            citations=(),
+        ),
+        semantic=Semantic([True]),
+    )
+    made.evidence_agent.calls = 0
+
+    async def exhausted(
+        self: object, plan: object, corpus_manifest_id: str, **kwargs: object
+    ) -> EvidenceResult:
+        return EvidenceResult((item,), (), 8)
+
+    made = dataclass_replace(
+        made, evidence_agent=type("E", (), {"collect": exhausted})()
+    )
+    recovery_calls = 0
+
+    async def recover(*args: object) -> RecoveryOutcome:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return RecoveryOutcome((item,), (), 9)
+
+    made = dataclass_replace(made, recovery_runner=recover)
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert recovery_calls == 0
+    assert outcome.tool_attempts_used == 8
+    assert outcome.results[0].verification_status.value == "deterministic_failed"
+
+
 def dataclass_replace(value: object, **changes: object):
     from dataclasses import replace
 

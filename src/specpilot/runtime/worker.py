@@ -25,12 +25,16 @@ from specpilot.runs.contracts import (
     AgentStepEvent,
     AgentStepPhase,
     AnswerOutcomeEvent,
+    CheckpointSummaryEvent,
+    ComplianceSummaryEvent,
     EgressSummaryEvent,
     EvidenceRefSummary,
     EvidenceSummaryEvent,
     PlanSummaryEvent,
+    RecoverySummaryEvent,
     RunEvent,
     RunStatus,
+    SemanticSummaryEvent,
     TerminalEvent,
     ToolFinishedEvent,
     VerifierCheckSummary,
@@ -122,6 +126,8 @@ class RunJob:
     answer_context: Mapping[str, object] = field(repr=False)
     task_level: Literal["L1", "L2"] = "L1"
     l2_context: L2RunContext | None = field(default=None, repr=False)
+    lease_acquired: bool = False
+    attempt: int = 1
 
 
 class RunWorker:
@@ -273,13 +279,14 @@ class RunWorker:
         await self._run_l1(job)
 
     async def _run_l1(self, job: RunJob) -> None:
-        claimed = await self._store.claim(
-            job.run_id,
-            self._worker_id,
-            lease_seconds=self._lease_seconds,
-        )
-        if not claimed:
-            return
+        if not job.lease_acquired:
+            claimed = await self._store.claim(
+                job.run_id,
+                self._worker_id,
+                lease_seconds=self._lease_seconds,
+            )
+            if not claimed:
+                return
 
         lease_lost = asyncio.Event()
         stop_heartbeat = asyncio.Event()
@@ -494,13 +501,14 @@ class RunWorker:
         """Dispatch the separate L2 state machine without widening L1 limits."""
         if job.l2_context is None:
             return
-        claimed = await self._store.claim(
-            job.run_id,
-            self._worker_id,
-            lease_seconds=self._lease_seconds,
-        )
-        if not claimed:
-            return
+        if not job.lease_acquired:
+            claimed = await self._store.claim(
+                job.run_id,
+                self._worker_id,
+                lease_seconds=self._lease_seconds,
+            )
+            if not claimed:
+                return
         lease_lost = asyncio.Event()
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
@@ -509,6 +517,9 @@ class RunWorker:
         try:
             context = replace_l2_lease(job.l2_context, lease_lost)
             outcome = await self._l2_runner(context)
+            if lease_lost.is_set():
+                return
+            await self._append_l2_summaries(job.run_id, outcome)
             if lease_lost.is_set():
                 return
             terminal = project_l2_outcome(outcome)
@@ -526,6 +537,74 @@ class RunWorker:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
+
+    async def _append_l2_summaries(self, run_id: UUID, outcome: L2Outcome) -> None:
+        """Persist only opaque L2 accounting/verdict metadata, never prose."""
+        for checkpoint in outcome.checkpoints:
+            await self._append(
+                run_id,
+                CheckpointSummaryEvent(
+                    sequence=1,
+                    stage=checkpoint.stage.value,
+                    checkpoint_version=checkpoint.checkpoint_version,
+                    tool_attempts_used=checkpoint.tool_attempts_used,
+                    recovery_attempted=checkpoint.recovery_attempted,
+                ),
+            )
+        if outcome.compliance is not None:
+            await self._append(
+                run_id,
+                ComplianceSummaryEvent(
+                    sequence=1,
+                    candidate_count=len(outcome.compliance.candidates),
+                    claim_ids=tuple(
+                        item.claim_id for item in outcome.compliance.candidates
+                    ),
+                ),
+            )
+            await self._append(
+                run_id,
+                _admitted_egress_event(
+                    EgressStage.COMPLIANCE,
+                    reservation_id=outcome.compliance.reservation_id,
+                    replayed=outcome.compliance.replayed,
+                    request_size=outcome.compliance.request_size,
+                ),
+            )
+        for claim_id, semantic in outcome.semantic_outcomes:
+            await self._append(
+                run_id,
+                SemanticSummaryEvent(
+                    sequence=1,
+                    claim_id=claim_id,
+                    supports=semantic.decision.supports_verdict,
+                    reason=semantic.decision.reason.value,
+                ),
+            )
+            await self._append(
+                run_id,
+                _admitted_egress_event(
+                    EgressStage.VERIFIER,
+                    reservation_id=semantic.reservation_id,
+                    replayed=semantic.replayed,
+                    request_size=semantic.request_size,
+                ),
+            )
+        for recovery in outcome.recovery_outcomes:
+            for call in recovery.calls:
+                await self._append(
+                    run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
+                )
+            if recovery.calls:
+                await self._append(
+                    run_id,
+                    RecoverySummaryEvent(
+                        sequence=1,
+                        kind_name=recovery.calls[0].tool.value,
+                        reason="not_disclosed",
+                        remaining_tool_attempts=8 - recovery.attempts_used,
+                    ),
+                )
 
     async def _finish_error_stage(
         self,
