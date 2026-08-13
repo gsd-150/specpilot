@@ -105,6 +105,13 @@ def _build(
             document_version=document_version,
             content_hash=content_hash,
             section_number=section_number,
+            quote_hash=content_hash,
+            span=NormalizedExcerptSpan(
+                paragraph_start=ordinal,
+                paragraph_end=ordinal,
+                token_start=0,
+                token_end=max(len(text.split()), 1),
+            ),
         ),
     )
 

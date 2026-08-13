@@ -49,6 +49,7 @@ from specpilot.contracts.answer import (
     RefusalReason,
     VerifiedAnswer,
 )
+from specpilot.contracts.egress import NormalizedExcerptSpan
 
 
 class CitationFault(StrEnum):
@@ -67,6 +68,11 @@ class DisclosedClause:
     document_version: str
     content_hash: str
     section_number: str | None = None
+    # These stay local with the disclosure record.  The L1 citation checker
+    # needs only the frozen locator, while L2 re-resolves the unit and checks
+    # that the exact bytes and whole-unit coordinate range still agree.
+    quote_hash: str | None = None
+    span: NormalizedExcerptSpan | None = None
 
 
 @dataclass(frozen=True, slots=True)

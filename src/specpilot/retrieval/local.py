@@ -112,6 +112,14 @@ class LocalCorpus:
         """Return the whole unit. Raises rather than returning a partial one."""
         return self._units[unit_id]
 
+    def resolve(self, unit_id: str) -> IndexUnit | None:
+        """Return precisely the frozen unit named by ``unit_id``, if present.
+
+        Verification must not turn a missing locator into an approximate match:
+        a nearby unit would make a corrupted disclosure look legitimate.
+        """
+        return self._units.get(unit_id)
+
     def indexable(self) -> tuple[tuple[str, str], ...]:
         """`(unit_id, indexed_text)` pairs, the input both routes take."""
         return tuple((unit.unit_id, unit.indexed) for unit in self._units.values())
