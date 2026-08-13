@@ -33,6 +33,34 @@ unit: 1488 passed, 2 skipped
 cli: 181 passed
 ```
 
+## Resumable-stage closure
+
+`103a16b fix: resume every durable L2 checkpoint stage`
+
+- adds ephemeral, binding-checking plan and evidence restorers: the checkpoint
+  contains only plan ID/hash and frozen evidence identities, while a resumed
+  process must supply matching local objects or fail closed before egress;
+- resumes `evidence_collected`, `candidate_built`,
+  `deterministic_verified`, `recovery_completed`, and `semantic_verified`
+  without rerunning the planner; semantic-verified metadata completes locally;
+- makes completed claim IDs skip already published candidates on a multi-claim
+  resumed batch, and preserves received Compliance reservations through a legal
+  monotonic checkpoint update;
+- extends stateful-CAS unit coverage across every legal resume stage.
+
+Evidence:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/runtime/test_l2.py tests/unit/runtime/test_worker.py tests/unit/checkpoints/test_contracts.py -q
+55 passed
+
+PYTHONPATH=src make check
+ruff: passed
+mypy: passed (104 source files)
+unit: 1497 passed, 2 skipped
+cli: 181 passed
+```
+
 PostgreSQL integration was not run: the local database service is unavailable;
 the existing W4 fresh-service verification is deferred to Task 8.
 
