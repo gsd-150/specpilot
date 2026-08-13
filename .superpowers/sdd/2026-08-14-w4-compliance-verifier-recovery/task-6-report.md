@@ -39,3 +39,31 @@ the existing W4 fresh-service verification is deferred to Task 8.
 ## Commit
 
 `354a290 feat: run L2 candidates through both verifier layers`
+
+## Review remediation
+
+`eed0d99 fix: preserve L2 recovery state across process boundaries`
+
+- records reconstruction generations before reconstructed Compliance/Semantic
+  provider calls and keeps the same root/run bindings in injected contexts;
+- carries the run-scoped recovery flag across all three candidates and refuses
+  a recovery send once eight MCP attempts are exhausted;
+- allows a job whose resume transaction already acquired its lease to bypass a
+  second queue-only `claim`, while normal jobs retain the claim path;
+- projects sanitized Compliance/Semantic/Recovery/checkpoint metadata from the
+  L2 outcome through the existing typed trace events;
+- adds focused regression coverage for three-candidate recovery sharing and
+  zero recovery sends after the eight-call budget is consumed.
+
+Evidence after remediation:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/runtime/test_l2.py tests/unit/runtime/test_worker.py -q
+33 passed
+
+PYTHONPATH=src make check
+ruff: passed
+mypy: passed (104 source files)
+unit: 1490 passed, 2 skipped
+cli: 181 passed
+```
