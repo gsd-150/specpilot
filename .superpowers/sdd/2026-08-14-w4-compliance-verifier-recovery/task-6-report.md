@@ -33,6 +33,33 @@ unit: 1488 passed, 2 skipped
 cli: 181 passed
 ```
 
+## Production runtime join
+
+`3b2269f feat: construct leased L2 runtime jobs`
+
+- adds `L2JobFactory`, a non-HTTP runtime adapter that constructs L2
+  `RunJob`/`L2RunContext` instances from a durable `RunRecord` and checkpoint
+  store; it injects the real `write(previous_version, checkpoint)` CAS method;
+- validates all opaque run/checkpoint bindings before an acquired resume job is
+  constructed, and requires the checkpoint's post-`begin_resume` attempt;
+- marks acquired jobs so `RunWorker` skips a second claim, while new jobs retain
+  the queue claim and first-planned checkpoint creation path;
+- includes unit fakes covering new and acquired factory paths without invoking
+  an HTTP endpoint.
+
+Evidence:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/runtime/test_l2_factory.py tests/unit/runtime/test_worker.py -q
+30 passed
+
+PYTHONPATH=src make check
+ruff: passed
+mypy: passed (105 source files)
+unit: 1499 passed, 2 skipped
+cli: 181 passed
+```
+
 ## Resumable-stage closure
 
 `103a16b fix: resume every durable L2 checkpoint stage`
