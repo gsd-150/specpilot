@@ -1304,3 +1304,79 @@ the finding contract rather than something to settle here.
 independently searches for gold the forced choice could not surface, and it is
 what added §15.4.5 ¶2 back to `l1-dev-010`. L1 is not ready for evaluation until
 it has run.
+
+---
+
+### Task 13 (added 2026-08-13): one mistyped word ended an audit, and nothing could undo it
+
+The §8.2.3 audit for the 40-item L1 set was registered as run `831069…`. On the
+first item the reviewer typed `blocked`. That single word made the run
+unrecoverable, and it took three independently correct rules to do it:
+
+- `create_decision` refuses a second decision for an item — create-only.
+- `seal_run` refuses to seal while any decision is `audit_blocked`.
+- `create_run` refuses a second run for an item set that already has one.
+
+Each is right on its own. Together there was no exit. Resuming was worse than
+refusing: the CLI skipped the prompt whenever a decision existed, so it fell
+through to `apply_decision` with the blocked one and returned
+`pooling_decision_not_applied` — a message about applying a decision, for a run
+that needed the question asked again.
+
+**This is the fourth of this shape** — after the RFC family with no
+authorization path (Task 9) and the corpus ledger with no rebind (Task 11): a
+rule enforced in one direction with no corresponding path back.
+
+#### A second defect, which the typo only exposed
+
+`annotation progress --pool-dir` refused with `pooling_run_count_invalid`
+whenever it found more than one run. **The audit was a one-shot by
+construction.** Growing gold from 20 items to 40 needs a second run to cover the
+new ones, and registering it broke the command that reports whether the audit is
+done. This would have happened with a flawless review pass; the typo just got
+there first.
+
+#### The fix, and the design it went through
+
+Supersession is **its own record**, not a field on `PoolingDecision`. The first
+attempt added `supersedes_decision_id` to the decision and it was wrong for a
+concrete reason: `_record_bytes` dumps every field including defaults, and the
+record ID is the hash of those bytes, so a new field changes the canonical bytes
+of decisions already on disk. All 21 existing audit decisions stopped
+validating — `invalid_pooling_record`. **An append-only store does not get its
+history's identity rewritten to make room for a new column**, which is the same
+principle that ruled out deleting the blocked record by hand.
+
+The separate record is also the truer shape: a supersession has its own author
+and its own moment. It is an act performed on a decision, not a property the
+decision was born with. Same idiom as Task 11's ledger successor.
+
+- `PoolingSupersession` — run, item, superseded id, replacement id, reviewer.
+- `PoolingStore.supersede_decision` — compare-and-swap on the current head, so a
+  caller working from a stale view is refused rather than silently overwriting.
+- **Only `audit_blocked` may be superseded.** `blocked` means "I cannot
+  adjudicate this now" and is provisional by definition; `gold_complete` and
+  `gold_extended` are judgements, and replacing a judgement is re-rolling until
+  you like the answer, which is what forced choice exists to prevent.
+- `head_decisions` — the decisions nothing supersedes. `seal_run`, the review
+  loop and progress all read heads. **A head that is still blocked still
+  prevents sealing**; being blocked simply stopped being permanent.
+- `PoolingAuditProgress` counts across runs, **per item rather than per
+  decision**, because a later run re-registers everything an earlier one
+  covered. The scalar `run_id` and `sealed` became a per-run breakdown plus
+  `fully_sealed`: with several runs there is no "the run" for a `run_id` to hold.
+
+#### Verified
+
+The wedged run resumes: `l1-dev-001` is re-presented instead of refusing, and
+progress reads both real runs — 40 registered, 20 adjudicated, 1 blocked, not
+fully sealed. All 21 stored decisions still validate, and nothing was deleted.
+
+Two regression tests, both of which fail on the old code: a mistyped `blocked`
+must not end the run, and only a blocked decision may be superseded.
+
+1,857 pass, ruff and mypy clean. **One pre-existing failure is unrelated and
+untouched**: `tests/integration/api/test_l1_end_to_end.py` expects `answered`
+and gets `egress_blocked`. It fails identically with these changes stashed, so
+it is not from this work — but it means `main` is red on the full local suite
+while CI was green on the merge commit, and that gap is worth its own look.

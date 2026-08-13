@@ -18,7 +18,11 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
-from specpilot.annotation.progress import PoolingAuditProgress, read_progress
+from specpilot.annotation.progress import (
+    PoolingAuditProgress,
+    PoolingRunProgress,
+    read_progress,
+)
 from specpilot.annotation.review import (
     DeepReviewStore,
     ReviewStore,
@@ -136,6 +140,7 @@ from specpilot.retrieval.pooling import (
     PoolingUnitFact,
     apply_decision,
     build_pool,
+    head_decisions,
     inventory_sha256,
     seal_run,
 )
@@ -2022,7 +2027,13 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError):
         return _refuse("pooling_corpus_unavailable", EXIT_IO)
 
-    decisions = {item.item_id: item for item in store.read_decisions(arguments.run_id)}
+    decisions = {
+        head.item_id: head
+        for head in head_decisions(
+            store.read_decisions(arguments.run_id),
+            store.read_supersessions(arguments.run_id),
+        )
+    }
     applications = {
         item.decision_id: item for item in store.read_applications(arguments.run_id)
     }
@@ -2030,6 +2041,14 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
         existing = decisions.get(item.item_id)
         if existing is not None and existing.decision_id in applications:
             continue
+        # A blocked head is provisional and must be re-presented. Falling
+        # through to `apply_decision` with it — which is what happened before —
+        # raises "a blocked decision cannot be applied", so a single mistyped
+        # `blocked` wedged the run on its first item with no way past it.
+        superseded: PoolingDecision | None = None
+        if existing is not None and existing.outcome is PoolingOutcome.AUDIT_BLOCKED:
+            superseded = existing
+            existing = None
         if existing is None:
             current = heads.get(item.item_id)
             if current is None or current.annotation_id != item.annotation_id:
@@ -2066,8 +2085,16 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
                 reviewer_id=arguments.reviewer,
                 elapsed_seconds=int(time.monotonic() - started),
             )
+            if superseded is not None:
+                try:
+                    existing = store.supersede_decision(
+                        superseded, existing, reviewer_id=arguments.reviewer
+                    )
+                except ValueError:
+                    return _refuse("pooling_supersession_refused")
             if outcome is PoolingOutcome.AUDIT_BLOCKED:
-                store.create_decision(existing)
+                if superseded is None:
+                    store.create_decision(existing)
                 return _refuse("pooling_audit_blocked")
         try:
             apply_decision(
@@ -2093,6 +2120,7 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
                 run,
                 decisions=final_decisions,
                 applications=final_applications,
+                supersessions=store.read_supersessions(arguments.run_id),
             )
         )
     except (OSError, RuntimeError, ValueError):
@@ -2256,35 +2284,79 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
         store = PoolingStore(pool_dir)
         try:
             runs = store.read_runs()
-            if len(runs) != 1:
-                return _refuse("pooling_run_count_invalid")
-            run = runs[0]
-            decisions = store.read_decisions(cast(str, run.run_id))
-            applications = store.read_applications(cast(str, run.run_id))
-            seals = store.read_seals(cast(str, run.run_id))
+            if not runs:
+                return _refuse("pooling_run_missing")
+            per_run: list[PoolingRunProgress] = []
+            # Per item, not per decision: a later run re-registers everything an
+            # earlier one covered, so decision counts would double-count them.
+            registered_items: set[str] = set()
+            audited_items: dict[str, PoolingOutcome] = {}
+            added_gold: dict[str, int] = {}
+            blocked_items: set[str] = set()
+            for run in runs:
+                run_id = cast(str, run.run_id)
+                heads = head_decisions(
+                    store.read_decisions(run_id),
+                    store.read_supersessions(run_id),
+                )
+                applied = {
+                    item.decision_id
+                    for item in store.read_applications(run_id)
+                }
+                sealed = bool(store.read_seals(run_id))
+                counts = {
+                    outcome: sum(head.outcome.value == outcome for head in heads)
+                    for outcome in (
+                        PoolingOutcome.GOLD_COMPLETE.value,
+                        PoolingOutcome.GOLD_EXTENDED.value,
+                        PoolingOutcome.AUDIT_BLOCKED.value,
+                    )
+                }
+                registered_items |= {item.item_id for item in run.items}
+                for head in heads:
+                    if head.outcome is PoolingOutcome.AUDIT_BLOCKED:
+                        blocked_items.add(head.item_id)
+                        continue
+                    if sealed and head.decision_id in applied:
+                        blocked_items.discard(head.item_id)
+                        audited_items[head.item_id] = head.outcome
+                        added_gold[head.item_id] = len(head.selected_unit_ids)
+                per_run.append(
+                    PoolingRunProgress(
+                        run_id=run_id,
+                        registered_items=len(run.items),
+                        adjudicated_items=len(applied),
+                        gold_complete=counts[PoolingOutcome.GOLD_COMPLETE.value],
+                        gold_extended=counts[PoolingOutcome.GOLD_EXTENDED.value],
+                        blocked=counts[PoolingOutcome.AUDIT_BLOCKED.value],
+                        added_gold_clauses=sum(
+                            len(head.selected_unit_ids)
+                            for head in heads
+                            if head.outcome is PoolingOutcome.GOLD_EXTENDED
+                        ),
+                        sealed=sealed,
+                    )
+                )
         except (OSError, ValueError):
             return _refuse("invalid_pooling_record")
-        outcome_counts = {
-            outcome: sum(decision.outcome.value == outcome for decision in decisions)
-            for outcome in (
-                PoolingOutcome.GOLD_COMPLETE.value,
-                PoolingOutcome.GOLD_EXTENDED.value,
-                PoolingOutcome.AUDIT_BLOCKED.value,
-            )
-        }
         pooling_audit = PoolingAuditProgress(
-            registered_items=len(run.items),
-            adjudicated_items=len(applications),
-            gold_complete=outcome_counts[PoolingOutcome.GOLD_COMPLETE.value],
-            gold_extended=outcome_counts[PoolingOutcome.GOLD_EXTENDED.value],
-            blocked=outcome_counts[PoolingOutcome.AUDIT_BLOCKED.value],
-            added_gold_clauses=sum(
-                len(decision.selected_unit_ids)
-                for decision in decisions
-                if decision.outcome is PoolingOutcome.GOLD_EXTENDED
+            registered_items=len(registered_items),
+            adjudicated_items=len(audited_items),
+            gold_complete=sum(
+                outcome is PoolingOutcome.GOLD_COMPLETE
+                for outcome in audited_items.values()
             ),
-            sealed=bool(seals),
-            run_id=cast(str, run.run_id),
+            gold_extended=sum(
+                outcome is PoolingOutcome.GOLD_EXTENDED
+                for outcome in audited_items.values()
+            ),
+            blocked=len(blocked_items),
+            added_gold_clauses=sum(added_gold.values()),
+            fully_sealed=(
+                len(audited_items) == len(registered_items)
+                and all(entry.sealed for entry in per_run)
+            ),
+            runs=tuple(per_run),
         )
 
     try:

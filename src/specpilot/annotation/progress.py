@@ -159,7 +159,10 @@ class SetProgress:
 
 
 @dataclass(frozen=True, slots=True)
-class PoolingAuditProgress:
+class PoolingRunProgress:
+    """One audit run's own counts."""
+
+    run_id: str
     registered_items: int
     adjudicated_items: int
     gold_complete: int
@@ -167,7 +170,44 @@ class PoolingAuditProgress:
     blocked: int
     added_gold_clauses: int
     sealed: bool
-    run_id: str
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "registered_items": self.registered_items,
+            "adjudicated_items": self.adjudicated_items,
+            "gold_complete": self.gold_complete,
+            "gold_extended": self.gold_extended,
+            "blocked": self.blocked,
+            "added_gold_clauses": self.added_gold_clauses,
+            "sealed": self.sealed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PoolingAuditProgress:
+    """The audit across every run, counted per item rather than per decision.
+
+    There used to be a scalar `run_id` and a scalar `sealed`, and this command
+    refused outright on finding more than one run. That made the audit a
+    one-shot: growing the gold set needs a second run to cover the new items,
+    and registering one broke progress. The names went with the assumption —
+    with several runs there is no "the run" for a `run_id` field to hold.
+
+    **Counted per item, because runs overlap.** A second run over a grown gold
+    set re-registers everything the first one covered, so summing decisions
+    would count those items twice. An item is audited when some sealed run
+    holds an applied head decision for it.
+    """
+
+    registered_items: int
+    adjudicated_items: int
+    gold_complete: int
+    gold_extended: int
+    blocked: int
+    added_gold_clauses: int
+    fully_sealed: bool
+    runs: tuple[PoolingRunProgress, ...]
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -177,8 +217,8 @@ class PoolingAuditProgress:
             "gold_extended": self.gold_extended,
             "blocked": self.blocked,
             "added_gold_clauses": self.added_gold_clauses,
-            "sealed": self.sealed,
-            "run_id": self.run_id,
+            "fully_sealed": self.fully_sealed,
+            "runs": [run.payload() for run in self.runs],
         }
 
 

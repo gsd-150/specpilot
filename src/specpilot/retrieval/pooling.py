@@ -158,6 +158,59 @@ class PoolingDecision(_FrozenModel):
         return self
 
 
+class PoolingSupersession(_FrozenModel):
+    """One blocked decision replaced by another, recorded as its own event.
+
+    **Deliberately not a field on `PoolingDecision`.** Every pooling record is
+    content-addressed — `_record_bytes` dumps all fields, defaults included —
+    so adding a field to the decision changes the canonical bytes of decisions
+    already on disk and therefore their IDs. Twenty-one real audit records
+    would have failed to validate. An append-only store does not get its
+    history's identity rewritten to make room for a new column.
+
+    It also says the truer thing. A supersession has its own author, its own
+    moment, and its own reason; it is an act performed on a decision, not a
+    property the decision was born with.
+
+    **Only an `audit_blocked` decision may be superseded**, enforced in
+    ``PoolingStore.supersede_decision``. `blocked` means "I cannot adjudicate
+    this now" and is provisional by its own definition. `gold_complete` and
+    `gold_extended` are judgements, and letting a reviewer replace a judgement
+    is letting them re-roll until they like the answer — the failure that
+    forced choice exists to prevent.
+    """
+
+    schema_version: Literal["pooling-supersession/v1"] = "pooling-supersession/v1"
+    run_id: Sha256
+    item_id: Identifier
+    superseded_decision_id: Sha256
+    replacement_decision_id: Sha256
+    reviewer_id: Identifier
+    supersession_id: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _verify_id(self) -> Self:
+        if self.superseded_decision_id == self.replacement_decision_id:
+            raise ValueError("a decision cannot supersede itself")
+        _bind_id(self, "supersession_id")
+        return self
+
+
+def head_decisions(
+    decisions: Sequence[PoolingDecision],
+    supersessions: Sequence[PoolingSupersession] = (),
+) -> tuple[PoolingDecision, ...]:
+    """The decisions nothing supersedes, in input order.
+
+    A superseded decision stays in the store and stays readable; it simply
+    stops being the item's current answer.
+    """
+    replaced = {record.superseded_decision_id for record in supersessions}
+    return tuple(
+        decision for decision in decisions if decision.decision_id not in replaced
+    )
+
+
 class PoolingApplication(_FrozenModel):
     schema_version: Literal["pooling-application/v1"] = "pooling-application/v1"
     decision_id: Sha256
@@ -227,12 +280,20 @@ def seal_run(
     *,
     decisions: Sequence[PoolingDecision],
     applications: Sequence[PoolingApplication],
+    supersessions: Sequence[PoolingSupersession] = (),
     sealed_at: datetime | None = None,
 ) -> PoolingSeal:
-    """Seal only a complete, unblocked, fully applied run."""
+    """Seal only a complete, unblocked, fully applied run.
+
+    Sealing reads *head* decisions: one superseded by another is history, not
+    the item's answer. A head that is still blocked still prevents sealing —
+    that check is right and stays. What changed is only that being blocked is
+    no longer permanent.
+    """
     registered = {item.item_id: item for item in run.items}
+    heads = head_decisions(decisions, supersessions)
     by_item: dict[str, PoolingDecision] = {}
-    for review in decisions:
+    for review in heads:
         if review.run_id != run.run_id or review.item_id not in registered:
             raise ValueError("decision does not belong to this run")
         item = registered[review.item_id]
@@ -252,7 +313,9 @@ def seal_run(
         raise ValueError("pooling run has unadjudicated items")
 
     by_decision = {applied.decision_id: applied for applied in applications}
-    decision_ids = tuple(cast(str, review.decision_id) for review in decisions)
+    # Applications are required for the heads only. A superseded decision was
+    # never applied — that is what makes superseding it safe.
+    decision_ids = tuple(cast(str, review.decision_id) for review in heads)
     if set(decision_ids) - set(by_decision):
         raise ValueError("pooling run has unapplied decisions")
     if set(by_decision) - set(decision_ids):
@@ -309,16 +372,15 @@ class PoolingStore:
 
     def create_decision(self, decision: PoolingDecision) -> PoolingDecision:
         directory = self._scoped_directory("decisions", decision.run_id)
-        for path in sorted(directory.glob("*.json")):
-            existing = self._read(
-                path,
-                PoolingDecision,
-                "decision_id",
-                path.stem,
-                "pooling decision",
+        heads = {
+            head.item_id: head
+            for head in head_decisions(
+                self.read_decisions(decision.run_id),
+                self.read_supersessions(decision.run_id),
             )
-            if existing.item_id != decision.item_id:
-                continue
+        }
+        existing = heads.get(decision.item_id)
+        if existing is not None:
             if existing.decision_id != decision.decision_id:
                 raise ValueError("that item already owns a different decision")
             return existing
@@ -333,6 +395,78 @@ class PoolingStore:
             "decision_id",
             decision_id,
             "pooling decision",
+        )
+
+    def supersede_decision(
+        self,
+        blocked: PoolingDecision,
+        replacement: PoolingDecision,
+        *,
+        reviewer_id: str,
+    ) -> PoolingDecision:
+        """Replace a blocked decision, recording the replacement as an event.
+
+        Compare-and-swap, not last-writer-wins: ``blocked`` must still be the
+        item's head, so a caller working from a stale view is refused rather
+        than silently overwriting an answer someone else has since recorded.
+        """
+        if blocked.outcome is not PoolingOutcome.AUDIT_BLOCKED:
+            raise ValueError("only a blocked pooling decision may be superseded")
+        if blocked.run_id != replacement.run_id:
+            raise ValueError("supersession crosses two runs")
+        if blocked.item_id != replacement.item_id:
+            raise ValueError("supersession crosses two items")
+        heads = {
+            head.item_id: head
+            for head in head_decisions(
+                self.read_decisions(blocked.run_id),
+                self.read_supersessions(blocked.run_id),
+            )
+        }
+        current = heads.get(blocked.item_id)
+        if current is None or current.decision_id != blocked.decision_id:
+            raise ValueError("supersedes a decision that is not the current head")
+
+        directory = self._scoped_directory("decisions", replacement.run_id)
+        decision_id = cast(str, replacement.decision_id)
+        self._write(
+            directory / f"{decision_id}.json",
+            _record_bytes(replacement, "decision_id"),
+        )
+        record = PoolingSupersession(
+            run_id=replacement.run_id,
+            item_id=replacement.item_id,
+            superseded_decision_id=cast(str, blocked.decision_id),
+            replacement_decision_id=decision_id,
+            reviewer_id=reviewer_id,
+        )
+        supersessions = self._scoped_directory("supersessions", replacement.run_id)
+        supersession_id = cast(str, record.supersession_id)
+        self._write(
+            supersessions / f"{supersession_id}.json",
+            _record_bytes(record, "supersession_id"),
+        )
+        return self._read(
+            directory / f"{decision_id}.json",
+            PoolingDecision,
+            "decision_id",
+            decision_id,
+            "pooling decision",
+        )
+
+    def read_supersessions(self, run_id: str) -> tuple[PoolingSupersession, ...]:
+        directory = self._directory / "supersessions" / run_id
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            self._read(
+                path,
+                PoolingSupersession,
+                "supersession_id",
+                path.stem,
+                "pooling supersession",
+            )
+            for path in sorted(directory.glob("*.json"))
         )
 
     def read_decisions(self, run_id: str) -> tuple[PoolingDecision, ...]:

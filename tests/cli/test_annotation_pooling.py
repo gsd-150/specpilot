@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -15,7 +16,12 @@ from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, build_clauses
 from specpilot.manifests.store import ManifestStore
 from specpilot.retrieval.dense import DenseHit
-from specpilot.retrieval.pooling import PoolingStore
+from specpilot.retrieval.pooling import (
+    PoolingDecision,
+    PoolingOutcome,
+    PoolingStore,
+    head_decisions,
+)
 from tests.helpers import rfc_factory
 
 POOL_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
@@ -393,10 +399,103 @@ def test_annotation_progress_includes_the_sealed_pooling_audit(
         "gold_extended": 1,
         "blocked": 0,
         "added_gold_clauses": 1,
-        "sealed": True,
-        "run_id": registered["run_id"],
+        "fully_sealed": True,
+        # Per run as well as in aggregate. With one run the two agree; the
+        # breakdown exists because a grown gold set needs a second run and the
+        # aggregate alone cannot say which run covered what.
+        "runs": [
+            {
+                "run_id": registered["run_id"],
+                "registered_items": 2,
+                "adjudicated_items": 2,
+                "gold_complete": 1,
+                "gold_extended": 1,
+                "blocked": 0,
+                "added_gold_clauses": 1,
+                "sealed": True,
+            }
+        ],
     }
     lowered = captured.out.lower()
     assert "recall" not in lowered
     assert "mrr" not in lowered
     assert "accuracy" not in lowered
+
+
+def test_a_mistyped_block_does_not_end_the_run(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One wrong word at an interactive prompt used to be unrecoverable.
+
+    `blocked` wrote a decision that could not be replaced, that prevented
+    sealing, and whose item set could not register a second run. Resuming then
+    fell through to `apply_decision` with the blocked decision and refused with
+    `pooling_decision_not_applied` — so the run was wedged on its first item
+    with nothing in the tool that could move it.
+    """
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+    run_id = str(registered["run_id"])
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("blocked\n"))
+    assert main(review_args(pooling_workspace, run_id)) != 0
+    assert "pooling_audit_blocked" in capsys.readouterr().err
+
+    # The same reviewer, resuming, is re-presented the item rather than told
+    # the run is broken.
+    monkeypatch.setattr("sys.stdin", io.StringIO("complete\ncomplete\n"))
+    assert main(review_args(pooling_workspace, run_id)) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "annotation",
+                "progress",
+                "--annotation-dir",
+                str(pooling_workspace["annotation_dir"]),
+                "--pool-dir",
+                str(pooling_workspace["pool_dir"]),
+            ]
+        )
+        == 0
+    )
+    audit = last_json(capsys.readouterr().out)["pooling_audit"]
+    assert audit["blocked"] == 0
+    assert audit["adjudicated_items"] == audit["registered_items"]
+    assert audit["fully_sealed"] is True
+
+
+def test_only_a_blocked_decision_may_be_superseded(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise a reviewer could re-roll a judgement until they liked it,
+    which is exactly what forced choice exists to prevent."""
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+    run_id = str(registered["run_id"])
+    store = PoolingStore(cast(Path, pooling_workspace["pool_dir"]))
+    run = store.read_run(run_id)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("complete\ncomplete\n"))
+    assert main(review_args(pooling_workspace, run_id)) == 0
+    capsys.readouterr()
+
+    settled = head_decisions(store.read_decisions(run_id))[0]
+    assert settled.outcome is PoolingOutcome.GOLD_COMPLETE
+    replacement = PoolingDecision(
+        run_id=run_id,
+        item_id=settled.item_id,
+        reviewed_annotation_id=settled.reviewed_annotation_id,
+        outcome=PoolingOutcome.GOLD_EXTENDED,
+        selected_unit_ids=(run.items[0].candidates[0].unit_id,),
+        reviewer_id="chunxue",
+        elapsed_seconds=1,
+    )
+
+    with pytest.raises(ValueError, match="only a blocked"):
+        store.supersede_decision(settled, replacement, reviewer_id="chunxue")
