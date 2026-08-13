@@ -8,6 +8,7 @@ from specpilot.answer.run import AnswerOutcome
 from specpilot.contracts.answer import AnswerVerdict
 from specpilot.egress.enforcer import EgressPolicyViolation
 from specpilot.runs.contracts import RunStatus, TerminalReason
+from specpilot.runtime.l2 import L2Outcome
 
 # These are the stable failures produced by the policy enforcer before a send.
 # Ledger/accounting errors and unknown future codes deliberately stay out: the
@@ -100,4 +101,20 @@ def project_gate_error(error: BaseException) -> Terminal:
     return Terminal(RunStatus.EGRESS_BLOCKED, error.code)
 
 
-__all__ = ["Terminal", "project_answer_outcome", "project_gate_error"]
+def project_l2_outcome(outcome: L2Outcome) -> Terminal:
+    """Keep L2 provider, policy, and verifier outcomes distinct."""
+    if outcome.egress_error is not None:
+        return Terminal(RunStatus.EGRESS_BLOCKED, outcome.egress_error)
+    if outcome.provider_error is not None:
+        return Terminal(RunStatus.FAILED, outcome.provider_error)
+    if outcome.parse_fault is not None:
+        return Terminal(RunStatus.REFUSED, outcome.parse_fault)
+    return Terminal(RunStatus.ANSWERED, None)
+
+
+__all__ = [
+    "Terminal",
+    "project_answer_outcome",
+    "project_gate_error",
+    "project_l2_outcome",
+]

@@ -6,8 +6,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
-from typing import Protocol
+from dataclasses import dataclass, field, replace
+from typing import Literal, Protocol
 from uuid import UUID
 
 import anyio
@@ -36,7 +36,13 @@ from specpilot.runs.contracts import (
     VerifierCheckSummary,
     VerifierSummaryEvent,
 )
-from specpilot.runs.outcomes import Terminal, project_answer_outcome, project_gate_error
+from specpilot.runs.outcomes import (
+    Terminal,
+    project_answer_outcome,
+    project_gate_error,
+    project_l2_outcome,
+)
+from specpilot.runtime.l2 import L2Outcome, L2RunContext, run_l2_attempt
 
 
 class RunStore(Protocol):
@@ -68,6 +74,7 @@ class RunEvidenceAgent(Protocol):
 
 
 type AnswerRunner = Callable[..., Awaitable[AnswerOutcome]]
+type L2Runner = Callable[[L2RunContext], Awaitable[L2Outcome]]
 
 
 class WorkerError(RuntimeError):
@@ -113,6 +120,8 @@ class RunJob:
     planner_context: PlannerContext
     corpus_manifest_id: str
     answer_context: Mapping[str, object] = field(repr=False)
+    task_level: Literal["L1", "L2"] = "L1"
+    l2_context: L2RunContext | None = field(default=None, repr=False)
 
 
 class RunWorker:
@@ -130,6 +139,7 @@ class RunWorker:
         lease_seconds: int,
         heartbeat_interval_seconds: float,
         answer_runner: AnswerRunner = run_answer,
+        l2_runner: L2Runner = run_l2_attempt,
     ) -> None:
         if queue_capacity <= 0 or lease_seconds <= 0:
             raise ValueError("invalid_worker_bound")
@@ -140,6 +150,7 @@ class RunWorker:
         self._evidence_agent = evidence_agent
         self._answer_transport = answer_transport
         self._answer_runner = answer_runner
+        self._l2_runner = l2_runner
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._heartbeat_interval = heartbeat_interval_seconds
@@ -256,6 +267,12 @@ class RunWorker:
             return
 
     async def _run(self, job: RunJob) -> None:
+        if job.task_level == "L2":
+            await self._run_l2(job)
+            return
+        await self._run_l1(job)
+
+    async def _run_l1(self, job: RunJob) -> None:
         claimed = await self._store.claim(
             job.run_id,
             self._worker_id,
@@ -473,6 +490,43 @@ class RunWorker:
             ),
         )
 
+    async def _run_l2(self, job: RunJob) -> None:
+        """Dispatch the separate L2 state machine without widening L1 limits."""
+        if job.l2_context is None:
+            return
+        claimed = await self._store.claim(
+            job.run_id,
+            self._worker_id,
+            lease_seconds=self._lease_seconds,
+        )
+        if not claimed:
+            return
+        lease_lost = asyncio.Event()
+        stop_heartbeat = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._heartbeat(job.run_id, lease_lost, stop_heartbeat)
+        )
+        try:
+            context = replace_l2_lease(job.l2_context, lease_lost)
+            outcome = await self._l2_runner(context)
+            if lease_lost.is_set():
+                return
+            terminal = project_l2_outcome(outcome)
+            await self._store.complete(
+                job.run_id,
+                self._worker_id,
+                TerminalEvent(
+                    sequence=1,
+                    status=terminal.status,
+                    reason=terminal.reason,
+                ),
+            )
+        finally:
+            stop_heartbeat.set()
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+
     async def _finish_error_stage(
         self,
         run_id: UUID,
@@ -528,6 +582,11 @@ class RunWorker:
                 run_id,
                 ToolFinishedEvent(sequence=1, **call.model_dump()),
             )
+
+
+def replace_l2_lease(context: L2RunContext, lease_lost: asyncio.Event) -> L2RunContext:
+    """Fence every next L2 outward operation on the worker's lease."""
+    return replace(context, lease_is_live=lambda: not lease_lost.is_set())
 
 
 def _answer_event(outcome: AnswerOutcome) -> AnswerOutcomeEvent:
