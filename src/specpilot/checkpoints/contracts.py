@@ -32,18 +32,32 @@ class CheckpointStage(StrEnum):
 
 
 LEGAL_TRANSITIONS: dict[CheckpointStage, frozenset[CheckpointStage]] = {
-    CheckpointStage.PLANNED: frozenset({CheckpointStage.EVIDENCE_COLLECTED}),
-    CheckpointStage.EVIDENCE_COLLECTED: frozenset({CheckpointStage.CANDIDATE_BUILT}),
+    CheckpointStage.PLANNED: frozenset(
+        {CheckpointStage.PLANNED, CheckpointStage.EVIDENCE_COLLECTED}
+    ),
+    CheckpointStage.EVIDENCE_COLLECTED: frozenset(
+        {CheckpointStage.EVIDENCE_COLLECTED, CheckpointStage.CANDIDATE_BUILT}
+    ),
     CheckpointStage.CANDIDATE_BUILT: frozenset(
-        {CheckpointStage.DETERMINISTIC_VERIFIED, CheckpointStage.RECOVERY_COMPLETED}
+        {
+            CheckpointStage.CANDIDATE_BUILT,
+            CheckpointStage.DETERMINISTIC_VERIFIED,
+            CheckpointStage.RECOVERY_COMPLETED,
+        }
     ),
     CheckpointStage.DETERMINISTIC_VERIFIED: frozenset(
-        {CheckpointStage.SEMANTIC_VERIFIED, CheckpointStage.RECOVERY_COMPLETED}
+        {
+            CheckpointStage.DETERMINISTIC_VERIFIED,
+            CheckpointStage.SEMANTIC_VERIFIED,
+            CheckpointStage.RECOVERY_COMPLETED,
+        }
     ),
     CheckpointStage.RECOVERY_COMPLETED: frozenset(
-        {CheckpointStage.DETERMINISTIC_VERIFIED}
+        {CheckpointStage.RECOVERY_COMPLETED, CheckpointStage.DETERMINISTIC_VERIFIED}
     ),
-    CheckpointStage.SEMANTIC_VERIFIED: frozenset({CheckpointStage.COMPLETED}),
+    CheckpointStage.SEMANTIC_VERIFIED: frozenset(
+        {CheckpointStage.SEMANTIC_VERIFIED, CheckpointStage.COMPLETED}
+    ),
     CheckpointStage.COMPLETED: frozenset(),
 }
 
@@ -84,8 +98,8 @@ class StageGeneration(_FrozenModel):
     def _planning_has_no_claim(self) -> Self:
         if self.stage == "planning" and self.claim_id is not None:
             raise ValueError("planning generation has no claim")
-        if self.stage != "planning" and self.claim_id is None:
-            raise ValueError("claim stage generation requires claim_id")
+        if self.stage == "verifier" and self.claim_id is None:
+            raise ValueError("verifier generation requires claim_id")
         return self
 
 

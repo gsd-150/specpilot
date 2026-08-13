@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
@@ -208,6 +210,56 @@ def context(*, deterministic: object, semantic: Semantic):
     )
 
 
+def checkpoint(stage: str = "planned"):
+    from specpilot.checkpoints.contracts import RunCheckpoint
+
+    return RunCheckpoint(
+        run_id=uuid4(),
+        attempt=1,
+        checkpoint_version=1,
+        stage=stage,
+        task_level="L2",
+        query_hash="a" * 64,
+        evaluation_root_id="root-1",
+        source_manifest_id="b" * 64,
+        corpus_manifest_id="c" * 64,
+        policy_hash="d" * 64,
+        configuration_hash="e" * 64,
+        compliance_prompt_hash="f" * 64,
+        verifier_prompt_hash="0" * 64,
+        provider_id="provider",
+        model_id="model",
+        plan_id="plan-1",
+        plan_hash="1" * 64,
+        evidence=(),
+        tool_attempts_used=0,
+        reservation_ids=(),
+        reconstruction_generations=(),
+        recovery_attempted=False,
+        recovery_reason=None,
+        completed_claim_ids=(),
+        completed_results=(),
+        last_accessed_at=datetime(2026, 8, 14, tzinfo=UTC),
+    )
+
+
+@dataclass
+class StatefulWriter:
+    current: object | None = None
+    writes: int = 0
+
+    async def __call__(self, previous_version: int | None, current: object):
+        from specpilot.checkpoints.contracts import validate_transition
+
+        prior = self.current
+        assert previous_version == (None if prior is None else prior.checkpoint_version)
+        if prior is not None:
+            validate_transition(prior, current)
+        self.current = current
+        self.writes += 1
+        return current
+
+
 def recovery(item: Evidence):
     async def run(*args: object) -> RecoveryOutcome:
         return RecoveryOutcome((item,), (), 1)
@@ -374,6 +426,52 @@ async def test_eight_call_budget_prevents_recovery_send() -> None:
     assert recovery_calls == 0
     assert outcome.tool_attempts_used == 8
     assert outcome.results[0].verification_status.value == "deterministic_failed"
+
+
+async def test_first_checkpoint_and_every_followup_obey_real_cas_transition() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+    seed = checkpoint()
+    made = context(deterministic=lambda *_: passed(item), semantic=Semantic([True]))
+    made = dataclass_replace(
+        made,
+        checkpoint_factory=lambda: seed,
+        checkpoint_writer=writer,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.results[0].verification_status.value == "verified"
+    assert writer.current is not None
+    assert writer.current.stage.value == "completed"
+    assert writer.current.checkpoint_version == writer.writes
+
+
+async def test_lease_loss_after_checkpoint_fences_compliance_send() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+    live = True
+
+    async def stop_after_first(previous_version: int | None, current: object):
+        nonlocal live
+        result = await writer(previous_version, current)
+        live = False
+        return result
+
+    made = context(deterministic=lambda *_: passed(item), semantic=Semantic([True]))
+    made = dataclass_replace(
+        made,
+        checkpoint_factory=lambda: checkpoint(),
+        checkpoint_writer=stop_after_first,
+        lease_is_live=lambda: live,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault == "lease_lost"
+    assert made.compliance_agent.calls == 0
 
 
 def dataclass_replace(value: object, **changes: object):
