@@ -1564,3 +1564,55 @@ names the pre-audit head. The fingerprints are the honest key.
 
 Registered run `87bd940c…` — **1 item, 8 candidates**, against 40 items and 319
 candidates for the run before it.
+
+---
+
+### L1 is complete — 40/40, audit sealed
+
+```
+L1  40/40   dev 15/15   locked 25/25   awaiting_adjudication 0
+    clause-first 24 / 0.60 exactly      unanswerable dev 3/3, locked 5/5
+    gold clauses 34   pooled 2          retired l1-dev-001
+
+audit  registered 40  adjudicated 40  complete 39  extended 1  blocked 0
+       fully_sealed true, across three sealed runs (20 + 40 + 1)
+```
+
+Every §8.1 and §8.2.2 target is met for the first time: the total, both splits,
+the clause-first share exactly, and both unanswerable floors.
+
+**The §8.1 disclosure paragraph, with the numbers it now takes:**
+
+> 41 proposals drafted by `claude-opus-5` and adjudicated by one reviewer by
+> forced choice against three structurally selected distractors. 40 accepted as
+> proposed, 1 gold changed, 0 rejected, 0 drafted key points edited; acceptance
+> rate 0.976. A pre-registered sample (rate 0.25, salt `r1-2026-08`, committed
+> before the first pass) was read against full source: 11 of 12 recorded, all
+> `gold_complete`, 0 additional clauses found. **0 errors in 11 reads bounds the
+> gold error rate below 23.8% at 95% one-sided confidence** — enough to exclude
+> a badly wrong gold, not enough to call it verified. A §8.2.3 pooling
+> completeness audit over all 40 items added 1 gold clause and found the rest
+> complete. One item was retired as defective and is disclosed rather than
+> dropped silently.
+
+**Two things this paragraph must not omit**, both found by the work rather than
+anticipated by it:
+
+1. **One item was retired.** `l1-dev-001` asked for the *single* respect a HEAD
+   response differs from a GET response, which §9.3.2 ¶2 contradicts. It passed
+   the forced choice, passed a sealed pooling audit as `gold_complete`, and was
+   never drawn into the deep sample. It was caught only by a re-audit that had
+   been argued would be a formality.
+2. **One item's gold crosses documents.** `l1-locked-010` now spans RFC 9110
+   §8.6 ¶8 and RFC 9112 §6.2 ¶2, and the answer path scopes evidence to one
+   document by design, so it can never be fully retrieved. `all_required_hit_rate`
+   must separate that from retrieval quality or an architectural limit will be
+   read as a score.
+
+#### Still open
+
+The deep-review sample is **11 of 12**: `l1-dev-016` was drawn into it when it
+joined the set and has not been read. Coverage 0.917. The audit is sealed and
+the item counts are final, but the disclosure paragraph above cannot be written
+as-is until that read exists — and a sample that is 11/12 by omission is exactly
+the "coverage is not evidence" problem this plan already names.
