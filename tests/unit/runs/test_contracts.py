@@ -106,8 +106,13 @@ def test_run_event_kind_allowlist_is_exact() -> None:
         "egress_summary",
         "usage_summary",
         "answer_outcome",
-        "verifier_summary",
-        "terminal",
+            "verifier_summary",
+            "checkpoint_summary",
+            "compliance_summary",
+            "semantic_summary",
+            "recovery_summary",
+            "resume_summary",
+            "terminal",
     }
 
 

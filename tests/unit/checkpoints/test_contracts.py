@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+from pydantic import ValidationError
+
+
+def _checkpoint(**changes: object):  # type: ignore[no-untyped-def]
+    from specpilot.checkpoints.contracts import RunCheckpoint
+
+    values: dict[str, object] = {
+        "run_id": uuid.uuid4(),
+        "attempt": 1,
+        "checkpoint_version": 1,
+        "stage": "planned",
+        "task_level": "L2",
+        "query_hash": "a" * 64,
+        "evaluation_root_id": "root-1",
+        "source_manifest_id": "b" * 64,
+        "corpus_manifest_id": "c" * 64,
+        "policy_hash": "d" * 64,
+        "configuration_hash": "e" * 64,
+        "compliance_prompt_hash": "f" * 64,
+        "verifier_prompt_hash": "0" * 64,
+        "provider_id": "provider-1",
+        "model_id": "model-1",
+        "plan_id": "plan-1",
+        "plan_hash": "1" * 64,
+        "evidence": (),
+        "tool_attempts_used": 0,
+        "reservation_ids": (),
+        "reconstruction_generations": (),
+        "recovery_attempted": False,
+        "recovery_reason": None,
+        "completed_claim_ids": (),
+        "completed_results": (),
+        "last_accessed_at": datetime(2026, 8, 14, tzinfo=UTC),
+    }
+    values.update(changes)
+    return RunCheckpoint.model_validate(values)
+
+
+def test_checkpoint_is_a_prose_free_closed_envelope() -> None:
+    checkpoint = _checkpoint()
+    encoded = checkpoint.model_dump(mode="json")
+    rendered = repr(encoded)
+
+    assert "PRIVATE-QUESTION-SENTINEL" not in rendered
+    assert not {
+        "question", "claim", "rationale", "query", "excerpt",
+        "provider_response", "path", "exception",
+    }.intersection(encoded)
+
+
+@pytest.mark.parametrize(
+    ("stage", "next_stage"),
+    [
+        ("planned", "evidence_collected"),
+        ("evidence_collected", "candidate_built"),
+        ("candidate_built", "deterministic_verified"),
+        ("candidate_built", "recovery_completed"),
+        ("deterministic_verified", "semantic_verified"),
+        ("deterministic_verified", "recovery_completed"),
+        ("recovery_completed", "deterministic_verified"),
+        ("semantic_verified", "completed"),
+    ],
+)
+def test_legal_checkpoint_transitions(stage: str, next_stage: str) -> None:
+    from specpilot.checkpoints.contracts import validate_transition
+
+    previous = _checkpoint(
+        stage=stage, recovery_attempted=stage == "recovery_completed"
+    )
+    current = _checkpoint(
+        run_id=previous.run_id,
+        stage=next_stage,
+        checkpoint_version=2,
+        recovery_attempted=(
+            stage == "recovery_completed" or next_stage == "recovery_completed"
+        ),
+    )
+    assert validate_transition(previous, current) is None
+
+
+def test_recovery_completed_requires_monotonic_single_recovery() -> None:
+    with pytest.raises(ValidationError, match="recovery"):
+        _checkpoint(stage="recovery_completed")
+
+    from specpilot.checkpoints.contracts import validate_transition
+
+    previous = _checkpoint(stage="deterministic_verified", recovery_attempted=True)
+    current = _checkpoint(
+        run_id=previous.run_id,
+        stage="recovery_completed", checkpoint_version=2, recovery_attempted=True
+    )
+    with pytest.raises(ValueError, match="recovery"):
+        validate_transition(previous, current)
+
+
+def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:
+    with pytest.raises(ValidationError, match="tool_attempts_used"):
+        _checkpoint(tool_attempts_used=9)
+    with pytest.raises(ValidationError, match="completed_claim_ids"):
+        _checkpoint(completed_claim_ids=("not-an-opaque-hash",))

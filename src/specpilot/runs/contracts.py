@@ -75,6 +75,19 @@ class RunStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class ResumeDisposition(StrEnum):
+    ACQUIRED = "acquired"
+    REPLAY = "replay"
+    NOT_FOUND = "not_found"
+    NOT_OWNER = "not_owner"
+    NOT_INTERRUPTED = "not_interrupted"
+    QUERY_MISMATCH = "query_mismatch"
+    BINDING_MISMATCH = "binding_mismatch"
+    CHECKPOINT_MISSING = "checkpoint_missing"
+    CHECKPOINT_INVALID = "checkpoint_invalid"
+    LEASED = "leased"
+
+
 _NONTERMINAL_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 
 
@@ -89,6 +102,11 @@ class RunEventKind(StrEnum):
     USAGE_SUMMARY = "usage_summary"
     ANSWER_OUTCOME = "answer_outcome"
     VERIFIER_SUMMARY = "verifier_summary"
+    CHECKPOINT_SUMMARY = "checkpoint_summary"
+    COMPLIANCE_SUMMARY = "compliance_summary"
+    SEMANTIC_SUMMARY = "semantic_summary"
+    RECOVERY_SUMMARY = "recovery_summary"
+    RESUME_SUMMARY = "resume_summary"
     TERMINAL = "terminal"
 
 
@@ -97,6 +115,7 @@ class AgentName(StrEnum):
     EVIDENCE_AGENT = "evidence_agent"
     ANSWER = "answer"
     VERIFIER = "verifier"
+    COMPLIANCE = "compliance"
 
 
 class AgentStepPhase(StrEnum):
@@ -119,7 +138,7 @@ class PlanSummaryEvent(_RunEventBase):
     kind: Literal[RunEventKind.PLAN_SUMMARY] = RunEventKind.PLAN_SUMMARY
     plan_id: TraceIdentifier
     step_count: Annotated[int, Field(ge=1, le=4)]
-    max_tool_calls: Annotated[int, Field(ge=1, le=6)]
+    max_tool_calls: Annotated[int, Field(ge=1, le=8)]
 
 
 class AgentStepEvent(_RunEventBase):
@@ -257,6 +276,60 @@ class VerifierSummaryEvent(_RunEventBase):
     duration_ms: DurationMs
 
 
+class CheckpointSummaryEvent(_RunEventBase):
+    kind: Literal[RunEventKind.CHECKPOINT_SUMMARY] = RunEventKind.CHECKPOINT_SUMMARY
+    stage: Annotated[
+        str,
+        StringConstraints(
+            pattern=(
+                r"^(planned|evidence_collected|candidate_built|"
+                r"deterministic_verified|recovery_completed|"
+                r"semantic_verified|completed)$"
+            )
+        ),
+    ]
+    checkpoint_version: Annotated[int, Field(ge=1)]
+    tool_attempts_used: Annotated[int, Field(ge=0, le=8)]
+    recovery_attempted: bool
+
+
+class ComplianceSummaryEvent(_RunEventBase):
+    kind: Literal[RunEventKind.COMPLIANCE_SUMMARY] = RunEventKind.COMPLIANCE_SUMMARY
+    candidate_count: Annotated[int, Field(ge=1, le=3)]
+    claim_ids: Annotated[tuple[Sha256, ...], Field(min_length=1, max_length=3)]
+
+    @model_validator(mode="after")
+    def _claim_count_and_ids_agree(self) -> Self:
+        if (
+            self.candidate_count != len(self.claim_ids)
+            or len(set(self.claim_ids)) != len(self.claim_ids)
+        ):
+            raise ValueError("compliance summary claim IDs are unique and counted")
+        return self
+
+
+class SemanticSummaryEvent(_RunEventBase):
+    kind: Literal[RunEventKind.SEMANTIC_SUMMARY] = RunEventKind.SEMANTIC_SUMMARY
+    claim_id: Sha256
+    supports: bool
+    reason: TerminalReason
+
+
+class RecoverySummaryEvent(_RunEventBase):
+    kind: Literal[RunEventKind.RECOVERY_SUMMARY] = RunEventKind.RECOVERY_SUMMARY
+    kind_name: Annotated[
+        str,
+        StringConstraints(pattern=r"^(scoped_search|get_clause|expand_references)$"),
+    ]
+    reason: TerminalReason
+    remaining_tool_attempts: Annotated[int, Field(ge=0, le=8)]
+
+
+class ResumeSummaryEvent(_RunEventBase):
+    kind: Literal[RunEventKind.RESUME_SUMMARY] = RunEventKind.RESUME_SUMMARY
+    attempt: Annotated[int, Field(ge=2)]
+
+
 class TerminalEvent(_RunEventBase):
     kind: Literal[RunEventKind.TERMINAL] = RunEventKind.TERMINAL
     status: RunStatus
@@ -284,6 +357,11 @@ RunEvent = Annotated[
     | UsageSummaryEvent
     | AnswerOutcomeEvent
     | VerifierSummaryEvent
+    | CheckpointSummaryEvent
+    | ComplianceSummaryEvent
+    | SemanticSummaryEvent
+    | RecoverySummaryEvent
+    | ResumeSummaryEvent
     | TerminalEvent,
     Field(discriminator="kind"),
 ]
@@ -295,7 +373,7 @@ class RunRecord(_FrozenModel):
     run_id: UUID
     request_id: UUID
     session_id: TraceIdentifier
-    task_level: Literal["L1"]
+    task_level: Literal["L1", "L2"]
     profile: TraceIdentifier
     source_manifest_id: Sha256
     corpus_manifest_id: Sha256
@@ -383,7 +461,7 @@ class RunView(_FrozenModel):
 
     run_id: UUID
     request_id: UUID
-    task_level: Literal["L1"]
+    task_level: Literal["L1", "L2"]
     profile: TraceIdentifier
     corpus_manifest_id: Sha256
     status: RunStatus
@@ -450,6 +528,8 @@ __all__ = [
     "AgentStepPhase",
     "AnswerOutcomeEvent",
     "CandidateScoreSummary",
+    "CheckpointSummaryEvent",
+    "ComplianceSummaryEvent",
     "CandidateSummaryEvent",
     "EgressSummaryEvent",
     "EvidenceRefSummary",
@@ -458,8 +538,12 @@ __all__ = [
     "RunEvent",
     "RunEventKind",
     "RunRecord",
+    "ResumeDisposition",
     "RunStatus",
     "RunView",
+    "RecoverySummaryEvent",
+    "ResumeSummaryEvent",
+    "SemanticSummaryEvent",
     "StateTransitionEvent",
     "TerminalEvent",
     "TerminalReason",
