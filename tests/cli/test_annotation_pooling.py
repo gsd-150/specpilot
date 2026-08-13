@@ -502,3 +502,79 @@ def test_only_a_blocked_decision_may_be_superseded(
 
     with pytest.raises(ValueError, match="only a blocked"):
         store.supersede_decision(settled, replacement, reviewer_id="chunxue")
+
+
+def test_a_retired_item_stops_holding_the_audit_open(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An item that has left the gold set cannot block an audit of the gold set.
+
+    Retirement is for a question that is defective as written, which no
+    amendment reaches: `amend` copies the question verbatim on purpose, because
+    the forced choice and the gold were decided against the question as it
+    stood. The record stays; it stops counting.
+    """
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+    run_id = str(registered["run_id"])
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("blocked\ncomplete\n"))
+    assert main(review_args(pooling_workspace, run_id)) == 0
+    assert last_json(capsys.readouterr().out)["blocked_items"] == ["l1-dev-001"]
+
+    store = AnnotationStore(cast(Path, pooling_workspace["annotation_dir"]))
+    head = next(
+        record
+        for record in store.iter_records()
+        if record.item_id == "l1-dev-001"
+        and record.annotation_id
+        not in {
+            other.predecessor_annotation_id
+            for other in store.iter_records()
+            if other.predecessor_annotation_id is not None
+        }
+    )
+    assert (
+        main(
+            [
+                "annotation",
+                "retire",
+                "--annotation-dir",
+                str(pooling_workspace["annotation_dir"]),
+                "--item",
+                "l1-dev-001",
+                "--annotation-id",
+                str(head.annotation_id),
+                "--reason",
+                "the question asserts a single difference the corpus contradicts",
+                "--author-id",
+                "chunxue",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    # The blocked item no longer holds the run open, so the pass seals.
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert main(review_args(pooling_workspace, run_id)) == 0
+    assert last_json(capsys.readouterr().out)["status"] == "sealed"
+
+    assert (
+        main(
+            [
+                "annotation",
+                "progress",
+                "--annotation-dir",
+                str(pooling_workspace["annotation_dir"]),
+            ]
+        )
+        == 0
+    )
+    progress = last_json(capsys.readouterr().out)
+    # The record is still stored and still readable; it just stopped counting.
+    assert progress["retired_item_ids"] == ["l1-dev-001"]
+    assert progress["l1"]["completed_total"] == 1
+    assert any(record.item_id == "l1-dev-001" for record in store.iter_records())

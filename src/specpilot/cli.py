@@ -1829,6 +1829,43 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
     )
 
 
+def _annotation_retire(arguments: argparse.Namespace) -> int:
+    """Take one item out of the evaluation set without deleting anything.
+
+    For an item that is defective *as a question*, which no amendment can
+    repair: `amend` copies the question verbatim and there is deliberately no
+    way to change it, because the forced choice, the gold and the deep read
+    were all made against the question as written.
+    """
+    if not arguments.annotation_dir.is_dir():
+        return _refuse("annotation_dir_not_found")
+    store = AnnotationStore(arguments.annotation_dir)
+    try:
+        record = store.read(arguments.annotation_id)
+    except (OSError, ValueError):
+        return _refuse("annotation_not_found")
+    if record.item_id != arguments.item:
+        return _refuse("retirement_item_mismatch")
+    try:
+        retirement = store.retire(
+            arguments.annotation_id,
+            reason=arguments.reason,
+            author_id=arguments.author_id,
+        )
+    except ValueError:
+        return _refuse("retirement_refused")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    return _emit(
+        {
+            "status": "retired",
+            "item_id": retirement.item_id,
+            "retired_annotation_id": retirement.retired_annotation_id,
+            "retirement_id": retirement.retirement_id,
+        }
+    )
+
+
 def _annotation_pool_register(arguments: argparse.Namespace) -> int:
     if not arguments.annotation_dir.is_dir():
         return _refuse("annotation_dir_not_found")
@@ -2037,7 +2074,16 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
     applications = {
         item.decision_id: item for item in store.read_applications(arguments.run_id)
     }
+    retired_item_ids = frozenset(
+        entry.item_id
+        for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
+    )
     for item in run.items:
+        # A retired item is not presented at all. It left the gold set, so
+        # there is nothing about it left to adjudicate — and re-presenting it
+        # would ask the reviewer to judge a question already ruled defective.
+        if item.item_id in retired_item_ids:
+            continue
         existing = decisions.get(item.item_id)
         if existing is not None and existing.decision_id in applications:
             continue
@@ -2124,6 +2170,7 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
             store.read_supersessions(arguments.run_id),
         )
         if head.outcome is PoolingOutcome.AUDIT_BLOCKED
+        and head.item_id not in retired_item_ids
     )
     if blocked_now:
         # Read back from the store rather than collected in the loop, so a
@@ -2146,6 +2193,7 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
                 decisions=final_decisions,
                 applications=final_applications,
                 supersessions=store.read_supersessions(arguments.run_id),
+                retired_item_ids=retired_item_ids,
             )
         )
     except (OSError, RuntimeError, ValueError):
@@ -2307,6 +2355,12 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
     pool_dir: Path | None = arguments.pool_dir
     if pool_dir is not None:
         store = PoolingStore(pool_dir)
+        # Retired items are not blocking anything — they left the gold set. A
+        # report that says "1 blocked" beside "fully sealed" describes nothing.
+        retired = frozenset(
+            entry.item_id
+            for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
+        )
         try:
             runs = store.read_runs()
             if not runs:
@@ -2337,8 +2391,14 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
                         PoolingOutcome.AUDIT_BLOCKED.value,
                     )
                 }
-                registered_items |= {item.item_id for item in run.items}
+                registered_items |= {
+                    item.item_id
+                    for item in run.items
+                    if item.item_id not in retired
+                }
                 for head in heads:
+                    if head.item_id in retired:
+                        continue
                     if head.outcome is PoolingOutcome.AUDIT_BLOCKED:
                         blocked_items.add(head.item_id)
                         continue
@@ -3238,6 +3298,17 @@ def _parser() -> argparse.ArgumentParser:
     deep.add_argument("--deep-review-rate", type=float, required=True)
     deep.add_argument("--deep-review-salt", required=True)
     deep.set_defaults(handler=_annotation_deep_review)
+
+    retire = annotation.add_parser("retire")
+    retire.add_argument("--annotation-dir", type=Path, required=True)
+    retire.add_argument("--item", required=True)
+    # The head at retirement time, named rather than looked up, so retiring
+    # from a stale view is refused instead of silently retiring an item whose
+    # defect someone has since amended away.
+    retire.add_argument("--annotation-id", required=True)
+    retire.add_argument("--reason", required=True)
+    retire.add_argument("--author-id", required=True)
+    retire.set_defaults(handler=_annotation_retire)
 
     pool_register = annotation.add_parser("pool-register")
     pool_register.add_argument("--annotation-dir", type=Path, required=True)

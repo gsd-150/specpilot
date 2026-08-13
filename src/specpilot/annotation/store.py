@@ -11,9 +11,17 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated, Literal, Self
 
-from pydantic import ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from specpilot.contracts.annotation import (
     Adjudication,
@@ -22,11 +30,56 @@ from specpilot.contracts.annotation import (
     L2Annotation,
     annotation_model_for_schema,
 )
+from specpilot.contracts.manifests import Identifier, Sha256
 from specpilot.manifests.canonical import canonical_json, canonical_sha256
 
 type Annotation = L1Annotation | L2Annotation
 
 _MAX_RECORD_BYTES = 64 * 1024
+_RETIREMENTS = "retirements"
+
+
+class AnnotationRetirement(BaseModel):
+    """One item removed from the evaluation set, without removing its record.
+
+    **Not a field on the annotation.** Records here are content-addressed, so a
+    new field changes the ID of every record already stored — the same reason
+    `PoolingSupersession` is its own record. And retirement is an act with its
+    own author, moment and reason; it is not a property the item was born with.
+
+    Retirement is for an item that is *defective as a question*, which no
+    amendment can repair: `amend` copies the question verbatim and there is
+    deliberately no way to change it, because the forced choice, the gold and
+    the deep read were all performed against the question as written. Swapping
+    the question would leave a provenance chain claiming a human adjudicated
+    something they never saw.
+
+    The record stays readable forever. What changes is only that progress stops
+    counting it toward the target and the pooling audit stops waiting on it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["annotation-retirement/v1"] = "annotation-retirement/v1"
+    item_id: Identifier
+    retired_annotation_id: Sha256
+    reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=8, max_length=512)
+    ]
+    author_id: Identifier
+    retired_at: datetime
+    retirement_id: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _verify(self) -> Self:
+        if self.retired_at.tzinfo is None or self.retired_at.utcoffset() is None:
+            raise ValueError("retired_at must be timezone-aware")
+        object.__setattr__(self, "retired_at", self.retired_at.astimezone(UTC))
+        expected = canonical_sha256(self)
+        if self.retirement_id is not None and self.retirement_id != expected:
+            raise ValueError("retirement_id does not match canonical content")
+        object.__setattr__(self, "retirement_id", expected)
+        return self
 
 
 class GoldRemovalError(ValueError):
@@ -103,6 +156,67 @@ class AnnotationStore:
         self._write(successor_id, successor)
         return self.read(successor_id)
 
+    def retire(
+        self,
+        annotation_id: str,
+        *,
+        reason: str,
+        author_id: str,
+        retired_at: datetime | None = None,
+    ) -> AnnotationRetirement:
+        """Take one item out of the evaluation set, keeping every record.
+
+        ``annotation_id`` must be the item's current head, so a caller working
+        from a stale view is refused rather than retiring an item whose defect
+        someone has since amended away.
+        """
+        record = self.read(annotation_id)
+        heads = {
+            head.item_id: head.annotation_id
+            for head in _heads(self.iter_records())
+        }
+        if heads.get(record.item_id) != annotation_id:
+            raise ValueError("retirement does not name the item's current head")
+        if record.item_id in {entry.item_id for entry in self.read_retirements()}:
+            raise ValueError("that item is already retired")
+
+        retirement = AnnotationRetirement(
+            item_id=record.item_id,
+            retired_annotation_id=annotation_id,
+            reason=reason,
+            author_id=author_id,
+            retired_at=retired_at or datetime.now(UTC),
+        )
+        directory = self._directory / _RETIREMENTS
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        path = directory / f"{retirement.retirement_id}.json"
+        data = canonical_json(retirement)
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
+        try:
+            os.write(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return retirement
+
+    def read_retirements(self) -> tuple[AnnotationRetirement, ...]:
+        directory = self._directory / _RETIREMENTS
+        if not directory.is_dir():
+            return ()
+        entries = []
+        for path in sorted(directory.glob("*.json")):
+            data = path.read_bytes()
+            if len(data) > _MAX_RECORD_BYTES:
+                raise ValueError("stored retirement exceeds the maximum record size")
+            entry = AnnotationRetirement.model_validate_json(data)
+            if entry.retirement_id != path.stem:
+                raise ValueError("stored retirement ID does not match its content")
+            entries.append(entry)
+        return tuple(entries)
+
     def read(self, annotation_id: str) -> Annotation:
         path = self._directory / f"{annotation_id}.json"
         data = path.read_bytes()
@@ -156,3 +270,16 @@ class AnnotationStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def _heads(records: Iterator[Annotation]) -> tuple[Annotation, ...]:
+    """The current record for each item: the one nothing supersedes."""
+    stored = tuple(records)
+    superseded = {
+        record.predecessor_annotation_id
+        for record in stored
+        if record.predecessor_annotation_id is not None
+    }
+    return tuple(
+        record for record in stored if record.annotation_id not in superseded
+    )

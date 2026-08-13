@@ -228,6 +228,7 @@ class ProgressReport:
     l2: SetProgress
     annotated_items: int
     superseded_count: int
+    retired_item_ids: tuple[str, ...] = ()
     gold_review: ReviewStatistics | None = None
     pooling_audit: PoolingAuditProgress | None = None
 
@@ -236,6 +237,7 @@ class ProgressReport:
             "status": "reported",
             "annotated_items": self.annotated_items,
             "superseded_count": self.superseded_count,
+            "retired_item_ids": list(self.retired_item_ids),
             "l1": self.l1.payload(),
             "l2": self.l2.payload(),
         }
@@ -366,6 +368,7 @@ def build_progress(
     records: Iterable[Annotation],
     gold_review: ReviewStatistics | None = None,
     pooling_audit: PoolingAuditProgress | None = None,
+    retired_item_ids: frozenset[str] = frozenset(),
 ) -> ProgressReport:
     """Report progress over annotation records, counting items not files.
 
@@ -393,6 +396,11 @@ def build_progress(
         if head.item_id in items:
             raise ValueError(f"item_id {head.item_id!r} owns more than one chain")
         items.add(head.item_id)
+        # The record stays; it just stops counting. A defective question cannot
+        # be answered correctly, so leaving it in the denominator would measure
+        # the defect rather than the system.
+        if head.item_id in retired_item_ids:
+            continue
         key = "l2" if isinstance(head, L2Annotation) else "l1"
         sets[key].append((head, _chain_root(head, by_id)))
 
@@ -401,6 +409,7 @@ def build_progress(
         l2=_set_progress("l2", L2_TARGET, sets["l2"]),
         annotated_items=len(items),
         superseded_count=len(superseded),
+        retired_item_ids=tuple(sorted(retired_item_ids & items)),
         gold_review=gold_review,
         pooling_audit=pooling_audit,
     )
@@ -411,9 +420,16 @@ def read_progress(
     gold_review: ReviewStatistics | None = None,
     pooling_audit: PoolingAuditProgress | None = None,
 ) -> ProgressReport:
-    """Report progress over a stored annotation set, verifying every record."""
+    """Report progress over a stored annotation set, verifying every record.
+
+    Retired items keep their records and stop counting toward the target: an
+    item whose question is defective cannot be answered correctly, so leaving
+    it in the denominator would measure the defect rather than the system.
+    """
+    store = AnnotationStore(directory)
     return build_progress(
-        AnnotationStore(directory).iter_records(),
+        store.iter_records(),
         gold_review,
         pooling_audit,
+        frozenset(entry.item_id for entry in store.read_retirements()),
     )

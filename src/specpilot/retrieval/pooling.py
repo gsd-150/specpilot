@@ -281,6 +281,7 @@ def seal_run(
     decisions: Sequence[PoolingDecision],
     applications: Sequence[PoolingApplication],
     supersessions: Sequence[PoolingSupersession] = (),
+    retired_item_ids: frozenset[str] = frozenset(),
     sealed_at: datetime | None = None,
 ) -> PoolingSeal:
     """Seal only a complete, unblocked, fully applied run.
@@ -290,8 +291,18 @@ def seal_run(
     that check is right and stays. What changed is only that being blocked is
     no longer permanent.
     """
-    registered = {item.item_id: item for item in run.items}
-    heads = head_decisions(decisions, supersessions)
+    # An item that has left the gold set cannot hold an audit of the gold set
+    # open. The run still records that it registered and examined it.
+    registered = {
+        item.item_id: item
+        for item in run.items
+        if item.item_id not in retired_item_ids
+    }
+    heads = tuple(
+        head
+        for head in head_decisions(decisions, supersessions)
+        if head.item_id not in retired_item_ids
+    )
     by_item: dict[str, PoolingDecision] = {}
     for review in heads:
         if review.run_id != run.run_id or review.item_id not in registered:

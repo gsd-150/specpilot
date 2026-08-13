@@ -1432,3 +1432,79 @@ as self-contained when the section has to be read together.
 Owed: rewrite the question without the false premise, which is a record-level
 amendment and not something this run can do. Until then `l1-dev-001` stays
 blocked and the run stays unsealed, which is correct.
+
+### Task 14 (2026-08-13): retiring a defective item, and the audit sealed at last
+
+`l1-dev-001` could not be unblocked honestly, and no amendment could repair it.
+`AnnotationStore.amend` copies the question verbatim and there is no parameter
+to change it — **which is correct, not a fifth missing path.** The forced
+choice, the gold selection and the deep read were all performed against the
+question as written; swapping the question while keeping the gold and the
+provenance chain would leave a record claiming a human adjudicated a question
+they never saw.
+
+What was genuinely missing was a way to take a defective item *out of the
+evaluation set*. Without it the metric is computed over a question that cannot
+be answered correctly, and one bad item holds an entire audit open forever.
+
+**`AnnotationRetirement`, a record of its own** — the same reasoning as
+`PoolingSupersession`: annotations are content-addressed, so a new field on the
+annotation changes the ID of every record already stored. Retirement is also an
+act with its own author, moment and reason, not a property the item was born
+with. It names the head it retires, so retiring from a stale view is refused.
+
+`retirement_id` joins `manifest_id` and `annotation_id` in
+`canonical._CONTENT_ID_FIELDS`, whose comment already invited exactly this —
+without it the ID was computed over itself and every stored retirement failed to
+read back.
+
+Retired items are skipped by the review loop (there is nothing left to
+adjudicate), by `seal_run` (an item that left the gold set cannot hold an audit
+of the gold set open), and by progress — in both the completed counts and the
+blocked count, because a report reading `blocked: 1` beside `fully_sealed: true`
+describes nothing. **The record itself is never deleted and stays readable.**
+
+#### The audit is sealed
+
+`seal_id f7cbc9c5…` over run `831069…`.
+
+| | |
+| --- | --- |
+| registered / adjudicated | 39 / 39 |
+| gold_complete | 38 |
+| gold_extended | **1** |
+| added gold clauses | 1 |
+| blocked | 0 |
+| L1 | **39 / 40**, dev 14/15, locked 25/25 |
+| awaiting adjudication | **0** |
+| unanswerable floors | dev 3/3, locked 5/5 — both met |
+| clause-first share | 0.590 against the 0.60 target |
+| retired | `l1-dev-001` |
+
+**The audit earned its place on a drafting error of mine.** `l1-locked-010` asks
+in which responses a server is forbidden from sending Content-Length, with
+RFC 9110 §8.6 ¶8 as gold. Pooling surfaced **RFC 9112 §6.2 ¶2** — "A sender MUST
+NOT send a Content-Length header field in any message that contains a
+Transfer-Encoding header field" — which the question plainly covers and I had
+missed. Exactly what §8.2.3 exists to catch.
+
+#### It also created the first cross-document gold item, which the answer path cannot satisfy
+
+`l1-locked-010`'s gold now spans RFC 9110 and RFC 9112, and `cli.py` records that
+evidence is scoped to a single document: "a question whose answer genuinely spans
+both RFCs cannot be answered in a single call". **This item can never be fully
+retrieved, by design rather than by weakness.** Of 40 items, two carry multiple
+gold clauses and only this one crosses documents; `l1-dev-010`'s pair is within
+RFC 9110 and is retrievable in principle.
+
+`all_required_hit_rate` must therefore separate the two, or an architectural
+limit will be read as a retrieval score. Narrowing the question to one document
+would fix the number and break the item — fitting the question to the system's
+limits is the same error as padding gold to improve a statistic.
+
+#### Owed
+
+One replacement dev item, **clause-first**, to restore L1 to 40/40 and the
+clause-first share to 0.60. It needs drafting, a forced-choice review, and its
+own pooling run — `create_run` accepts a new item set, so a 40-item run over the
+corrected set registers cleanly.
