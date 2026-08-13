@@ -1155,3 +1155,83 @@ The reason this looked like a defect for a moment is worth keeping: the script's
 own comment said the root was fresh "because the caps changed", which is a
 session-shaped reading of a case-shaped identifier. The name `evaluation_root_id`
 did not disambiguate it and the code could not — every value is valid.
+
+---
+
+### Task 12 (added 2026-08-13): the second drafting pass, and a rule for split requirements
+
+L1 dev closed at 15/15 in the first pass, so the remaining 20 of the 40 are all
+`locked`, taking locked from 5/25 to 25/25. Drafted as
+`tmp/draft_proposals_locked.py`, kept separate from `draft_proposals.py` rather
+than appended to it: that file is the record of what the first pass drafted, and
+editing it would rewrite history to make this pass look like part of it.
+
+#### The rule the first pass was missing
+
+`l1-dev-010` reached gold as §15.4.5 ¶3 alone — the list — with the ¶2 that
+carries the obligation dropped, and only the pooling completeness audit put it
+back. Nothing prevented a repeat. The rule now is:
+
+> **Gold is the minimal set of clauses a reader must read to answer the question
+> as asked.**
+>
+> 1. **At drafting**, phrase the question so one clause answers it completely.
+> 2. **The paragraph carrying the normative keyword is never optional.** The list
+>    says *what*; the stem says *that you must*. Taking the list alone is the
+>    `l1-dev-010` failure and it is the one to check for by name.
+> 3. **When the answer genuinely needs two**, gold is two: the forced choice
+>    records the primary and the amendment adds the second, which is the path
+>    that repaired `l1-dev-010`.
+
+**The rule immediately caught a second instance, which is the argument for
+having written it.** §12.5.5 has the identical shape — ¶8 is "A Vary field
+containing a list of field names has two purposes:" and ¶9/¶10 are the two
+purposes. Under rule 1, `l1-locked-021` asks only what the list requires *of a
+cache*, which ¶9 answers by itself, rather than what Vary is *for*, which needs
+both. Caught at drafting rather than repaired by a later audit.
+
+#### The pass
+
+| | this pass | all 40 | required |
+| --- | --- | --- | --- |
+| proposals | 20 | 40 | 40 |
+| splits | locked 20 | dev 15, locked 25 | — |
+| clause-first share | — | **0.60 exactly** | §8.2.2 0.60 |
+| section families | 8 | **10** | ≥ 8 |
+| unanswerable | locked 3 | **dev 3, locked 5** | §8.1 floors dev 3, locked 5 |
+
+**Both §8.1 unanswerable floors are now met.** The locked floor of 5 was the one
+the first pass recorded as owed and could not reach.
+
+**The three unanswerable items were each checked against both documents rather
+than assumed, and one candidate was discarded for failing that check** — a
+question about a maximum redirection count would have found §15.4 ¶20, which
+names the five-redirect recommendation from RFC 2068. All three that survived are
+the harder shape, where a topically adjacent clause exists and still does not
+answer: TLS appears in eight clauses across both documents and not one names a
+version; §15.5.14 defines 413 (Content Too Large) and sets no size anywhere; and
+§8.8.3 constrains entity-tag syntax but never length or entropy. Retrieval will
+return something plausible for all three, which is the point.
+
+#### Verification
+
+`tmp/verify_proposals.py` passes over all 40: every proposal validates, every
+gold clause exists in the named frozen document, no drafted key point restates
+its clause, the structural selector fills every candidate set, and the direction
+mix, unanswerable floors and family spread hold. It caught one real defect —
+`l1-locked-021`'s first key point was close enough to §12.5.5 ¶9 to count as a
+restatement, and was rewritten as a criterion.
+
+All 20 new proposals were then rendered through the real `annotation review`
+against RFC 9110, answering "none" each time, **against throwaway annotation and
+review directories** so the real store was untouched: 20 sheets rendered, 0
+failures, 0 records written, progress still 20/40. All 96 distractors across the
+40 proposals came from `same_section`, the hardest tier. Question-to-gold literal
+overlap spans 0.057 to 0.565, so §8.2.2's stratification has both strata.
+
+#### Owed, and it is the author's
+
+Task 7's review pass, for these 20. `tmp/review_pass.sh` is resumable and skips
+anything already in `tmp/review-timings.tsv`, which holds the first 20 — so it
+presents exactly the new ones. At the measured ~25s per item this is well under
+an hour, and it is the last thing between L1 and 40/40.
