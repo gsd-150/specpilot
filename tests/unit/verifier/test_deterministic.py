@@ -9,7 +9,7 @@ import pytest
 
 from specpilot.answer.evidence import Evidence, build_evidence_from_unit
 from specpilot.contracts.answer import Citation
-from specpilot.contracts.egress import NormalizedExcerptSpan
+from specpilot.contracts.egress import EvidenceExcerpt, NormalizedExcerptSpan
 from specpilot.contracts.verdict import ComplianceCandidate
 from specpilot.corpus.indexable import IndexUnit
 from specpilot.retrieval.local import LocalCorpus
@@ -72,6 +72,13 @@ def _with_disclosed(evidence: Evidence, **changes: object) -> Evidence:
     return replace(evidence, disclosed=replace(evidence.disclosed, **changes))
 
 
+def _with_excerpt(evidence: Evidence, **changes: object) -> Evidence:
+    """Build a valid but locally inconsistent outbound excerpt."""
+    fields = evidence.excerpt.model_dump()
+    fields.update(changes)
+    return replace(evidence, excerpt=EvidenceExcerpt(**fields))
+
+
 def _verify(
     candidate: ComplianceCandidate,
     disclosed: tuple[Evidence, ...],
@@ -124,6 +131,53 @@ def test_rejects_an_ambiguous_disclosure_handle(
     result = _verify(candidate, (evidence, evidence), corpus)
 
     assert result.checks[0].fault is DeterministicFault.AMBIGUOUS_EVIDENCE
+    assert result.citations == ()
+
+
+def test_rejects_a_self_consistent_outbound_quote_not_in_the_frozen_unit(
+    candidate: ComplianceCandidate, evidence: Evidence, corpus: LocalCorpus
+) -> None:
+    quote = "A sender MAY omit the field."
+    tampered = _with_excerpt(
+        evidence,
+        quote=quote,
+        quote_hash=hashlib.sha256(quote.encode()).hexdigest(),
+    )
+
+    result = _verify(candidate, (tampered,), corpus)
+
+    assert result.checks[0].fault is DeterministicFault.QUOTE_HASH_MISMATCH
+    assert result.citations == ()
+
+
+def test_rejects_an_outbound_content_handle_not_bound_to_the_disclosure(
+    evidence: Evidence, corpus: LocalCorpus
+) -> None:
+    outbound_handle = "b" * 64
+    tampered = _with_excerpt(evidence, content_hash=outbound_handle)
+
+    result = _verify(_candidate(outbound_handle), (tampered,), corpus)
+
+    assert result.checks[0].fault is DeterministicFault.CONTENT_HASH_MISMATCH
+    assert result.citations == ()
+
+
+def test_rejects_an_outbound_span_not_bound_to_the_disclosure(
+    candidate: ComplianceCandidate, evidence: Evidence, corpus: LocalCorpus
+) -> None:
+    tampered = _with_excerpt(
+        evidence,
+        span=NormalizedExcerptSpan(
+            paragraph_start=18,
+            paragraph_end=18,
+            token_start=0,
+            token_end=6,
+        ),
+    )
+
+    result = _verify(candidate, (tampered,), corpus)
+
+    assert result.checks[0].fault is DeterministicFault.SPAN_MISMATCH
     assert result.citations == ()
 
 

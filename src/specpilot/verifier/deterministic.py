@@ -117,6 +117,7 @@ def _verify_disclosure(
     allowed_document_ids: frozenset[str],
 ) -> tuple[DeterministicFault | None, IndexUnit | None]:
     disclosed = evidence.disclosed
+    excerpt = evidence.excerpt
     if disclosed.corpus_manifest_id != corpus_manifest_id:
         return DeterministicFault.CORPUS_MANIFEST_MISMATCH, None
     if disclosed.document_id not in allowed_document_ids:
@@ -133,11 +134,20 @@ def _verify_disclosure(
         return DeterministicFault.SECTION_MISMATCH, None
 
     text_hash = hashlib.sha256(unit.text.encode("utf-8")).hexdigest()
-    if disclosed.content_hash != text_hash:
+    if (
+        excerpt.content_hash != disclosed.content_hash
+        or excerpt.content_hash != text_hash
+    ):
         return DeterministicFault.CONTENT_HASH_MISMATCH, None
-    if disclosed.quote_hash != text_hash:
+    excerpt_quote_hash = hashlib.sha256(excerpt.quote.encode("utf-8")).hexdigest()
+    if (
+        excerpt.quote != unit.text
+        or excerpt.quote_hash != excerpt_quote_hash
+        or excerpt.quote_hash != disclosed.quote_hash
+        or excerpt.quote_hash != text_hash
+    ):
         return DeterministicFault.QUOTE_HASH_MISMATCH, None
-    if disclosed.span != _whole_unit_span(unit):
+    if excerpt.span != disclosed.span or excerpt.span != _whole_unit_span(unit):
         return DeterministicFault.SPAN_MISMATCH, None
     return None, unit
 
