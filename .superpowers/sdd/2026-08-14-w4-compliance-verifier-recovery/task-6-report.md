@@ -67,3 +67,31 @@ mypy: passed (104 source files)
 unit: 1490 passed, 2 skipped
 cli: 181 passed
 ```
+
+## Second review remediation
+
+`e5a05d4 fix: enforce L2 checkpoint CAS recovery`
+
+- aligns the L2 writer protocol with `PostgresCheckpointStore.write(previous,
+  checkpoint)` and persists the first `planned` envelope using previous version
+  `None`;
+- permits strictly monotonic same-stage checkpoint mutations only for durable
+  generation/reservation progress, while the transition validator still rejects
+  every backwards or binding-changing write;
+- adds a stateful in-memory writer that enforces the real CAS/version and
+  `validate_transition` contract through an L2 happy path;
+- adds an awaited-write lease fence regression and keeps semantic reservations
+  in the checkpoint that records `semantic_verified`.
+
+Evidence:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/runtime/test_l2.py tests/unit/runtime/test_worker.py tests/unit/checkpoints/test_contracts.py -q
+50 passed
+
+PYTHONPATH=src make check
+ruff: passed
+mypy: passed (104 source files)
+unit: 1492 passed, 2 skipped
+cli: 181 passed
+```
