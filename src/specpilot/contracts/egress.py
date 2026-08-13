@@ -111,7 +111,7 @@ class L1PlanPayload(_FrozenModel):
     tool_catalog_hash: Sha256
     tools: Annotated[tuple[ToolSchema, ...], Field(min_length=5, max_length=5)]
     max_steps: Literal[4] = 4
-    max_tool_calls: Literal[6] = 6
+    max_tool_calls: Literal[6, 8] = 6
 
 
 class L2DesignPayload(_FrozenModel):

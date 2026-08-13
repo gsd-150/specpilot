@@ -156,16 +156,18 @@ class ToolPlan(_FrozenModel):
                 if reference_index is None or reference_index >= index:
                     raise ValueError("result reference must name a prior step")
 
-        if self.base_call_cost > 6:
-            raise ValueError("tool plan may not exceed six calls")
         return self
 
 
-def validate_tool_plan(plan: ToolPlan | Mapping[str, object]) -> ToolPlan:
+def validate_tool_plan(
+    plan: ToolPlan | Mapping[str, object], *, max_call_cost: Literal[6, 8]
+) -> ToolPlan:
     """Return a model-validated plan before local execution begins."""
-    if not isinstance(plan, ToolPlan):
-        return ToolPlan.model_validate(plan)
-    return plan
+    bounded = plan if isinstance(plan, ToolPlan) else ToolPlan.model_validate(plan)
+    if bounded.base_call_cost > max_call_cost:
+        word = "six" if max_call_cost == 6 else "eight"
+        raise ValueError(f"tool plan may not exceed {word} calls")
+    return bounded
 
 
 class ToolCallSummary(_FrozenModel):

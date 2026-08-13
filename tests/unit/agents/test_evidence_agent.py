@@ -125,6 +125,77 @@ async def test_timeout_retries_once_and_retains_no_result_text() -> None:
     assert TEXT not in result.calls[0].model_dump_json()
 
 
+async def test_l2_budget_allows_exactly_two_attempts_after_six_are_persisted() -> None:
+    """Removing carried attempt state would reset an L2 run at recovery time."""
+    client = ScriptedClient(
+        [success({"clause_ids": []}), success({"clause_ids": []})]
+    )
+    plan = ToolPlan.model_validate(
+        {
+            "plan_id": "p1",
+            "steps": [
+                {
+                    "step_id": "expand",
+                    "tool": "expand_references",
+                    "args": {
+                        "corpus_manifest_id": CORPUS_ID,
+                        "document_id": DOCUMENT_ID,
+                        "clauses": {
+                            "kind": "direct",
+                            "clause_ids": [CLAUSE_ID, "clause-2"],
+                        },
+                    },
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+
+    result = await EvidenceAgent(client, UnitResolver(unit())).collect(
+        plan,
+        CORPUS_ID,
+        attempt_budget=8,
+        attempts_used=6,
+    )
+
+    assert len(client.calls) == 2
+    assert result.attempts_used == 8
+    assert [call.error_code for call in result.calls] == [None, None]
+
+
+async def test_timeout_retry_consumes_the_carried_l2_attempt_budget() -> None:
+    """Removing retry charging would allow a ninth L2 MCP call."""
+    client = ScriptedClient([failure("tool_timeout"), success({"clause_ids": []})])
+    plan = ToolPlan.model_validate(
+        {
+            "plan_id": "p1",
+            "steps": [
+                {
+                    "step_id": "expand",
+                    "tool": "expand_references",
+                    "args": {
+                        "corpus_manifest_id": CORPUS_ID,
+                        "document_id": DOCUMENT_ID,
+                        "clauses": {"kind": "direct", "clause_ids": [CLAUSE_ID]},
+                    },
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+
+    result = await EvidenceAgent(client, UnitResolver(unit())).collect(
+        plan,
+        CORPUS_ID,
+        attempt_budget=8,
+        attempts_used=6,
+    )
+
+    assert len(client.calls) == 2
+    assert result.attempts_used == 8
+    assert result.calls[0].retry_count == 1
+
+
 async def test_non_timeout_error_is_not_retried() -> None:
     client = ScriptedClient([failure("backend_unavailable")])
     plan = ToolPlan.model_validate(

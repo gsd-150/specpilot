@@ -6,7 +6,7 @@ import hashlib
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
@@ -34,8 +34,6 @@ from specpilot.mcp_server.contracts import (
     SearchClausesResult,
 )
 
-_MAX_ATTEMPTS = 6
-
 
 class UnitResolver(Protocol):
     def get_clause(self, clause_id: str) -> IndexUnit: ...
@@ -53,6 +51,7 @@ class EvidenceCollectionError(Exception):
 class EvidenceResult:
     evidence: tuple[Evidence, ...]
     calls: tuple[ToolCallSummary, ...]
+    attempts_used: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,14 +71,21 @@ class EvidenceAgent:
         self._units = units
 
     async def collect(
-        self, plan: ToolPlan, corpus_manifest_id: str
+        self,
+        plan: ToolPlan,
+        corpus_manifest_id: str,
+        *,
+        attempt_budget: Literal[6, 8] = 6,
+        attempts_used: int = 0,
     ) -> EvidenceResult:
-        bounded = validate_tool_plan(plan)
+        if attempts_used < 0 or attempts_used > attempt_budget:
+            raise EvidenceCollectionError("tool_call_budget_exceeded")
+        bounded = validate_tool_plan(plan, max_call_cost=attempt_budget)
         _require_corpus_scope(bounded, corpus_manifest_id)
         outputs: dict[str, tuple[str, ...]] = {}
         evidence: list[Evidence] = []
         calls: list[ToolCallSummary] = []
-        attempts = 0
+        attempts = attempts_used
 
         for step in bounded.steps:
             invocations = _invocations(step, outputs)
@@ -92,11 +98,11 @@ class EvidenceAgent:
                 retries = 0
                 terminal_error: str | None = (
                     "tool_call_budget_exceeded"
-                    if attempts >= _MAX_ATTEMPTS
+                    if attempts >= attempt_budget
                     else None
                 )
                 decoded: _DecodedResult | None = None
-                while attempts < _MAX_ATTEMPTS:
+                while attempts < attempt_budget:
                     attempts += 1
                     result = await self._client.call_tool(step.tool.value, arguments)
                     error_code = _error_code(result)
@@ -113,7 +119,7 @@ class EvidenceAgent:
                     if (
                         error_code == McpToolErrorCode.TOOL_TIMEOUT.value
                         and retries == 0
-                        and attempts < _MAX_ATTEMPTS
+                        and attempts < attempt_budget
                     ):
                         retries = 1
                         continue
@@ -133,14 +139,20 @@ class EvidenceAgent:
                 )
                 if decoded is None:
                     return EvidenceResult(
-                        evidence=_dedupe_evidence(evidence), calls=tuple(calls)
+                        evidence=_dedupe_evidence(evidence),
+                        calls=tuple(calls),
+                        attempts_used=attempts,
                     )
                 step_ids.extend(decoded.ids)
                 if decoded.evidence is not None:
                     evidence.append(decoded.evidence)
             outputs[step.step_id] = _dedupe_ids(step_ids)
 
-        return EvidenceResult(evidence=_dedupe_evidence(evidence), calls=tuple(calls))
+        return EvidenceResult(
+            evidence=_dedupe_evidence(evidence),
+            calls=tuple(calls),
+            attempts_used=attempts,
+        )
 
 
 def _require_corpus_scope(plan: ToolPlan, corpus_manifest_id: str) -> None:

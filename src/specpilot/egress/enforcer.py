@@ -764,8 +764,10 @@ def _payload_task_level(
     | L2AtomicClaimPayload
     | JudgePayload,
 ) -> TaskLevel | None:
-    if isinstance(payload, (L1OnlinePayload, L1PlanPayload)):
+    if isinstance(payload, L1OnlinePayload):
         return TaskLevel.L1
+    if isinstance(payload, L1PlanPayload):
+        return TaskLevel.L1 if payload.max_tool_calls == 6 else TaskLevel.L2
     if isinstance(payload, JudgePayload):
         return None
     return TaskLevel.L2

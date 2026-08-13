@@ -76,32 +76,32 @@ def test_plan_rejects_result_reference_missing_from_dependencies() -> None:
         )
 
 
-def test_plan_rejects_more_than_six_expanded_calls() -> None:
-    """Removing cost enforcement would let a four-step plan exceed its call cap."""
-    with pytest.raises(ValueError, match="six calls"):
-        validate_tool_plan(
+def test_plan_cost_is_checked_against_the_call_budget_selected_by_the_caller() -> None:
+    """Removing the explicit budget would quietly give L1 the L2 allowance."""
+    eight_call_plan = {
+        "plan_id": "p1",
+        "steps": [
+            _search_step(),
+            _result_clause_step(take=3, step_id="read-one"),
             {
-                "plan_id": "p1",
-                "steps": [
-                    _search_step(),
-                    _result_clause_step(take=3, step_id="read-one"),
-                    {
-                        **_result_clause_step(take=2, step_id="read-two"),
-                        "depends_on": ["search"],
-                    },
-                    {
-                        "step_id": "toc",
-                        "tool": "get_toc",
-                        "args": {
-                            "corpus_manifest_id": FIXTURE_CORPUS_ID,
-                            "document_id": "synthetic-fixture-spec",
-                            "limit": 12,
-                        },
-                        "depends_on": [],
-                    },
-                ],
-            }
-        )
+                **_result_clause_step(take=3, step_id="read-two"),
+                "depends_on": ["search"],
+            },
+            {
+                "step_id": "toc",
+                "tool": "get_toc",
+                "args": {
+                    "corpus_manifest_id": FIXTURE_CORPUS_ID,
+                    "document_id": "synthetic-fixture-spec",
+                    "limit": 12,
+                },
+                "depends_on": [],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="six calls"):
+        validate_tool_plan(eight_call_plan, max_call_cost=6)
+    assert validate_tool_plan(eight_call_plan, max_call_cost=8).base_call_cost == 8
 
 
 def test_plan_json_parsing_returns_frozen_typed_plan() -> None:
@@ -116,7 +116,7 @@ def test_plan_json_parsing_returns_frozen_typed_plan() -> None:
     )
 
     assert plan.steps[1].tool == "get_clause"
-    assert validate_tool_plan(plan) is plan
+    assert validate_tool_plan(plan, max_call_cost=6) is plan
     with pytest.raises(ValidationError, match="frozen"):
         plan.plan_id = "other"
 
