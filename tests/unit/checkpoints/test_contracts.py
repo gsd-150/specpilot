@@ -144,3 +144,11 @@ def test_l2_run_requires_real_root_and_distinct_stage_prompt_hashes() -> None:
     }
     with pytest.raises(ValidationError, match="evaluation_root"):
         RunRecord.model_validate(data)
+
+    data.update(
+        evaluation_root_id="root-1",
+        compliance_prompt_hash="1" * 64,
+        verifier_prompt_hash="1" * 64,
+    )
+    with pytest.raises(ValidationError, match="distinct"):
+        RunRecord.model_validate(data)

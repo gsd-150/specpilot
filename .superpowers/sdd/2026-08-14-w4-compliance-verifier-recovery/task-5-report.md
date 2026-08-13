@@ -46,6 +46,21 @@ full persistence evidence.
   `181 passed` CLI). PostgreSQL tests still skipped only because the DSN is
   unset; no database was used.
 
+## Second review remediation
+
+- First write is now only `planned`; later stages must advance from a valid
+  persisted checkpoint.
+- Resume accepts only `interrupted/lease_expired`; replay remains available
+  before the state gate, while different keys on a live attempt are closed.
+- Resume revalidates every referenced reservation and accepts only unambiguous,
+  terminal ledger states before it mutates run, attempt, or checkpoint state.
+- Completed compaction now rewrites its sanitized payload timestamp and column
+  timestamp together. SQL validators reject duplicate reservation/evidence/
+  generation/completed claim identities, and L2 stage prompt hashes must differ.
+- Second re-run: focused unit `62 passed`; integration checkpoint suite `4
+  skipped` only because `SPECPILOT_TEST_DSN` is unset; `make check` unchanged
+  and passing (`1483 passed, 2 skipped`; `181 passed`).
+
 ## Scope
 
 - Closed prose-free checkpoint envelope and legal stage transitions.

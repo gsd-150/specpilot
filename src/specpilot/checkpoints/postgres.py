@@ -112,6 +112,8 @@ class PostgresCheckpointStore:
                     raise RunStoreValidationError()
                 if checkpoint.checkpoint_version != (previous_version or 0) + 1:
                     raise RunStoreValidationError()
+                if current is None and checkpoint.stage is not CheckpointStage.PLANNED:
+                    raise RunStoreValidationError()
                 allocated = checkpoint.model_copy(update={"last_accessed_at": now})
                 if current is None:
                     await connection.execute(
@@ -251,8 +253,11 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(
                         ResumeDisposition.REPLAY, replay["attempt"]
                     )
-                if run["status"] != RunStatus.INTERRUPTED.value:
-                    return CheckpointResumeResult(ResumeDisposition.LEASED)
+                if (
+                    run["status"] != RunStatus.INTERRUPTED.value
+                    or run["terminal_reason"] != "lease_expired"
+                ):
+                    return CheckpointResumeResult(ResumeDisposition.NOT_INTERRUPTED)
                 checkpoint_row = await (
                     await connection.execute(
                         "SELECT payload FROM specpilot_run_checkpoint "
@@ -269,6 +274,7 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
                 if not _bindings_match(run, checkpoint):
                     return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
+                await self._validate_resume_reservations(connection, checkpoint)
                 latest = await (
                     await connection.execute(
                         "SELECT COALESCE(MAX(attempt), 0) AS attempt "
@@ -375,12 +381,15 @@ class PostgresCheckpointStore:
                 checkpoint = RunCheckpoint.model_validate(row["payload"])
                 if checkpoint.stage is not CheckpointStage.COMPLETED:
                     return False
+                compacted = checkpoint.model_copy(
+                    update={"last_accessed_at": self._now()}
+                )
                 await connection.execute(
                     "UPDATE specpilot_run_checkpoint SET payload = %s, "
                     "last_accessed_at = %s WHERE run_id = %s",
                     (
-                        Jsonb(checkpoint.model_dump(mode="json")),
-                        self._now(),
+                        Jsonb(compacted.model_dump(mode="json")),
+                        compacted.last_accessed_at,
                         run_id,
                     ),
                 )
@@ -421,7 +430,7 @@ class PostgresCheckpointStore:
                 "SELECT run_id, session_id, task_level, evaluation_root_id, "
                 "source_manifest_id, "
                 "corpus_manifest_id, policy_hash, configuration_hash, provider_id, "
-                "model_id, query_hash, compliance_prompt_hash, "
+                "model_id, query_hash, terminal_reason, compliance_prompt_hash, "
                 "verifier_prompt_hash, status "
                 "FROM specpilot_run WHERE run_id = %s "
                 "FOR UPDATE",
@@ -460,6 +469,28 @@ class PostgresCheckpointStore:
                 row is None
                 or row["evaluation_root_id"] != checkpoint.evaluation_root_id
                 or row["run_id"] != str(checkpoint.run_id)
+            ):
+                raise RunStoreValidationError()
+
+    async def _validate_resume_reservations(
+        self,
+        connection: psycopg.AsyncConnection[dict[str, Any]],
+        checkpoint: RunCheckpoint,
+    ) -> None:
+        """A process loss may not resume across an uncertain egress send."""
+        for reservation_id in checkpoint.reservation_ids:
+            row = await (
+                await connection.execute(
+                    "SELECT evaluation_root_id, run_id, state FROM egress_reservation "
+                    "WHERE reservation_id = %s",
+                    (reservation_id,),
+                )
+            ).fetchone()
+            if (
+                row is None
+                or row["evaluation_root_id"] != checkpoint.evaluation_root_id
+                or row["run_id"] != str(checkpoint.run_id)
+                or row["state"] not in {"succeeded", "failed_known"}
             ):
                 raise RunStoreValidationError()
 

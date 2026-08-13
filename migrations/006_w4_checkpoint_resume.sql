@@ -167,6 +167,10 @@ BEGIN
             OR (item ->> 'token_end')::integer < (item ->> 'token_start')::integer
         THEN RETURN false; END IF;
     END LOOP;
+    IF (SELECT count(*) <> count(DISTINCT item ->> 'evidence_id')
+        FROM jsonb_array_elements(value) AS t(item)) THEN
+        RETURN false;
+    END IF;
     RETURN true;
 END;
 $$;
@@ -176,6 +180,10 @@ RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 DECLARE item jsonb;
 BEGIN
     IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > maximum THEN
+        RETURN false;
+    END IF;
+    IF (SELECT count(*) <> count(DISTINCT item.value)
+        FROM jsonb_array_elements_text(value) AS item(value)) THEN
         RETURN false;
     END IF;
     FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element) LOOP
@@ -205,6 +213,12 @@ BEGIN
                 (jsonb_typeof(item -> 'claim_id') = 'null'))
         THEN RETURN false; END IF;
     END LOOP;
+    IF (SELECT count(*) <> count(DISTINCT
+            COALESCE(item ->> 'claim_id', '') || ':' || item ->> 'stage' || ':' ||
+            item ->> 'recovery')
+        FROM jsonb_array_elements(value) AS t(item)) THEN
+        RETURN false;
+    END IF;
     RETURN true;
 END;
 $$;
@@ -251,6 +265,10 @@ BEGIN
             THEN RETURN false; END IF;
         END LOOP;
     END LOOP;
+    IF (SELECT count(*) <> count(DISTINCT item ->> 'claim_id')
+        FROM jsonb_array_elements(value) AS t(item)) THEN
+        RETURN false;
+    END IF;
     RETURN true;
 END;
 $$;
@@ -259,6 +277,8 @@ CREATE FUNCTION specpilot_checkpoint_result_ids(ids jsonb, results jsonb)
 RETURNS boolean LANGUAGE sql IMMUTABLE STRICT AS $$
     SELECT jsonb_typeof(ids) = 'array'
        AND jsonb_array_length(ids) = jsonb_array_length(results)
+       AND (SELECT count(*) = count(DISTINCT item.value)
+            FROM jsonb_array_elements_text(ids) AS item(value))
        AND NOT EXISTS (
             SELECT 1
             FROM jsonb_array_elements(ids) WITH ORDINALITY AS i(value, ord)

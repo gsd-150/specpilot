@@ -463,6 +463,8 @@ class RunRecord(_FrozenModel):
                 or self.verifier_prompt_hash is None
             ):
                 raise ValueError("L2 requires evaluation_root and stage prompt hashes")
+            if self.compliance_prompt_hash == self.verifier_prompt_hash:
+                raise ValueError("L2 stage prompt hashes must be distinct")
         elif (
             self.evaluation_root_id is not None
             or self.compliance_prompt_hash is not None

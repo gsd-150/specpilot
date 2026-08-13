@@ -43,12 +43,49 @@ async def test_checkpoint_write_is_compare_and_set_and_appends_summary_atomicall
     with pytest.raises(ValueError, match="checkpoint"):
         await store.write(None, first)
 
+    illegal_initial = first.model_copy(
+        update={"stage": CheckpointStage.EVIDENCE_COLLECTED}
+    )
+    with pytest.raises(ValueError, match="invalid_run_data"):
+        await store.write(None, illegal_initial)
+
     read = await store.read(created.run_id)
     assert read is not None
     assert read.stage is CheckpointStage.PLANNED
     view = await runs.read_owned(created.run_id, created.session_id)
     assert view is not None
     assert view.events[-1].kind.value == "checkpoint_summary"
+
+
+@pytest.mark.anyio
+async def test_resume_refuses_non_lease_expired_interruption_without_mutation(
+    clean_ledger: str,
+) -> None:
+    from specpilot.checkpoints.contracts import CheckpointStage
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+    from specpilot.runs.contracts import ResumeDisposition, TerminalEvent
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runs = PostgresRunStore(clean_ledger, clock=clock)
+    created = await runs.create(_l2_run(clock))
+    assert await runs.fail_delivery(
+        created.run_id,
+        TerminalEvent(
+            sequence=1,
+            status=RunStatus.INTERRUPTED,
+            reason="queue_delivery_failed",
+        ),
+    )
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+    await store.write(
+        None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
+    )
+    result = await store.begin_resume(
+        created.run_id, created.session_id, created.query_hash, "new-key",
+        lease_owner="resume-worker", lease_seconds=30,
+    )
+    assert result.disposition is ResumeDisposition.NOT_INTERRUPTED
 
 
 @pytest.mark.anyio
