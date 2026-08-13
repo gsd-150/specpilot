@@ -61,6 +61,21 @@ full persistence evidence.
   skipped` only because `SPECPILOT_TEST_DSN` is unset; `make check` unchanged
   and passing (`1483 passed, 2 skipped`; `181 passed`).
 
+## Third review remediation
+
+- Same-key replay remains first; a different key is `leased` while a queue or
+  worker lease is live, while only `interrupted/lease_expired` can acquire.
+- Unknown/nonterminal/mismatched reservation lineage now returns the closed
+  `checkpoint_invalid` disposition without any state mutation.
+- Contract and SQL both reject equal Compliance/Verifier prompt hashes. SQL
+  generation identity now includes the generation number, matching Python.
+- Completed compaction drops active reconstruction details (plan, evidence,
+  tool count, reservation and generation detail) but retains the completed
+  prose-free result metadata and synchronizes payload/column timestamps.
+- Third re-run: focused unit `15 passed`; checkpoint integration `4 skipped`
+  because `SPECPILOT_TEST_DSN` is unset; `make check` passed (`1485 passed, 2
+  skipped`; `181 passed`).
+
 ## Scope
 
 - Closed prose-free checkpoint envelope and legal stage transitions.

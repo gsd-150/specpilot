@@ -129,6 +129,8 @@ class RunCheckpoint(_FrozenModel):
 
     @model_validator(mode="after")
     def _state_is_sanitized_and_internally_consistent(self) -> Self:
+        if self.compliance_prompt_hash == self.verifier_prompt_hash:
+            raise ValueError("L2 stage prompt hashes must be distinct")
         if (self.plan_id is None) != (self.plan_hash is None):
             raise ValueError("plan id and plan hash are set together")
         if (

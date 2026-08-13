@@ -253,6 +253,11 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(
                         ResumeDisposition.REPLAY, replay["attempt"]
                     )
+                if run["status"] in {
+                    RunStatus.QUEUED.value,
+                    RunStatus.RUNNING.value,
+                }:
+                    return CheckpointResumeResult(ResumeDisposition.LEASED)
                 if (
                     run["status"] != RunStatus.INTERRUPTED.value
                     or run["terminal_reason"] != "lease_expired"
@@ -274,7 +279,11 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
                 if not _bindings_match(run, checkpoint):
                     return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
-                await self._validate_resume_reservations(connection, checkpoint)
+                disposition = await self._resume_reservation_disposition(
+                    connection, checkpoint
+                )
+                if disposition is not None:
+                    return CheckpointResumeResult(disposition)
                 latest = await (
                     await connection.execute(
                         "SELECT COALESCE(MAX(attempt), 0) AS attempt "
@@ -382,7 +391,16 @@ class PostgresCheckpointStore:
                 if checkpoint.stage is not CheckpointStage.COMPLETED:
                     return False
                 compacted = checkpoint.model_copy(
-                    update={"last_accessed_at": self._now()}
+                    update={
+                        "plan_id": None,
+                        "plan_hash": None,
+                        "evidence": (),
+                        "tool_attempts_used": 0,
+                        "reservation_ids": (),
+                        "reconstruction_generations": (),
+                        "recovery_reason": None,
+                        "last_accessed_at": self._now(),
+                    }
                 )
                 await connection.execute(
                     "UPDATE specpilot_run_checkpoint SET payload = %s, "
@@ -472,11 +490,11 @@ class PostgresCheckpointStore:
             ):
                 raise RunStoreValidationError()
 
-    async def _validate_resume_reservations(
+    async def _resume_reservation_disposition(
         self,
         connection: psycopg.AsyncConnection[dict[str, Any]],
         checkpoint: RunCheckpoint,
-    ) -> None:
+    ) -> ResumeDisposition | None:
         """A process loss may not resume across an uncertain egress send."""
         for reservation_id in checkpoint.reservation_ids:
             row = await (
@@ -492,7 +510,8 @@ class PostgresCheckpointStore:
                 or row["run_id"] != str(checkpoint.run_id)
                 or row["state"] not in {"succeeded", "failed_known"}
             ):
-                raise RunStoreValidationError()
+                return ResumeDisposition.CHECKPOINT_INVALID
+        return None
 
     def _now(self) -> datetime:
         now = self._clock()

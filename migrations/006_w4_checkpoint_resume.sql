@@ -215,7 +215,7 @@ BEGIN
     END LOOP;
     IF (SELECT count(*) <> count(DISTINCT
             COALESCE(item ->> 'claim_id', '') || ':' || item ->> 'stage' || ':' ||
-            item ->> 'recovery')
+            item ->> 'recovery' || ':' || item ->> 'generation')
         FROM jsonb_array_elements(value) AS t(item)) THEN
         RETURN false;
     END IF;
@@ -326,6 +326,7 @@ BEGIN
         AND specpilot_trace_sha256(value -> 'configuration_hash')
         AND specpilot_trace_sha256(value -> 'compliance_prompt_hash')
         AND specpilot_trace_sha256(value -> 'verifier_prompt_hash')
+        AND value ->> 'compliance_prompt_hash' <> value ->> 'verifier_prompt_hash'
         AND specpilot_trace_identifier(value -> 'provider_id', 128)
         AND specpilot_trace_identifier(value -> 'model_id', 128)
         AND (jsonb_typeof(value -> 'plan_id') = 'null'

@@ -152,3 +152,22 @@ def test_l2_run_requires_real_root_and_distinct_stage_prompt_hashes() -> None:
     )
     with pytest.raises(ValidationError, match="distinct"):
         RunRecord.model_validate(data)
+
+
+def test_checkpoint_requires_distinct_l2_stage_prompt_hashes() -> None:
+    with pytest.raises(ValidationError, match="distinct"):
+        _checkpoint(compliance_prompt_hash="1" * 64, verifier_prompt_hash="1" * 64)
+
+
+def test_generation_identity_includes_generation_number() -> None:
+    generation = {
+        "stage": "compliance", "claim_id": "2" * 64,
+        "recovery": False, "generation": 0,
+    }
+    checkpoint = _checkpoint(
+        reconstruction_generations=(
+            generation,
+            {**generation, "generation": 1},
+        )
+    )
+    assert len(checkpoint.reconstruction_generations) == 2
