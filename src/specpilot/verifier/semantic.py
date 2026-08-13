@@ -85,7 +85,7 @@ class SemanticVerifier:
         evidence_by_id = {item.excerpt.content_hash: item for item in evidence}
         citation_ids = {citation.content_hash for citation in deterministic.citations}
         selected_ids = tuple(candidate.candidate.evidence_ids)
-        if not selected_ids or any(item not in citation_ids for item in selected_ids):
+        if not selected_ids or set(selected_ids) != citation_ids:
             raise DeterministicVerificationRequired()
         try:
             selected = tuple(evidence_by_id[item] for item in selected_ids)
@@ -98,7 +98,8 @@ class SemanticVerifier:
             version=version,
             evidence_excerpts=tuple(item.excerpt for item in selected),
         )
-        receipt = await self._transport.send(
+        decision, reservation_id, replayed, request_size = await _send_and_parse(
+            self._transport,
             EgressRequest(
                 evaluation_root_id=context.evaluation_root_id,
                 run_id=context.run_id,
@@ -110,27 +111,55 @@ class SemanticVerifier:
                 source_manifest=context.source_manifest,
                 payload=payload,
             ),
-            idempotency_key=_stage_key(context, "verifier"),
+            _stage_key(context, "verifier"),
+            set(selected_ids),
         )
-        try:
-            decision = SemanticDecision.model_validate_json(receipt.response.content)
-        except (ValidationError, ValueError):
-            decision = None
-        if decision is None or {
-            item.evidence_id for item in decision.evidence
-        } != set(selected_ids):
+        if decision is None:
             error = InvalidSemanticReply(
-                reservation_id=receipt.reservation_id,
-                replayed=receipt.replayed,
-                request_size=receipt.request_size,
+                reservation_id=reservation_id,
+                replayed=replayed,
+                request_size=request_size,
             )
             raise error
         return SemanticOutcome(
             decision=decision,
-            reservation_id=receipt.reservation_id,
-            replayed=receipt.replayed,
-            request_size=receipt.request_size,
+            reservation_id=reservation_id,
+            replayed=replayed,
+            request_size=request_size,
         )
+
+
+async def _send_and_parse(
+    transport: PolicyBoundTransport,
+    request: EgressRequest,
+    idempotency_key: str,
+    expected_evidence_ids: set[str],
+) -> tuple[SemanticDecision | None, str, bool, RequestSize]:
+    receipt = await transport.send(request, idempotency_key=idempotency_key)
+    reservation_id = receipt.reservation_id
+    replayed = receipt.replayed
+    request_size = receipt.request_size
+    decision = _parse_content(receipt.response.content, expected_evidence_ids)
+    del receipt
+    return decision, reservation_id, replayed, request_size
+
+
+def _parse_content(
+    content: str,
+    expected_evidence_ids: set[str],
+) -> SemanticDecision | None:
+    try:
+        decision = SemanticDecision.model_validate_json(content)
+    except (ValidationError, ValueError):
+        decision = None
+    if decision is None:
+        return None
+    response_evidence_ids = {item.evidence_id for item in decision.evidence}
+    if response_evidence_ids != expected_evidence_ids:
+        del decision
+        del response_evidence_ids
+        return None
+    return decision
 
 
 def _version(context: SemanticContext) -> VersionMetadata:

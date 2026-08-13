@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from types import TracebackType
 
 import pytest
 
@@ -61,6 +63,30 @@ def context(*, generation: int = 0) -> ComplianceContext:
     )
 
 
+def production_traceback_reprs(traceback: TracebackType | None) -> tuple[str, ...]:
+    assert traceback is not None
+    traceback = traceback.tb_next
+    representations: list[str] = []
+    while traceback is not None:
+        representations.extend(
+            repr(value) for value in traceback.tb_frame.f_locals.values()
+        )
+        traceback = traceback.tb_next
+    return tuple(representations)
+
+
+def traceback_strings(traceback: TracebackType | None) -> tuple[str, ...]:
+    strings: list[str] = []
+    while traceback is not None:
+        strings.extend(
+            value
+            for value in traceback.tb_frame.f_locals.values()
+            if isinstance(value, str)
+        )
+        traceback = traceback.tb_next
+    return tuple(strings)
+
+
 async def test_compliance_reserves_a_bounded_l2_design_with_a_generation_key() -> None:
     provider = FakeProvider()
     ledger = CapturingLedger()
@@ -90,7 +116,8 @@ async def test_compliance_reserves_a_bounded_l2_design_with_a_generation_key() -
 
 
 async def test_compliance_drops_provider_prose_when_its_json_is_malformed() -> None:
-    provider = FakeProvider(reply="not-json")
+    sentinel = "COMPLIANCE_PROVIDER_PROSE_MUST_NOT_REACH_TRACEBACK"
+    provider = FakeProvider(reply=sentinel)
     ledger = StubLedger()
 
     with pytest.raises(InvalidComplianceReply) as caught:
@@ -105,4 +132,31 @@ async def test_compliance_drops_provider_prose_when_its_json_is_malformed() -> N
     assert error.request_size.request_bytes > 0
     assert error.__cause__ is None
     assert error.__context__ is None
+    assert sentinel not in production_traceback_reprs(error.__traceback__)
     assert provider.call_count == 1
+
+
+async def test_compliance_keeps_an_undisclosed_valid_evidence_id_for_local_rejection(
+) -> None:
+    undisclosed_id = "b" * 64
+    provider = FakeProvider(
+        reply=json.dumps(
+            {
+                "candidates": [
+                    {
+                        "claim": "The design follows the requirement.",
+                        "proposed_verdict": "compliant",
+                        "evidence_ids": [undisclosed_id],
+                        "rationale": "The model selected an undisclosed handle.",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        )
+    )
+
+    outcome = await ComplianceAgent(transport(provider, StubLedger())).evaluate(
+        "The design must be checked.", (evidence(1),), context()
+    )
+
+    assert outcome.batch.candidates[0].evidence_ids == (undisclosed_id,)

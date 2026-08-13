@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import TracebackType
 
 import pytest
 
@@ -39,16 +40,16 @@ class CapturingLedger(StubLedger):
         )
 
 
-def build_evidence() -> Evidence:
-    text = "A sender MUST perform the stated check."
+def build_evidence(index: int = 1) -> Evidence:
+    text = f"A sender MUST perform stated check {index}."
     unit = IndexUnit(
-        unit_id="a" * 64,
+        unit_id=f"{index:x}" * 64,
         kind="clause",
         document_id="iso-9001",
         document_version="2026-edition",
-        section_number="7.1",
-        section_path="Requirements > 7.1",
-        ordinal=1,
+        section_number=f"7.{index}",
+        section_path=f"Requirements > 7.{index}",
+        ordinal=index,
         text=text,
         indexed=text,
     )
@@ -86,6 +87,49 @@ def deterministic(evidence: Evidence, *, passed: bool = True) -> DeterministicRe
         ),
         citations=(citation,) if passed else (),
     )
+
+
+def deterministic_for(*evidence: Evidence) -> DeterministicResult:
+    return DeterministicResult(
+        checks=tuple(
+            DeterministicCheck(item.excerpt.content_hash, None) for item in evidence
+        ),
+        citations=tuple(
+            Citation(
+                clause_id=item.disclosed.clause_id,
+                corpus_manifest_id=item.disclosed.corpus_manifest_id,
+                document_id=item.disclosed.document_id,
+                document_version=item.disclosed.document_version,
+                section_number=item.disclosed.section_number,
+                content_hash=item.excerpt.content_hash,
+            )
+            for item in evidence
+        ),
+    )
+
+
+def traceback_strings(traceback: TracebackType | None) -> tuple[str, ...]:
+    strings: list[str] = []
+    while traceback is not None:
+        strings.extend(
+            value
+            for value in traceback.tb_frame.f_locals.values()
+            if isinstance(value, str)
+        )
+        traceback = traceback.tb_next
+    return tuple(strings)
+
+
+def production_traceback_reprs(traceback: TracebackType | None) -> tuple[str, ...]:
+    assert traceback is not None
+    traceback = traceback.tb_next
+    representations: list[str] = []
+    while traceback is not None:
+        representations.extend(
+            repr(value) for value in traceback.tb_frame.f_locals.values()
+        )
+        traceback = traceback.tb_next
+    return tuple(representations)
 
 
 def context(*, key: str = "recovery", generation: int = 2) -> SemanticContext:
@@ -143,15 +187,36 @@ async def test_semantic_refuses_before_transport_without_verified_evidence() -> 
     assert ledger.attempts == []
 
 
+async def test_semantic_refuses_before_transport_when_citations_include_extra_evidence(
+) -> None:
+    named = build_evidence(1)
+    extra = build_evidence(2)
+    provider = FakeProvider()
+    ledger = StubLedger()
+
+    with pytest.raises(DeterministicVerificationRequired):
+        await SemanticVerifier(transport(provider, ledger)).verify(
+            identified_candidate(named),
+            (named, extra),
+            deterministic_for(named, extra),
+            context(),
+        )
+
+    assert provider.call_count == 0
+    assert ledger.reserved == []
+    assert ledger.attempts == []
+
+
 async def test_semantic_rejects_a_reply_with_an_evidence_set_not_on_the_wire() -> None:
     disclosed = build_evidence()
+    sentinel = "SEMANTIC_PROVIDER_RATIONALE_MUST_NOT_REACH_TRACEBACK"
     provider = FakeProvider(
         reply=json.dumps(
             {
                 "supports_verdict": True,
                 "evidence": [{"evidence_id": "b" * 64, "supports": True}],
                 "reason": "supported",
-                "rationale": "Wrong evidence handle.",
+                "rationale": sentinel,
             },
             separators=(",", ":"),
         )
@@ -169,4 +234,5 @@ async def test_semantic_rejects_a_reply_with_an_evidence_set_not_on_the_wire() -
     assert str(caught.value) == "invalid_semantic_reply"
     assert caught.value.reservation_id == "res-1"
     assert caught.value.request_size.request_bytes > 0
+    assert sentinel not in production_traceback_reprs(caught.value.__traceback__)
     assert provider.call_count == 1

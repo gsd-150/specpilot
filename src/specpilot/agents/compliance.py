@@ -91,7 +91,8 @@ class ComplianceAgent:
                 item.excerpt for item in _bounded_unique_evidence(evidence)
             ),
         )
-        receipt = await self._transport.send(
+        batch, reservation_id, replayed, request_size = await _send_and_parse(
+            self._transport,
             EgressRequest(
                 evaluation_root_id=context.evaluation_root_id,
                 run_id=context.run_id,
@@ -103,19 +104,13 @@ class ComplianceAgent:
                 source_manifest=context.source_manifest,
                 payload=payload,
             ),
-            idempotency_key=_stage_key(context, "compliance"),
+            _stage_key(context, "compliance"),
         )
-        try:
-            batch = ComplianceBatch.model_validate_json(receipt.response.content)
-        except (ValidationError, ValueError):
-            batch = None
         if batch is None:
-            # Build outside the parsing handler so neither a provider response
-            # nor the parser's exception can be retained by orchestration.
             error = InvalidComplianceReply(
-                reservation_id=receipt.reservation_id,
-                replayed=receipt.replayed,
-                request_size=receipt.request_size,
+                reservation_id=reservation_id,
+                replayed=replayed,
+                request_size=request_size,
             )
             raise error
         return ComplianceOutcome(
@@ -126,10 +121,32 @@ class ComplianceAgent:
                 )
                 for candidate in batch.candidates
             ),
-            reservation_id=receipt.reservation_id,
-            replayed=receipt.replayed,
-            request_size=receipt.request_size,
+            reservation_id=reservation_id,
+            replayed=replayed,
+            request_size=request_size,
         )
+
+
+async def _send_and_parse(
+    transport: PolicyBoundTransport,
+    request: EgressRequest,
+    idempotency_key: str,
+) -> tuple[ComplianceBatch | None, str, bool, RequestSize]:
+    receipt = await transport.send(request, idempotency_key=idempotency_key)
+    reservation_id = receipt.reservation_id
+    replayed = receipt.replayed
+    request_size = receipt.request_size
+    batch = _parse_content(receipt.response.content)
+    del receipt
+    return batch, reservation_id, replayed, request_size
+
+
+def _parse_content(content: str) -> ComplianceBatch | None:
+    try:
+        batch = ComplianceBatch.model_validate_json(content)
+    except (ValidationError, ValueError):
+        batch = None
+    return batch
 
 
 def _bounded_unique_evidence(evidence: tuple[Evidence, ...]) -> tuple[Evidence, ...]:
