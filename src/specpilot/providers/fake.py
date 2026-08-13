@@ -8,6 +8,8 @@ from specpilot.contracts.egress import (
     JudgePayload,
     L1OnlinePayload,
     L1PlanPayload,
+    L2AtomicClaimPayload,
+    L2DesignPayload,
 )
 from specpilot.providers.base import (
     ProviderError,
@@ -139,6 +141,38 @@ def _deterministic_content(payload: EgressPayload) -> str:
                 if citations
                 else None,
                 "citations": citations,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if isinstance(payload, L2DesignPayload):
+        evidence_ids = tuple(item.content_hash for item in payload.evidence_excerpts)
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "claim": "The design satisfies the cited requirement.",
+                        "proposed_verdict": (
+                            "compliant" if evidence_ids else "insufficient_evidence"
+                        ),
+                        "evidence_ids": list(evidence_ids[:1]),
+                        "rationale": "The deterministic fixture is not verified.",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if isinstance(payload, L2AtomicClaimPayload):
+        return json.dumps(
+            {
+                "supports_verdict": True,
+                "evidence": [
+                    {"evidence_id": item.content_hash, "supports": True}
+                    for item in payload.evidence_excerpts
+                ],
+                "reason": "supported",
+                "rationale": "The deterministic fixture supports the proposed verdict.",
             },
             separators=(",", ":"),
             sort_keys=True,

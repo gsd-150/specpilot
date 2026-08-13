@@ -17,7 +17,10 @@ import httpx
 import pytest
 
 from specpilot.answer.reply import parse_reply
+from specpilot.contracts.egress import L2AtomicClaimPayload, L2DesignPayload
+from specpilot.contracts.verdict import ComplianceBatch, SemanticDecision
 from specpilot.providers.base import ProviderError
+from specpilot.providers.fake import FakeProvider
 from specpilot.providers.http import (
     HttpChatAdapter,
     ProviderCredentialMissing,
@@ -26,7 +29,11 @@ from specpilot.providers.http import (
     resolve_credential,
 )
 from tests.unit.egress.test_planning_projection import planning_request
-from tests.unit.egress.test_policy_projection import l1_payload
+from tests.unit.egress.test_policy_projection import (
+    excerpt,
+    l1_payload,
+    version_metadata,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -428,3 +435,97 @@ async def test_the_identifier_shown_is_the_identifier_the_parser_takes() -> None
 
     assert parsed.parse_fault is None
     assert [c.evidence_id for c in parsed.citations] == shown
+
+
+def l2_design_payload() -> L2DesignPayload:
+    return L2DesignPayload(
+        design_description="A sender always emits the field.",
+        version=version_metadata(),
+        evidence_excerpts=(excerpt(),),
+    )
+
+
+def l2_atomic_claim_payload() -> L2AtomicClaimPayload:
+    return L2AtomicClaimPayload(
+        atomic_claim_id="claim-1",
+        atomic_claim="A sender always emits the field.",
+        version=version_metadata(),
+        evidence_excerpts=(excerpt(),),
+    )
+
+
+async def test_compliance_fixture_cites_rendered_evidence_handles_only() -> None:
+    captured: list[httpx.Request] = []
+    payload = l2_design_payload()
+    adapter = adapter_returning(ok_body(), capture=captured)
+
+    await adapter.send(payload)
+
+    user = next(
+        message["content"]
+        for message in json.loads(captured[0].content)["messages"]
+        if message["role"] == "user"
+    )
+    system = next(
+        message["content"]
+        for message in json.loads(captured[0].content)["messages"]
+        if message["role"] == "system"
+    )
+    shown = re.findall(r"^Evidence ([0-9a-f]{64}):", user, flags=re.MULTILINE)
+    reply = await FakeProvider().send(payload)
+
+    parsed = ComplianceBatch.model_validate_json(reply.content)
+
+    assert json.loads(system)["response_schema"]["title"] == "ComplianceBatch"
+    assert [candidate.evidence_ids for candidate in parsed.candidates] == [tuple(shown)]
+
+
+async def test_semantic_fixture_decides_over_rendered_evidence_handles() -> None:
+    captured: list[httpx.Request] = []
+    payload = l2_atomic_claim_payload()
+    adapter = adapter_returning(ok_body(), capture=captured)
+
+    await adapter.send(payload)
+
+    user = next(
+        message["content"]
+        for message in json.loads(captured[0].content)["messages"]
+        if message["role"] == "user"
+    )
+    system = next(
+        message["content"]
+        for message in json.loads(captured[0].content)["messages"]
+        if message["role"] == "system"
+    )
+    shown = re.findall(r"^Evidence ([0-9a-f]{64}):", user, flags=re.MULTILINE)
+    reply = await FakeProvider().send(payload)
+
+    parsed = SemanticDecision.model_validate_json(reply.content)
+
+    assert json.loads(system)["response_schema"]["title"] == "SemanticDecision"
+    assert [decision.evidence_id for decision in parsed.evidence] == shown
+
+
+async def test_undisclosed_compliance_id_survives_fake_reply_unchanged() -> None:
+    payload = l2_design_payload()
+    undisclosed = "f" * 64
+    provider = FakeProvider(
+        reply=json.dumps(
+            {
+                "candidates": [
+                    {
+                        "claim": "A sender always emits the field.",
+                        "proposed_verdict": "compliant",
+                        "evidence_ids": [undisclosed],
+                        "rationale": "Untrusted candidate output.",
+                    }
+                ]
+            }
+        )
+    )
+
+    reply = await provider.send(payload)
+    parsed = ComplianceBatch.model_validate_json(reply.content)
+
+    assert parsed.candidates[0].evidence_ids == (undisclosed,)
+    assert undisclosed not in {item.content_hash for item in payload.evidence_excerpts}

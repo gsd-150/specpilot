@@ -44,6 +44,7 @@ from specpilot.contracts.egress import (
     L2AtomicClaimPayload,
     L2DesignPayload,
 )
+from specpilot.contracts.verdict import ComplianceBatch, SemanticDecision
 from specpilot.providers.base import ProviderError, ProviderResponse, ResponseMetadata
 
 # Sent only when the adapter is probing. It is a constant authored here, not
@@ -81,6 +82,31 @@ _PLANNING_SYSTEM_PROMPT = json.dumps(
             "content only."
         ),
         "response_schema": ToolPlan.model_json_schema(),
+    },
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+)
+
+COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
+    {
+        "instruction": (
+            "Split into one to three atomic candidates and return JSON only."
+        ),
+        "response_schema": ComplianceBatch.model_json_schema(),
+    },
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+)
+
+SEMANTIC_REPLY_INSTRUCTIONS = json.dumps(
+    {
+        "instruction": (
+            "Judge only whether the excerpts support the proposed verdict; "
+            "return JSON only."
+        ),
+        "response_schema": SemanticDecision.model_json_schema(),
     },
     ensure_ascii=False,
     separators=(",", ":"),
@@ -308,11 +334,15 @@ _ATTRIBUTION = (
 
 
 def _system_prompt(payload: EgressPayload) -> str:
-    """The judge scores; everything else answers under the citation contract."""
+    """Each stage receives only the closed response contract it can satisfy."""
     if isinstance(payload, L1PlanPayload):
         return _PLANNING_SYSTEM_PROMPT
     if isinstance(payload, JudgePayload):
         return _SYSTEM_PROMPT
+    if isinstance(payload, L2DesignPayload):
+        return COMPLIANCE_REPLY_INSTRUCTIONS
+    if isinstance(payload, L2AtomicClaimPayload):
+        return SEMANTIC_REPLY_INSTRUCTIONS
     return f"{_SYSTEM_PROMPT}\n\n{REPLY_INSTRUCTIONS}"
 
 
