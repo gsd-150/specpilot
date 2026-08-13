@@ -31,3 +31,13 @@ verification separately`.
 ## Concern / integration blocker
 
 Fresh PostgreSQL integration evidence was not produced. `pg_isready` returned `/tmp:5432 - no response`; therefore `PYTHONPATH=src .venv/bin/python -m pytest tests/integration/agents/test_l2_ledger_flow.py -q` correctly reported `1 skipped` because `SPECPILOT_TEST_DSN` is unset. No database was created or reused, and no dirty-DB run was substituted.
+
+## Review fix round 1
+
+Addressed I1, I2, and the related Task 1 parser clarification.
+
+- RED: new focused tests initially failed: semantic transport occurred when the deterministic citation set had an extra Evidence ID, and traceback traversal exposed Compliance's sentinel raw provider reply.
+- GREEN: Semantic now requires exact set equality between candidate Evidence IDs and deterministic citation content hashes before any transport. A candidate naming `{A}` with deterministic citations `{A, B}` raises locally with zero reservations, attempts, or provider calls.
+- GREEN: parse/send helpers return `None` for invalid content and delete the transport receipt before control reaches the frame that raises a sanitized exception. Adversarial traceback-local tests confirm Compliance raw reply and semantic rationale sentinels are absent from production traceback frames; cause/context remain empty.
+- GREEN: Compliance preserves a syntactically valid undisclosed model Evidence ID unchanged, leaving Task 2 to classify it as `not_disclosed`.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/agents/test_compliance.py tests/unit/verifier/test_semantic.py tests/unit/egress -q` -> `87 passed`; `PYTHONPATH=src make check` -> Ruff clean, mypy clean, `1456 passed, 2 skipped` unit tests, `181 passed` CLI tests.
