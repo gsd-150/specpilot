@@ -1866,6 +1866,41 @@ def _annotation_retire(arguments: argparse.Namespace) -> int:
     )
 
 
+def _audited_item_ids(
+    store: PoolingStore,
+    *,
+    bm25_fingerprint: str,
+    weights_sha256: str,
+    collection: str,
+) -> frozenset[str]:
+    """Items a sealed run already adjudicated under this retrieval configuration.
+
+    The candidate pool is a function of the question, the index and the weights.
+    While all three hold, re-registering an item would present the identical
+    candidates and ask a question whose answer is already sealed.
+    """
+    audited: set[str] = set()
+    for run in store.read_runs():
+        run_id = cast(str, run.run_id)
+        if not store.read_seals(run_id):
+            continue
+        if (
+            run.bm25_fingerprint != bm25_fingerprint
+            or run.embedding_weights_sha256 != weights_sha256
+            or run.dense_collection != collection
+        ):
+            continue
+        applied = {entry.decision_id for entry in store.read_applications(run_id)}
+        audited |= {
+            head.item_id
+            for head in head_decisions(
+                store.read_decisions(run_id), store.read_supersessions(run_id)
+            )
+            if head.decision_id in applied
+        }
+    return frozenset(audited)
+
+
 def _annotation_pool_register(arguments: argparse.Namespace) -> int:
     if not arguments.annotation_dir.is_dir():
         return _refuse("annotation_dir_not_found")
@@ -1874,6 +1909,11 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
         return _refuse_source(resolved)
     try:
         heads = _annotation_heads(arguments.annotation_dir)
+        retired = {
+            entry.item_id
+            for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
+        }
+        heads = tuple(record for record in heads if record.item_id not in retired)
         if not heads:
             return _refuse("no_l1_annotations")
         corpus = _pool_corpus(resolved)
@@ -1924,6 +1964,23 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
             for unit_id, unit in units.items()
         }
         sparse = Bm25Index.build(corpus.indexable())
+        # Already audited under this exact retrieval configuration, so there is
+        # nothing new to ask. Bound to the fingerprints rather than to "audited
+        # once": the answer is only as frozen as the index and the weights that
+        # produced its candidates, so changing either brings every item back.
+        # Without this a gold set that grows by one item costs a full re-audit,
+        # which either wastes the reviewer's time or invites them to wave
+        # through items they have already seen — and this session found a
+        # defective item inside exactly such a set of "confirmations".
+        audited = _audited_item_ids(
+            PoolingStore(arguments.pool_dir),
+            bm25_fingerprint=sparse.fingerprint,
+            weights_sha256=actual_weights,
+            collection=arguments.collection,
+        )
+        heads = tuple(record for record in heads if record.item_id not in audited)
+        if not heads:
+            return _refuse("no_l1_annotations_to_audit")
         items: list[PoolingItem] = []
         try:
             for record in heads:

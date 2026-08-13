@@ -1540,3 +1540,27 @@ restores §8.2.2's share: 23 of 39 becomes 24 of 40.
 Owed: the forced-choice review of this one item, then a pooling run over the
 corrected 40-item set. `create_run` takes a new item set, so it registers
 cleanly; the sealed run `831069…` stays as the record of the 39 audited before it.
+
+#### The audit is incremental now, because the alternative was a third full pass
+
+Registering the corrected 40-item set would have re-presented every item, for
+the third time in one day. Skipping is not just cheaper, it is safer: asking a
+reviewer to re-confirm 39 items they have already sealed either wastes an hour
+or invites them to wave the batch through — and **this session found a defective
+item inside exactly such a set of "confirmations"**, on the first one.
+
+`pool-register` now omits items a sealed run already adjudicated **under the
+same retrieval configuration**: same BM25 fingerprint, same embedding weights,
+same dense collection. Bound to the fingerprints rather than to "audited once",
+because the candidate pool is a function of the question, the index and the
+weights — while all three hold, re-registering presents identical candidates and
+asks a question whose answer is already sealed. Change any of them and every
+item comes back.
+
+The first criterion tried was "skip an item whose current head a sealed run
+adjudicated", and it skipped nothing: `apply_decision` writes a successor for
+every applied decision, including `gold_complete`, so the sealed decision always
+names the pre-audit head. The fingerprints are the honest key.
+
+Registered run `87bd940c…` — **1 item, 8 candidates**, against 40 items and 319
+candidates for the run before it.
