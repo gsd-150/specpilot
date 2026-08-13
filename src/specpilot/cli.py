@@ -2095,7 +2095,12 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
             if outcome is PoolingOutcome.AUDIT_BLOCKED:
                 if superseded is None:
                     store.create_decision(existing)
-                return _refuse("pooling_audit_blocked")
+                # Recorded, and the pass goes on. Halting here meant one item
+                # the reviewer honestly could not judge cost them every item
+                # after it — and on resume that item is re-presented first, so
+                # the run could never be worked through at all. §8.2.3 says a
+                # blocked decision prevents *sealing*, which is enforced below.
+                continue
         try:
             apply_decision(
                 store,
@@ -2111,6 +2116,26 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
             applied.decision_id: applied
             for applied in store.read_applications(arguments.run_id)
         }
+
+    blocked_now = tuple(
+        head.item_id
+        for head in head_decisions(
+            store.read_decisions(arguments.run_id),
+            store.read_supersessions(arguments.run_id),
+        )
+        if head.outcome is PoolingOutcome.AUDIT_BLOCKED
+    )
+    if blocked_now:
+        # Read back from the store rather than collected in the loop, so a
+        # pass that was paused and resumed still reports every open item.
+        return _emit(
+            {
+                "status": "blocked",
+                "run_id": run.run_id,
+                "blocked_items": list(blocked_now),
+                "adjudicated_items": len(applications),
+            }
+        )
 
     try:
         final_decisions = store.read_decisions(arguments.run_id)

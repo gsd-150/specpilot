@@ -1380,3 +1380,55 @@ untouched**: `tests/integration/api/test_l1_end_to_end.py` expects `answered`
 and gets `egress_blocked`. It fails identically with these changes stashed, so
 it is not from this work — but it means `main` is red on the full local suite
 while CI was green on the merge commit, and that gap is worth its own look.
+
+#### Task 13 addendum — blocked halted the pass, which made it useless anyway
+
+Fixing "blocked is unrecoverable" was not enough. The review loop returned as
+soon as an item was blocked, so a reviewer who honestly could not judge one item
+lost every item after it — and because a blocked item is re-presented first on
+resume, the run could never be worked through at all. The recoverable path just
+made the loop survivable, not exitable.
+
+§8.2.3 says a blocked decision prevents *sealing*. It never said it prevents
+continuing. `blocked` now records and moves on; the pass runs to the end and
+then reports rather than seals:
+
+```json
+{"status":"blocked","blocked_items":["l1-dev-001"],"adjudicated_items":19}
+```
+
+Read back from the store rather than collected in the loop, so a pass that was
+paused and resumed still reports every open item. Same shape as the existing
+`paused` status, which also leaves the run unsealed and returns 0.
+
+#### The first item of the re-audit was already wrong
+
+This is the finding, and it landed on the item I had told the author would be a
+formality. `l1-dev-001` asks **"in what single respect"** a HEAD response
+differs from a GET response, with §9.3.2 ¶1 as gold — "identical to GET except
+that the server MUST NOT send content". **§9.3.2 ¶2, the next paragraph, permits
+a second observable difference**: a server MAY omit header fields whose value is
+determined only while generating the content, naming Content-Length and Vary as
+examples. The question's premise is contradicted one paragraph below its own
+gold.
+
+Neither `complete` nor a letter selection can express that. `complete` would
+assert the gold is exhaustive for a question that cannot be answered as posed,
+and adding ¶2 to gold would encode the contradiction into the ruler — ¶2 is not
+an additional answer, it is what makes the question unanswerable. `blocked` is
+the honest record and is what the author entered.
+
+**Three gates missed it.** The forced choice passed it — at 2,179 recorded
+seconds, which was written off as a debugging artifact and may not have been.
+The sealed pooling audit `603777f3` recorded it `gold_complete`. And it was
+never drawn into the deep-review sample. It took a re-audit that I had argued
+would mostly be confirmation.
+
+It is adjacent to the consecutive-paragraph rule but not the same defect: that
+rule catches gold that is missing a clause, and this is a *question* asserting
+something the corpus contradicts. Same cause underneath — reading one paragraph
+as self-contained when the section has to be read together.
+
+Owed: rewrite the question without the false premise, which is a record-level
+amendment and not something this run can do. Until then `l1-dev-001` stays
+blocked and the run stays unsealed, which is correct.

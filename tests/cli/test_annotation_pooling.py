@@ -439,9 +439,12 @@ def test_a_mistyped_block_does_not_end_the_run(
     registered = last_json(capsys.readouterr().out)
     run_id = str(registered["run_id"])
 
-    monkeypatch.setattr("sys.stdin", io.StringIO("blocked\n"))
-    assert main(review_args(pooling_workspace, run_id)) != 0
-    assert "pooling_audit_blocked" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", io.StringIO("blocked\ncomplete\n"))
+    assert main(review_args(pooling_workspace, run_id)) == 0
+    paused = last_json(capsys.readouterr().out)
+    # The pass carried on to the second item rather than ending on the first.
+    assert paused["status"] == "blocked"
+    assert paused["blocked_items"] == ["l1-dev-001"]
 
     # The same reviewer, resuming, is re-presented the item rather than told
     # the run is broken.
