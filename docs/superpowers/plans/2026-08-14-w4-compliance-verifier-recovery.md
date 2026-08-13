@@ -26,7 +26,7 @@
 
 ## File Structure
 
-- `src/specpilot/contracts/compliance.py` — public/internal L2 candidate, verdict, semantic decision, and final result contracts.
+- `src/specpilot/contracts/verdict.py` — public/internal L2 candidate, verdict, semantic decision, and final result contracts. The existing `contracts/compliance.py` remains the W0 source/provider authorization assessment contract.
 - `src/specpilot/agents/compliance.py` — render/send/parse the Compliance candidate stage.
 - `src/specpilot/verifier/deterministic.py` — pure frozen-corpus evidence integrity and scope checks.
 - `src/specpilot/verifier/semantic.py` — independent semantic support send/parse stage.
@@ -45,10 +45,10 @@
 ### Task 1: Closed L2 contracts and stage-specific wire format
 
 **Files:**
-- Create: `src/specpilot/contracts/compliance.py`
+- Create: `src/specpilot/contracts/verdict.py`
 - Modify: `src/specpilot/providers/http.py`
 - Modify: `src/specpilot/providers/fake.py`
-- Test: `tests/unit/contracts/test_compliance.py`
+- Test: `tests/unit/contracts/test_verdict.py`
 - Test: `tests/unit/providers/test_http_adapter.py`
 
 **Interfaces:**
@@ -57,7 +57,7 @@
 
 - [ ] **Step 1: Write contract REDs for the maximum, evidence invariant, and final publication invariant**
 
-Create `tests/unit/contracts/test_compliance.py` with real Pydantic construction tests. The core cases must be:
+Create `tests/unit/contracts/test_verdict.py` with real Pydantic construction tests. The core cases must be:
 
 ```python
 def candidate(verdict: str = "compliant", evidence_ids: tuple[str, ...] = ("a" * 64,)) -> dict[str, object]:
@@ -102,14 +102,14 @@ Also assert: normalized claims yield stable SHA-256 IDs and duplicate normalized
 Run:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/contracts/test_compliance.py -q
+.venv/bin/python -m pytest tests/unit/contracts/test_verdict.py -q
 ```
 
-Expected: collection fails with `ModuleNotFoundError: specpilot.contracts.compliance`.
+Expected: collection fails with `ModuleNotFoundError: specpilot.contracts.verdict`.
 
 - [ ] **Step 3: Implement the minimal closed contracts**
 
-Create `src/specpilot/contracts/compliance.py` with these exact public shapes:
+Create `src/specpilot/contracts/verdict.py` with these exact public shapes:
 
 ```python
 class ComplianceVerdict(StrEnum):
@@ -194,7 +194,7 @@ Add provider tests that render each L2 payload, scrape every `Evidence <sha256>:
 Run:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/contracts/test_compliance.py tests/unit/providers/test_http_adapter.py -q
+.venv/bin/python -m pytest tests/unit/contracts/test_verdict.py tests/unit/providers/test_http_adapter.py -q
 ```
 
 Expected: PASS.
@@ -202,7 +202,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit the L2 wire contracts**
 
 ```bash
-git add src/specpilot/contracts/compliance.py src/specpilot/providers/http.py src/specpilot/providers/fake.py tests/unit/contracts/test_compliance.py tests/unit/providers/test_http_adapter.py
+git add src/specpilot/contracts/verdict.py src/specpilot/providers/http.py src/specpilot/providers/fake.py tests/unit/contracts/test_verdict.py tests/unit/providers/test_http_adapter.py
 git commit -m "feat: define closed L2 candidate and support contracts" -m "Compliance output is an untrusted candidate, while semantic support is a separately prompted decision. Distinct schemas and rendered-wire tests keep either model stage from inheriting the L1 citation contract or citing handles it was never shown."
 ```
 
