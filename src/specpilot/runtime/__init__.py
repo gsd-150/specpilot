@@ -1,5 +1,6 @@
 """In-process asynchronous run execution."""
 
+from specpilot.runtime.l2_factory import L2CheckpointStore, L2JobFactory
 from specpilot.runtime.worker import (
     DeliveryPermit,
     RunJob,
@@ -16,4 +17,6 @@ __all__ = [
     "WorkerError",
     "WorkerQueueFull",
     "WorkerUnavailable",
+    "L2CheckpointStore",
+    "L2JobFactory",
 ]
