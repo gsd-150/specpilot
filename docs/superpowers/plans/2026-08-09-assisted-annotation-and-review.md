@@ -1235,3 +1235,72 @@ Task 7's review pass, for these 20. `tmp/review_pass.sh` is resumable and skips
 anything already in `tmp/review-timings.tsv`, which holds the first 20 — so it
 presents exactly the new ones. At the measured ~25s per item this is well under
 an hour, and it is the last thing between L1 and 40/40.
+
+#### Task 12 review pass complete — L1 is 40/40
+
+| | first pass | this pass | all 40 |
+| --- | --- | --- | --- |
+| decisions | 20 | 20 | 40 |
+| accepted as proposed | 19 | **20** | 39 |
+| gold changed | 1 | 0 | 1 |
+| rejected | 0 | 0 | 0 |
+| acceptance rate | 0.95 | 1.00 | **0.975** |
+| key points edited | 0 | 0 | 0 |
+| choice median | ~25s | **29s** | — |
+| deep reads | 5 | 6 | **11 of 11, coverage 1.0** |
+| deep read median | 91s | **27.5s** | 50s |
+| additional gold found | 0 | 0 | 0 |
+
+Both §8.1 unanswerable floors are met for the first time: dev 3/3, locked 5/5.
+Clause-first share is 0.60 exactly. 33 gold clauses across 40 items.
+
+**The §8.1 disclosure paragraph's bound tightens.** 0 errors in 11 reads bounds
+the gold error rate below **23.8%** at 95% one-sided confidence, against 45.1% at
+n=5. The method reproduces the recorded first-pass figure exactly, so the two
+numbers are comparable. 23.8% is a real improvement and still nowhere near
+"verified" — it excludes a badly wrong gold and nothing finer.
+
+#### The reviewer's recorded judgement, which the findings store cannot hold
+
+The deep-review finding records `outcome` and `elapsed_seconds` and nothing about
+what the reader concluded. That is the complementary half of a gap this plan
+already names from one side: coverage of 1.0 is not evidence a read happened, and
+**a read that was genuinely good is equally unrecordable**. So it is written here.
+
+The author accepted all six as `gold_complete` with no gold change, on a stated
+principle worth keeping: **gold is not padded to make the statistics look
+better.** Adding context clauses to manufacture a `gold_changed` or a multi-clause
+gold would corrupt the ruler to improve the appearance of the measurement.
+
+Three specific findings, of which the first is independent evidence that the
+source was read rather than the sheet:
+
+- **§14.2, Range.** The boundary is `does not understand the range unit` → ¶5,
+  MUST ignore; against `understands the unit but it is not supported for that
+  target resource` → the ¶13 path, which can answer 416. **¶11 and ¶13 appear
+  only in the deep-review scope, never on the forced-choice sheet, and the 416
+  distinction was not in the drafted item or its key points.** A 27-second read
+  that produces a clause-accurate distinction the sheet could not supply is
+  evidence the timing alone does not show.
+- **§8.6, Content-Length.** Kept as a hard negative: ¶8's absolute prohibition in
+  1xx and 204 against the neighbouring conditional permissions. The distractors
+  are the permissions, so the item tests whether a system separates *never* from
+  *only when*.
+- **§12.5.5, Vary.** Confirmed as the consecutive-paragraph rule working: the
+  question asks only what the list requires of a cache, so ¶9 alone is complete.
+  Had it asked for the list's two purposes, gold would be ¶8, ¶9 and ¶10 —
+  which is rule 3, not a defect.
+
+**What the timing says, recorded rather than argued away.** This batch's deep
+reads ran at a 27.5s median against the first pass's 91s, with four of six
+between 20 and 28 seconds. That number goes into the report as it stands. The
+Range finding shows the median is not the whole story, and the report has no
+field in which to say so — which is the argument for adding one, and a change to
+the finding contract rather than something to settle here.
+
+#### Owed next
+
+20 items awaiting §8.2.3 pooling adjudication — the whole locked batch. That step
+independently searches for gold the forced choice could not surface, and it is
+what added §15.4.5 ¶2 back to `l1-dev-010`. L1 is not ready for evaluation until
+it has run.

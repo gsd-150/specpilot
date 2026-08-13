@@ -42,7 +42,7 @@ v5 把上述承诺收紧为可执行契约：所有 provider 调用统一经过�
 同类 Agent 项目大多能展示“系统能跑”，能展示“数字可信”的很少。本项目的差异化集中在后者。完成后应能用可复现材料回答：
 
 1. **这些数字是怎么来的？** 检索 gold 如何标注才不构成循环论证？答案由谁打分，那个裁判本身验证过吗？（§8.2、§8.3）
-2. **有没有第三方能验证？** 招聘方 clone 仓库后，无 API key、无需下载真实 3GPP 语料，能否用一条命令看到脱敏执行轨迹与 Verifier 的逐项拦截；已有镜像的暖启动能否达到经实测后才对外声明的三分钟目标？（§9.6）
+2. **有没有第三方能验证？** 招聘方 clone 仓库后，无 API key、无需下载真实 RFC 语料，能否用一条命令看到脱敏执行轨迹与 Verifier 的逐项拦截；已有镜像的暖启动能否达到经实测后才对外声明的三分钟目标？（§9.6）
 3. **Agent 如何自主选择工具**，而不是走硬编码流程？工具超时、坏参数、空检索、无限循环、预算超限分别如何降级？（§5、§7）
 4. **长文档如何解析、检索并定位到具体条款**，且每项确定性结论都绑定版本与条款 ID，证据不足时拒答？（§4.1、§4.3）
 5. **哪些设计是被自己的数据推翻或被时间盒淘汰的？** L2 的职责分离是否值得保留？为什么不直接用长上下文？为什么不做长期记忆？（§8.5、§4.5）
@@ -172,7 +172,7 @@ L1 和 L2 构成 W0–W6 主线。L3 不进入首发验收，也不占用主工�
 
 ### 4.1 离线文档管线
 
-> **[已变更｜当前生效]** 下方 OOXML、TR 21.801 与 3GPP 抽样 QA 是原路线设计。当前实现已切换为 RFCXML 章节树、条款、表格、规范性关键词和交叉引用抽取；RFC 9110 smoke 得到 288 sections / 1,559 clauses / 2,519 cross-references，RFC 9112 得到 56 / 348 / 458（收集式 ABNF 附录已按 anchor 排除，对两份文档一致生效），二者 dangling cross-reference 均为 0。独立 BM25、dense route 与 RRF 已实现；冻结 corpus manifest、一次性 pooling 和完整质量评测尚未完成。
+> **[已变更｜当前生效]** 下方 OOXML、TR 21.801 与 3GPP 抽样 QA 是原路线设计。当前实现已切换为 RFCXML 章节树、条款、表格、规范性关键词和交叉引用抽取；RFC 9110 smoke 得到 288 sections / 1,559 clauses / 2,519 cross-references，RFC 9112 得到 56 / 348 / 458（收集式 ABNF 附录已按 anchor 排除，对两份文档一致生效），二者 dangling cross-reference 均为 0。独立 BM25、dense route 与 RRF 已实现。**[已完成]** corpus manifest `1abafff7…` 已冻结 1,922 个 points；L1 的 20 条已完成一次性 pooling completeness audit 并封存。**[未完成]** L2 gold/pooling、主集整体锁定与完整质量评测仍在后续范围。
 
 文档管线负责把公开规范变成可检索、可定位和可校验的数据：
 
@@ -289,7 +289,7 @@ BGE-M3 的 8192 序列长度比常见的 512-token embedding 模型更适合长�
 
 #### 4.6.1 W0 必须确认的三件事
 
-> **[已变更]** 三路线 go/no-go 已选择 **C（IETF RFC）**，因此 3GPP 云端授权与 OOXML 摄取不再是进入 W1 的前置条件。**[已完成]** `EgressPolicyEnforcer`、PostgreSQL 原子账本和 fixture transport 已通过多轮、重试、越权、并发与恢复测试。**[已实测 2026-08-09]** 两条真实 provider route 已用合成 payload 实测可用，详见下方第 1 项的附注。**[延期]** 真实 **excerpt 出站**接入仍是后续硬门禁 —— 它与路由可用性是两件事：路由通了只说明能连上，出站授权要的是一份真实文档的授权 successor manifest，而两份 RFC manifest 现均为 `cloud_egress_authorized=false`。在它通过前，不得把 RFC 可公开获取、或路由已实测可用，等同于允许向 provider 发送语料内容。
+> **[已变更]** 三路线 go/no-go 已选择 **C（IETF RFC）**，因此 3GPP 云端授权与 OOXML 摄取不再是进入 W1 的前置条件。**[已完成]** `EgressPolicyEnforcer`、PostgreSQL 原子账本和 fixture transport 已通过多轮、重试、越权、并发与恢复测试。**[已实测 2026-08-09]** 两条真实 provider route 已用合成 payload 实测可用，详见下方第 1 项的附注。**[已完成 2026-08-10/11]** RFC 9110/9112 已分别写入 `cloud_egress_authorized=true` 的不可变 successor manifest，绑定 `deepseek` / `online-main`，作者授权结论于 **2026-11-08** 到期；真实 RFC excerpt 已经统一出站闸门和原子账本跑通 L1 answer path，并实测了可回答与拒答两个方向。授权仍以 provider、用途、上限与到期日为硬边界；旧的 default-deny predecessor 保留且不可用于出站。
 >
 > **[表述修正｜下方第 1 项按字面不可执行]** 第 1 项写“在 W0 **用 fixture** 分别验证 `deepseek-v4-flash` 与 `glm-5.2` 的**真实调用**”——这句自相矛盾：fixture route smoke 按定义不触达任何 provider，无法验证真实调用。W0 据此把该项报告为已完成，而同期的 `docs/reports/w0-foundation-report.md` 又写明该 smoke “proves nothing about any real provider”。两份记录都对，问题在要求本身。
 >
@@ -311,8 +311,8 @@ BGE-M3 的 8192 序列长度比常见的 512-token embedding 模型更适合长�
 > **没有退役的部分，必须分开说：**
 >
 > 1. **judge 路由的 tool calling 仍未证实。** `glm-5.2` 收到了同一个 tool 定义但选择不调用，返回 `stop`。这既不是“不支持”也不是“支持”——模型可以对被提供的工具选择不用。按 §8.3.1，judge 的职责是逐采分点判定，需要的是**结构化输出**而不是 tool calling，所以这不构成阻塞；但报告里不得写成“两条路由都验证了 tool calling”。
-> 2. **主链的 tool calling 只证明了“能发出一次调用”**，没有证明工具选择质量、参数正确性或多轮 tool loop —— 那些要等 W3 有真实工具 schema 之后才测得到。
-> 3. **真实 excerpt 出站仍是后续硬门禁**，与本项无关：它需要一份真实文档的授权 successor manifest，而两份 RFC manifest 现均为 `cloud_egress_authorized=false`。
+> 2. **W3 已有五个真实工具 schema 与有界 planner，但尚未实测真实 provider 上的自主工具选择质量。** W3 发布门禁使用本地 `FakeProvider` 跨过了 MCP/API/browser 的真实组件边界，且明确没有调用真实 provider。因此可以声明 schema、调度、账本和轨迹已连通，不能把它外推为真实模型的工具选择准确性。
+> 3. **真实 excerpt 出站门禁已退役，但授权边界没有退役。** 两份授权 successor、provider/use 绑定、一五分之一 cap 前提和 2026-11-08 到期日必须在每次真实运行时继续 fail closed。
 >
 > **附带得到的一个测量：字节上界在两条真实路由上都成立**（414 ≤ 495，228 ≤ 353）。n=2、短英文、含 tool schema，证据很弱，但方向与 `ByteUpperBoundCounter` 的构造性论证一致。收紧该计数需要更多样本，尤其是中文与长条款。
 
@@ -369,7 +369,7 @@ BGE-M3 的 8192 序列长度比常见的 512-token embedding 模型更适合长�
 
 条款正文超过单片段上限时，由 `ExcerptWindowSelector` 决定送出哪 512 tokens；默认策略由 §8.5.2 的锁定对照结果确定，W5 之前使用 W-head 作为占位实现。选中窗口的 span 记入 `excerpt_span` 与 `disclosure_id`，不同窗口即不同披露单元。
 
-> **[已收窄]** RFC 语料实测只有 1 个 clause 超过 512 tokens（RFC 9112 附录 A 的收集式 ABNF，683 tokens），因此 `ExcerptWindowSelector` 不在主链关键路径上：W5 不为它安排实现工时，W-head 等价于恒等映射，`excerpt_span` 与 `disclosure_id` 的语义不变。**但这依赖两处尚未修复的代码前提**：`ClauseLimits` 当前用词数（512 词）而非 token 数作为长度守卫，而 W1 实测 ABNF 块为 2.90 tokens/word，词守卫因此比它声称的宽约三倍；`collected.abnf` 的排除表又按 `document_id` 硬编码、只对 RFC 9110 生效。二者叠加的结果是 9112 的同名附录带着 683 tokens 进入索引，可被检索命中，却会在出站时被 `excerpt_tokens_exceeded` 拒绝，形成一次无法解释的 fail-closed 拒答。修法：长度守卫改用 BGE-M3 token 计数（§4.1 第 3 步本就如此规定）、排除按 anchor 而非 document_id 生效，并加一条“任何 indexable unit 的 token 数不得超过 `excerpt.tokens`”的语料级断言测试。
+> **[已收窄并已修复]** RFC 语料曾有 1 个 clause 超过 512 tokens（RFC 9112 附录 A 的收集式 ABNF，683 tokens），因此 `ExcerptWindowSelector` 不在主链关键路径上：W5 不为它安排实现工时，W-head 等价于恒等映射，`excerpt_span` 与 `disclosure_id` 的语义不变。原先按 `document_id` 硬编码的排除已改为对所有文档按 `collected.abnf` anchor 生效；`ClauseLimits.max_words` 仅作廉价预过滤，准确的 BGE-M3 token 与 byte 检查已移到冻结必经的 `corpus qa` / `excerpt_fit` 阻断线。当前可检索单元为 RFC 9110 1,571/1,571、RFC 9112 351/351 全部通过，不再存在“可检索但必然无法出站”的已知单元。
 
 `EgressPolicyEnforcer` 是唯一允许构造 provider payload 的组件。工具层返回的本地对象默认不可序列化到 LLM 消息；只有经白名单投影后的 query/claim、必要元数据、有界 TOC nodes 和 Evidence excerpts 可放行。每次放行记录 policy ID、provider route/role、字段类型、unique/transmitted token 计数、disclosure/Evidence/content/quote hash、excerpt span 与累计使用量，不记录正文。
 
@@ -471,7 +471,7 @@ L1 的模型输出不是只有一段自由文本：先生成结构化 `answer_cl
 
 | | 真实语料 | fixture 语料 |
 |---|---|---|
-| 内容 | 冻结版本的 TS 38.300 与 TS 38.321 | 合成或许可宽松的小型规范 |
+| 内容 | 冻结版本的 IETF RFC 9110 与 RFC 9112 | 合成或许可宽松的小型规范 |
 | 是否进仓库 | 否——原文、引文、索引一律不提交 | 是，含预先算好的向量 |
 | 运行位置 | 原始语料、完整索引与候选检索仅本地；经授权的在线主链和离线批量评测可按 §3.2 发送受限字段 | 本地与 CI |
 | 用途 | **产出报告中的全部指标** | 管线冒烟测试、离线演示 |
@@ -486,7 +486,7 @@ L1 的模型输出不是只有一段自由文本：先生成结构化 `answer_cl
 
 ### 8.1 数据集
 
-> **[进行中｜当前正式记录]** 正式 annotation store 目前只有 3 条 `L2-dev`，分别为 `violating`、`compliant`、`insufficient_evidence` 各 1 条；三条均经 model proposal 后由 human source review，retrieval-originated 为 0。当前 progress 仍报告 `awaiting_adjudication=3`（三条记录尚无 adjudication event），且尚未达到本节计划的 8 条 L2 dev、12 条 L2 locked、L1 与 L2-adv 规模。三条记录共同锚定 RFC 9112 §6.3 的同一 clause，question–Gold Jaccard 分别为 0.1928、0.1707、0.1477。
+> **[进行中｜2026-08-13 当前正式记录]** annotation store 共 23 条：L1 为 20/40（dev 15/15，locked 5/25），L2 为 3/20（dev 3/8，locked 0/12）。L1 的 20 条已完成人工 choice review、5/5 预注册 deep-review finding 和一次性 pooling audit；L1 `awaiting_adjudication=0`。剩余 20 条 L1 locked proposal 已完成第二批起草和自动校验，草案层已达到 locked 不可回答题 5 条的设计下限，但尚未经作者 Task 7 review，因此不计入正式 store 进度。L2 三条分别为 `violating`、`compliant`、`insufficient_evidence` 各 1 条，均经 model proposal 后由 human source review，retrieval-originated 为 0，仍报告 `awaiting_adjudication=3`。正式 store 仍未达的硬下限包括 L1 locked 不可回答题 2/5、L2 dev 不可回答题 1/2，以及全部 L2 locked 和 L2-adv。
 
 首发评测集固定为：
 
@@ -878,7 +878,7 @@ CI 至少运行：
 - **模型换成确定性 fake model**：它实现与真实 provider adapter 相同的接口，对四个预注册 fixture 场景返回固定 tool_use 序列与文本；未注册问题明确返回 `unsupported_demo_case`，不伪装成能泛化的 Agent。切换到真实模型通过更换 adapter/profile 完成，不假设不同 provider 共用 key。
 - **其余全部真实执行**：混合检索、MCP 工具分发、预算扣减与上限、异常注入与恢复、Verifier 的确定性检查（引文存在、版本匹配）、SSE 轨迹推送。
 - 四个预注册场景分别覆盖 L1 正常路径、L2 路径、拒答路径和 Verifier 拦截路径。
-- `docker compose --profile demo up --build` 后由 `fixture-init` 完成幂等导入；无需下载真实 3GPP 语料、无需付费模型即可运行四个场景并看到轨迹、证据高亮和 Verifier 检查结果。
+- `docker compose --profile demo up --build` 后由 `fixture-init` 完成幂等导入；无需下载真实 RFC 语料、无需付费模型即可运行四个场景并看到轨迹、证据高亮和 Verifier 检查结果。
 
 **这个 demo 证明什么、不证明什么，必须讲清楚**，否则等于换一种方式过度宣称：
 
@@ -946,7 +946,7 @@ Dify 总投入限制为 1–2 天，单独作为发布后扩展记录，不回�
 
 ## 十一、7 周排期（W0–W6）
 
-> **[进度校正]** W0 与后续插入的 RFC foundation 已完成并通过完整测试；原 3GPP/OOXML 路线已完成拒绝证据，但其摄取并未成为当前主线。W1 的 clause、annotation workflow 与 embedding throughput 已完成，正式标注当前仅有 3/8 条 L2 dev。W2 已完成表格/QA、BM25、dense 与 RRF，冻结 corpus manifest 和 pooling 尚未完成；W3 及以后仍未开始。下方周表保留原始排期基线，执行时应以这些状态附注和实际阻断条件校正。另需校正本节下方“标注是唯一不能靠加班或换工具压缩的部分”这一前提：现有三条正式记录的实际路径是 model proposal 后由 human source review（§8.1 附注），工具确实介入了。不可压缩的部分应收窄为**逐条对照冻结原文的人工核验与判定**；起草与检索可由工具协助，但核验不能。§8.1 要求披露的“单人标注”相应改写为“模型起草 + 单人核验、无标注者间一致性”。
+> **[进度校正｜2026-08-13]** W0 与后续插入的 RFC foundation 已完成；原 3GPP/OOXML 路线保留为 fail-closed 拒绝证据，不是当前主线。W1 的 clause、annotation workflow 与 embedding throughput 已完成；正式数据为 L1 20/40、L2 3/20。W2 的表格/QA、BM25、dense、RRF 与冻结 corpus manifest 已完成，L1 20 条的一次性 pooling audit 已封存；L2 gold/pooling 与主集整体锁定尚未完成。W3 的五个 MCP 工具、有界 Orchestrator/Evidence flow、FastAPI 异步 run、owner-bound 轨迹、PostgreSQL 出站账本与只读 React trace 页已经 PR #1 合并到 `main`。W4–W6 的 L2/Compliance、checkpoint recovery、SSE/reconnect、完整 demo matrix 与 locked evaluation 仍未完成。下方周表保留原始排期基线，执行时以本附注和实际依赖为准。“单人标注”按实际流程披露为“模型起草 + 单人核验、无标注者间一致性”；不可压缩的部分是逐条对照冻结原文的人工核验与判定，不是模型起草本身。
 
 > **[已失效｜排期模型重写]** 本节的周次排期已与实际执行脱节，且脱节方向与它的设计假设**相反**。实测：2026-08-06 至 08-08 三个日历日内完成 W0、R0、W1 与 W2 的 Task 1–5，共 88 次提交；计划给这些工作的是三周。同期标注完成 3 条。**工程侧不是瓶颈；标注是瓶颈，而且是唯一的。**
 >
@@ -956,7 +956,7 @@ Dify 总投入限制为 1–2 天，单独作为发布后扩展记录，不回�
 >
 > 2. **两份裁剪顺序合并，且以后者为准。** 下方主裁剪顺序（L2-adv-dev 6→3 → 工具子集 16→8 → L1 dev 15→10）砍的是**证据**，换取的是已实测为非稀缺的工程时间；本节末尾的“非核心裁剪顺序”（三组 dev diagnostics 转 backlog → 前端只保留静态 trace/SSE 页 → PostgreSQL 只保留最小 schema）砍的是**工程**。两者方向相反。执行时**先走后者并尽量走完，前者只在标注本身被证明无法完成时才触发** —— 在工程近乎免费的前提下，用证据换工期是净亏。
 >
-> 3. **完工时间只由标注吞吐决定，而该吞吐尚未测量。** 本节当初拒绝写逐项工时，理由是开工前的单题耗时都是猜测 —— 那时是对的。现在已有三条正式记录，它从猜测变成了可测量。**接下来 5 条须记录实际耗时**；测到之前，本节任何日期都不得写入简历、演示材料或对外承诺，测到之后完工日期是投影而不是猜测。这是目前最值钱的一个尚未采集的数据。
+> 3. **标注吞吐已有实测，但不足以给全项目写完工日期。** L1 choice pass 的有效 19 条中位数为 22 秒/条；5 条独立 deep review 共 13m41s，中位数 91 秒、最短 34 秒。这证明当前 L1 工作流的 choice 复核不是小时级瓶颈，也证明 deep review 不能用 choice 耗时替代。L2 标注、W4–W5 工程与 W6 评测仍无完整实测吞吐，因此不把 L1 的 22 秒外推为整体完工日期。
 >
 > 下方原文保留为排期推理过程；其中“三件重活不能压在同一周”的判断在当时成立，并且正是它促成了 W0 的析出。
 
@@ -1032,10 +1032,10 @@ W5–W6 的成果作为增量更新，而不是简历上这个项目的首次出
 
 ### 12.2 工程
 
-> **[已变更并已完成｜摄取部分]** 当前 RFC 路线的安全验收取代下方 ZIP/OOXML 恶意 fixture 条目：已覆盖非 regular file、symlink/缺失 `O_NOFOLLOW` 能力、文件过大或读中增长、hash 不匹配、非法 UTF-8、DTD/entity/external reference、非 XML processing instruction、错误 root/grammar、缺失/非法/重复 publication identity 及 manifest identity mismatch；同一 verified snapshot 贯穿 corpus、structure、retrieval 与 annotation source validation。其余 provider、索引、API、Agent、缓存、部署和可观测性条目仍未完成。
+> **[已变更｜当前验收状态]** RFC 路线的安全验收取代下方 ZIP/OOXML 恶意 fixture 条目：已覆盖非 regular file、symlink/缺失 `O_NOFOLLOW` 能力、文件过大或读中增长、hash 不匹配、非法 UTF-8、DTD/entity/external reference、非 XML processing instruction、错误 root/grammar、缺失/非法/重复 publication identity 及 manifest identity mismatch；同一 verified snapshot 贯穿 corpus、structure、retrieval 与 annotation source validation。W0–W3 已完成统一 provider 出站闸门、冻结索引与启动校验、MCP/API/Agent schema、owner-bound 脱敏轨迹、本地 fixture browser 闭环和不依赖付费模型的 CI。未完成的主要条目是 L2/Compliance、checkpoint 恢复、SSE/reconnect、完整四场景 demo/real init、LLM 响应缓存与冷缓存测量；下方清单仍是最终验收标准，不因部分完成而删除。
 
 - `make ingest-real CORPUS_DIR=/absolute/path` 可幂等构建/恢复并校验真实只读索引，随后 `docker compose --profile real up --build` 在本地/私网启动；`docker compose --profile demo up --build` 可单命令启动无凭据演示；
-- **无任何 API key、无需下载真实 3GPP 语料即可运行四个预注册离线演示场景**，且除模型外的组件全部真实执行（§9.6）；
+- **无任何 API key、无需下载真实 RFC 语料即可运行四个预注册离线演示场景**，且除模型外的组件全部真实执行（§9.6）；
 - fixture-init/real-init 幂等，demo/real 两个 profile 的 manifest-scoped ready/health check 可复跑；MCP、Qdrant 与 PostgreSQL 不暴露宿主机端口；
 - provider 调用全经统一出站闸门；未授权、字段越权、单片段/累计超限和重试绕过测试全部 fail closed；
 - 出站账本在 PostgreSQL 中原子预占并可随 checkpoint 恢复；并发、进程重启、同条款多 span、跨 provider 重发均不能绕过 unique/transmitted 上限；逐文档 corpus 账本随同一把 corpus 锁持久化，未被计价的 document 一律 fail closed（`corpus_document_cap_missing`）；
@@ -1164,7 +1164,7 @@ W4 末的中期节点（§11.1）可以先写入一版，但必须逐项标注�
 
 ## 十六、下一步
 
-> **[状态校正]** 下方三项是原开工前动作，现已完成。当前下一步是补齐 L2 dev 至 8 条并开始 L1 标注，同时完成 W2 的冻结 corpus manifest；主集 Gold 足够后，使用已完成的 BM25/dense 基线执行一次性 pooling——**执行前必须先冻结并记录该基线的确切配置**：BM25 的 k1/b、分词器版本、indexable text 的组成（当前含 section heading，该选择是 W2 Task 4 依实测检索行为做出的）、dense 权重 hash 与 top-k。§8.2.3 要求 pooling 配置事后可重建，而这批参数一旦随 W3–W5 调优漂移，“gold 是在什么条件下补的”就再也无法回答。任何真实 excerpt 出站前，仍须把既有统一出站闸门和原子账本接入并验证真实 provider route。
+> **[状态校正｜2026-08-13]** 下方三项是原开工前动作，现已完成。“需求跨连续段落”的通用 gold 规则已在 Task 12 写明：问题优先收窄到一个 clause 完整回答；承载规范性关键词的段落不可省略；确实需要两段时 gold 就记两个。剩余 20 条 L1 locked proposal 也已起草并通过自动校验，当前作者专属下一步是 Task 7 choice review；通过后 L1 才从正式 20/40 变为 40/40。随后补上 `gold_section_paths` 与 Gold ID 的 source-path 一致性校验，完成 L2 dev 8 条与现有 3 条的 adjudication，再继续 L2 locked 与对应 pooling。工程线可与标注并行进入 W4/W5：L2/Compliance 与 Verifier、checkpoint recovery，随后是 SSE/reconnect 和完整 fixture demo matrix。W6 locked evaluation 仍保持首次运行边界，不用 locked 输出反向调参。
 
 1. 用户复核本方案的任务边界、评测规模和 7 周排期；
 2. 复核通过后，编写逐文件、逐测试的实施计划；

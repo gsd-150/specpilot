@@ -1,7 +1,7 @@
 # Handoff — 2026-08-11, reconciled after W3 on 2026-08-13
 
 Written when the author moved from Claude Code to Codex, then reconciled after
-the W3 MCP/API/trace slice was completed on its feature branch. Measurements
+the W3 MCP/API/trace slice was completed and merged into `main`. Measurements
 that still describe the 2026-08-11 checkout are labelled as historical
 snapshots; the current delivery state is stated separately. **Re-run before
 trusting any number** — `AGENTS.md` requires fresh evidence for the same reason.
@@ -19,30 +19,29 @@ section a recommendation rather than a menu.
 
 | | |
 | --- | --- |
-| Feature branch | `feat/w3-mcp-api-trace` |
-| Verified code HEAD | `6d5ad3f` "fix: remove local-only CI assumptions" |
-| Local main | `f8f0b1d`; W3 is not merged into the default branch |
-| Working tree | clean after the current handoff update |
+| Default branch | `main`; W3 merged by PR #1 at `96b13eb` |
+| Current repository base | `ad342dc`, a docs-only annotation-plan commit; code tree matches the W3 merge |
+| Tracking before these uncommitted corrections | local `main` is two commits ahead of `origin/main` (`842f978`, `ad342dc`) |
 | Git remote | `origin` exists and local `main` tracks `origin/main` |
-| Feature publication | tracks `origin/feat/w3-mcp-api-trace`; draft PR [#1](https://github.com/gsd-150/specpilot/pull/1) is open |
-| CI | PR and push runs for `6d5ad3f` both passed all seven jobs, including integration, browser, and image builds |
+| Feature publication | PR [#1](https://github.com/gsd-150/specpilot/pull/1) merged and is closed |
+| CI | PR, push, and merge-commit runs passed all seven jobs, including integration, browser, and image builds |
 
-The feature branch is implemented, published, and verified locally and in
-GitHub Actions, but it is not merged into `main`. The remaining publication
-boundary is review, moving the draft PR to ready when appropriate, and merging
-it into the default branch.
+The W3 implementation is part of the default branch. There is no remaining W3
+review/merge boundary. Two later docs-only commits, `842f978` and `ad342dc`, had
+not yet been pushed to `origin/main` when this reconciliation was completed.
 
 ### Test suite
 
-Fresh local W3 checks on 2026-08-13:
+Fresh local checks rerun on the current code tree during the 2026-08-13
+documentation reconciliation:
 
 | command | result |
 | --- | --- |
-| `make check` | Ruff clean; strict mypy clean over 94 source files; 1,597 unit and CLI tests passed, 2 restricted-fixture tests skipped |
-| `npm test -- --run` | 106 passed |
-| `npm run build` | TypeScript and Vite production build passed |
+| `make check` | Ruff clean; strict mypy clean over 94 source files; 1,421 unit + 178 CLI = **1,599 passed** |
+| PostgreSQL/Qdrant full gate | **Not rerun in this reconciliation:** both local services were unavailable |
+| `npm test -- --run` / build | **Not rerun in this reconciliation:** `web/trace/node_modules` was absent; the last CI-backed record remains 106 Vitest tests plus a successful production build |
 
-The CI-portability repair was then verified against disposable PostgreSQL and
+The CI-portability repair was previously verified against disposable PostgreSQL and
 Qdrant services: the complete integration suite passed 248 tests with zero
 skips, and the real Playwright fixture flow passed one browser case. GitHub's
 PR and push workflows independently passed the same seven-job matrix, including
@@ -140,7 +139,7 @@ survives across evaluation roots.
 
 ### What runs, and what remains
 
-The W3 feature branch exposes five read-only tools over real Streamable HTTP
+The code on `main` exposes five read-only tools over real Streamable HTTP
 MCP, runs the model-authored bounded L1 plan through the PostgreSQL disclosure
 ledger and verifier, accepts owner-bound asynchronous runs over FastAPI, and
 serves a packaged React trace page with a 60-second polling limit. Refusal,
@@ -157,47 +156,43 @@ directions:**
   `answered`, `citation_faults: []`, citing §10.2.1 and §15.5.6, both resolving
   to the clauses that carry the Allow requirement.
 
-The pre-W3 API and MCP stubs have been replaced on the feature branch. The next
+The pre-W3 API and MCP stubs have been replaced on `main`. The next
 product slices remain SSE and reconnect semantics, L2/Compliance, checkpoint
 recovery, the full W5 fixture matrix, and locked W6 evaluation. See
 `docs/reports/w3-mcp-api-trace-report.md` for the W3 evidence and limitations.
 
 ---
 
+## Closed during the 2026-08-13 reconciliation
+
+- **W3 integration:** PR #1 merged at 04:50 as `96b13eb`; the merge-commit CI
+  gate was green. An independent fresh-database/Qdrant rerun recorded 1,856
+  passed, zero skipped, with Ruff and strict mypy clean over 94 source files.
+- **Deep-review evidence:** this was a real defect in the first choice pass, but
+  it is no longer open. Five separately stored `DeepReviewFinding` records now
+  cover the 5/5 preregistered sample; the aggregate command reports
+  `deep_review_coverage=1.0`, median 91 seconds and minimum 34 seconds. The old
+  24-second-vs-22-second comparison remains useful incident history, not current
+  evidence.
+- **Consecutive-paragraph Gold rule:** Task 12 now defines Gold as the minimal
+  clause set required to answer the question, makes the paragraph carrying the
+  normative keyword mandatory, and uses multi-clause Gold when the answer truly
+  spans clauses. The rule already caught the analogous stem/list shape at
+  RFC 9110 §12.5.5 during the second L1 drafting pass.
+
 ## Open items, and what each one actually blocks
 
-1. ~~**W3 is not integrated into `main`.**~~ **Closed 2026-08-13.** PR #1 merged
-   at 04:50; `main` is `96b13eb` and matches `origin/main`, CI green on the merge
-   commit. This item was written ten minutes before the merge — a reminder that
-   the fastest-moving lines in this file are the ones about its own state.
-
-   Re-verified independently on 2026-08-13: **1,856 passed, 0 skipped, 0 failed**
-   on a fresh database with Qdrant up, ruff clean, mypy `--strict` clean over 94
-   source files.
-
-2. **No rule for requirements that span consecutive paragraphs.** The one known
-   instance is *closed*: the §8.2.3 pooling completeness audit on 2026-08-09
-   (run `603777f3…`) adjudicated all 20 L1 items, extended `l1-dev-010`'s gold
-   with §15.4.5 ¶2, removed nothing, and left L1 `awaiting_adjudication` at 0.
-   What was never written is the general rule. A clause is a paragraph and a
-   forced choice takes one, so the next requirement split across an obligation
-   and the list it introduces will be recorded wrong the same way — and only
-   caught if another completeness audit happens to run. This is a protocol gap,
-   not a data defect.
-
-3. **`deep_review_coverage: 1.0` is not evidence a deep review happened**, and
-   the live plan says so about its own design. Sampled items took a median of 24
-   seconds against 22 for the rest — indistinguishable.
-
-4. **Deferred integrity check** (`2026-08-08-gold-provenance-v2.md`): source-aware
+1. **Deferred integrity check** (`2026-08-08-gold-provenance-v2.md`): source-aware
    entry verifies Gold IDs but does not verify that each supplied
    `gold_section_paths` value matches its Gold ID's actual section path.
 
-5. **Unanswerable floors unmet**: L1 locked 2/5, L2 dev 1/2. §8.1 requires these
-   to be deliberately constructed, not harvested from failed scenario-first
-   items.
+2. **Formal-store unanswerable floors unmet**: L1 locked remains 2/5 and L2 dev
+   remains 1/2. The second L1 drafting pass contains three deliberately checked
+   locked unanswerables and therefore meets 5/5 at proposal level, but they are
+   not Gold until the author reviews them. L2 dev still needs one deliberately
+   constructed unanswerable.
 
-6. **Post-W3 product work remains.** SSE and reconnect semantics, L2/Compliance,
+3. **Post-W3 product work remains.** SSE and reconnect semantics, L2/Compliance,
    checkpoint recovery, the complete W5 demo matrix, and locked W6 evaluation
    are not part of the completed W3 slice.
 
@@ -207,16 +202,13 @@ recovery, the full W5 fixture matrix, and locked W6 evaluation. See
 
 Ordered by delivery risk and the September–October interview deadline.
 
-### 1. Review and integrate PR #1
+### 1. Keep the default branch and its state documents aligned
 
-The branch is published and both PR and push CI runs are green. Review the PR,
-move it out of draft when appropriate, and integrate it into `main`. Do not
-describe W3 as shipped from the default branch until this boundary is closed.
-
-`.gitignore` was checked on 2026-08-11 and already excludes everything that must
-not leave: `artifacts/restricted/` (the RFC sources and annotation records),
-`manifests/local/`, `data/` (weights and caches), and `tmp/`. Confirm with
-`git status --ignored --short` before publishing the feature branch.
+W3 is already integrated. Review and publish the local documentation commits
+when intended; do not reopen or recreate the feature PR. Before any push,
+continue confirming that `artifacts/restricted/` (RFC sources and annotation
+records), `manifests/local/`, `data/` (weights and caches), and `tmp/` remain
+ignored and untracked.
 
 ### 2. Preserve the verified environment boundary
 
@@ -282,13 +274,13 @@ matching checkout with
 
 ### 4. Annotation, resumed in the order the floors demand
 
-L1 locked 5/25 and its unanswerable floor at 2/5; L2 3/20 with all three items
-awaiting adjudication and its dev floor at 1/2. Take the unanswerable items
-first: §8.1 requires them to be **deliberately constructed** — questions that are
-out of scope, cross-specification, or need a version not in the corpus — and not
-harvested from scenario-first items that happened to fail. Write the
-consecutive-paragraph rule (open item 3) before the next batch rather than after,
-so it governs the items instead of being retrofitted onto them.
+L1's formal store remains locked 5/25 with its unanswerable floor at 2/5, but
+the remaining 20 locked proposals are drafted and verified; their three new
+unanswerables meet the 5/5 floor at proposal level. The next L1 act is the
+author-owned Task 7 review, not more drafting. L2 remains 3/20 with all three
+items awaiting adjudication and its dev floor at 1/2; its next batch still needs
+one deliberately constructed unanswerable rather than one harvested from a
+scenario-first item that happened to fail.
 
 ### 5. Continue with W4 and W5
 

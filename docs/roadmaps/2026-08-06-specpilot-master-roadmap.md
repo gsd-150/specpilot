@@ -74,18 +74,25 @@
 
 ## Current state — 2026-08-13
 
-The bounded W3 MCP/API/read-only trace slice is complete on
-`feat/w3-mcp-api-trace` and published as draft PR
-[#1](https://github.com/gsd-150/specpilot/pull/1). Both the PR-triggered and
-push-triggered GitHub Actions runs pass all seven jobs, including PostgreSQL and
-Qdrant integration, the local fake-provider browser flow, packaging, and Docker
-image builds. The slice is still pending review and integration into `main`.
+The bounded W3 MCP/API/read-only trace slice was merged into `main` by PR
+[#1](https://github.com/gsd-150/specpilot/pull/1) at merge commit `96b13eb`.
+Both the PR-triggered and push-triggered GitHub Actions runs passed all seven
+jobs, including PostgreSQL and Qdrant integration, the local fake-provider
+browser flow, packaging, and Docker image builds. A later independent local gate
+on a fresh PostgreSQL database with Qdrant available recorded 1,856 passed with
+zero skips; this is dated release evidence and must be rerun after later code
+changes rather than treated as permanently current.
 
 This status is deliberately narrower than declaring every later milestone
 complete: L2/Compliance, SSE/reconnect, checkpoint recovery, the complete W5
 demo matrix, locked evaluation, and the remaining annotation floors are still
-open. The 2026-08-07 section below remains a historical snapshot rather than
-the live delivery state.
+open. Current annotation state is L1 20/40 and L2 3/20; L1's registered 20-item
+pooling audit and five-item deep review are sealed, while L2 adjudication and
+the remaining gold are not. A second batch of 20 L1 locked proposals has been
+drafted and verified, including the three additional unanswerable candidates
+needed to meet the locked floor, but the author-owned review has not happened,
+so the formal store correctly remains at 20/40. The 2026-08-07 section below
+remains a historical snapshot rather than the live delivery state.
 
 ## Current state — 2026-08-07
 
@@ -176,6 +183,10 @@ real provider, credential, or model, and its own output says so.
      `POST /chat` 的 `202 Accepted` 异步创建语义。状态机的三条硬约束见顶部
      修订块——`failed` 走 `provider_error` 而非 verdict、闸门拒绝独立成状态、
      `interrupted` 读时推导。
+   - **[Completed 2026-08-13.]** The bounded W3 slice above is on `main` via
+     merge commit `96b13eb`. The original W3 row also asked for L1 scoring and
+     frozen L2-adv cases; those evaluation-data deliverables were not smuggled
+     into the bounded slice and remain open with the annotation/evaluation path.
 
 6. **W4 — L2, Verifier, and recovery package**
    - Add Compliance Agent, deterministic citation/manifest checks, semantic gate, and one directed recovery.
