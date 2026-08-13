@@ -52,6 +52,27 @@ def test_checkpoint_is_a_prose_free_closed_envelope() -> None:
         "question", "claim", "rationale", "query", "excerpt",
         "provider_response", "path", "exception",
     }.intersection(encoded)
+    with pytest.raises(ValidationError, match="question"):
+        _checkpoint(question="PRIVATE-QUESTION-SENTINEL")
+
+
+def test_transition_rejects_binding_rollback_and_attempt_drift() -> None:
+    from specpilot.checkpoints.contracts import validate_transition
+
+    previous = _checkpoint(
+        stage="candidate_built", tool_attempts_used=3, recovery_attempted=False
+    )
+    rollback = _checkpoint(
+        run_id=previous.run_id,
+        stage="deterministic_verified",
+        checkpoint_version=2,
+        tool_attempts_used=2,
+    )
+    with pytest.raises(ValueError, match="tool"):
+        validate_transition(previous, rollback)
+    changed_binding = rollback.model_copy(update={"policy_hash": "9" * 64})
+    with pytest.raises(ValueError, match="binding"):
+        validate_transition(previous, changed_binding)
 
 
 @pytest.mark.parametrize(
@@ -104,3 +125,22 @@ def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:
         _checkpoint(tool_attempts_used=9)
     with pytest.raises(ValidationError, match="completed_claim_ids"):
         _checkpoint(completed_claim_ids=("not-an-opaque-hash",))
+
+
+def test_l2_run_requires_real_root_and_distinct_stage_prompt_hashes() -> None:
+    from specpilot.runs.contracts import RunRecord, RunStatus
+
+    data = {
+        "run_id": uuid.uuid4(), "request_id": uuid.uuid4(), "session_id": "owner-1",
+        "task_level": "L2", "profile": "fixture", "source_manifest_id": "a" * 64,
+        "corpus_manifest_id": "b" * 64, "policy_hash": "c" * 64,
+        "configuration_hash": "d" * 64, "prompt_id": "l2-v1", "prompt_hash": "e" * 64,
+        "provider_id": "provider-1", "model_id": "model-1", "query_hash": "f" * 64,
+        "status": RunStatus.QUEUED, "terminal_reason": None,
+        "created_at": datetime(2026, 8, 14, tzinfo=UTC), "started_at": None,
+        "completed_at": None, "lease_owner": "queue-delivery",
+        "lease_expires_at": datetime(2026, 8, 14, 0, 1, tzinfo=UTC),
+        "last_heartbeat_at": None,
+    }
+    with pytest.raises(ValidationError, match="evaluation_root"):
+        RunRecord.model_validate(data)

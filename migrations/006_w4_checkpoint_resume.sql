@@ -9,6 +9,22 @@ ALTER TABLE specpilot_run
     ADD CONSTRAINT specpilot_run_task_level_check
         CHECK (task_level IN ('L1', 'L2'));
 
+ALTER TABLE specpilot_run
+    ADD COLUMN evaluation_root_id text,
+    ADD COLUMN compliance_prompt_hash text,
+    ADD COLUMN verifier_prompt_hash text,
+    ADD CONSTRAINT specpilot_run_l2_bindings_check CHECK (
+        (
+            task_level = 'L1' AND evaluation_root_id IS NULL
+            AND compliance_prompt_hash IS NULL AND verifier_prompt_hash IS NULL
+        ) OR (
+            task_level = 'L2'
+            AND evaluation_root_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+            AND compliance_prompt_hash ~ '^[0-9a-f]{64}$'
+            AND verifier_prompt_hash ~ '^[0-9a-f]{64}$'
+        )
+    );
+
 ALTER TABLE specpilot_run_event
     DROP CONSTRAINT specpilot_run_event_kind_check,
     ADD CONSTRAINT specpilot_run_event_kind_check CHECK (
@@ -65,7 +81,18 @@ BEGIN
                 ]
                 AND specpilot_trace_integer(event_payload -> 'candidate_count', 1, 3)
                 AND jsonb_typeof(event_payload -> 'claim_ids') = 'array'
-                AND jsonb_array_length(event_payload -> 'claim_ids') BETWEEN 1 AND 3;
+                AND jsonb_array_length(event_payload -> 'claim_ids') BETWEEN 1 AND 3
+                AND jsonb_array_length(event_payload -> 'claim_ids') =
+                    (event_payload ->> 'candidate_count')::integer
+                AND NOT EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(event_payload -> 'claim_ids')
+                    AS item(value) WHERE NOT specpilot_trace_sha256(item.value)
+                )
+                AND (
+                    SELECT count(*) = count(DISTINCT value)
+                    FROM jsonb_array_elements_text(event_payload -> 'claim_ids')
+                    AS item(value)
+                );
         WHEN 'semantic_summary' THEN
             RETURN specpilot_trace_exact_object(event_payload, ARRAY[
                     'kind','sequence','claim_id','supports','reason'
@@ -144,6 +171,105 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION specpilot_checkpoint_uuids(value jsonb, maximum integer)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE item jsonb;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > maximum THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element) LOOP
+        IF NOT specpilot_trace_uuid(item) THEN RETURN false; END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_checkpoint_generations(value jsonb)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE item jsonb;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 8 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element) LOOP
+        IF NOT specpilot_trace_exact_object(
+                item, ARRAY['stage','claim_id','recovery','generation']
+            ) OR NOT (item ?& ARRAY['stage','claim_id','recovery','generation'])
+            OR item ->> 'stage' NOT IN ('planning','compliance','verifier')
+            OR NOT (jsonb_typeof(item -> 'claim_id') = 'null'
+                    OR specpilot_trace_sha256(item -> 'claim_id'))
+            OR jsonb_typeof(item -> 'recovery') <> 'boolean'
+            OR NOT specpilot_trace_integer(item -> 'generation', 0, 2147483647)
+            OR ((item ->> 'stage' = 'planning') <>
+                (jsonb_typeof(item -> 'claim_id') = 'null'))
+        THEN RETURN false; END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_checkpoint_results(value jsonb)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE item jsonb; citation jsonb;
+BEGIN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 3 THEN
+        RETURN false;
+    END IF;
+    FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element) LOOP
+        IF NOT specpilot_trace_exact_object(
+                item, ARRAY['claim_id','verdict','verification_status','citations','reason_code']
+            ) OR NOT (item ?& ARRAY[
+                'claim_id','verdict','verification_status','citations','reason_code'
+            ]) OR NOT specpilot_trace_sha256(item -> 'claim_id')
+            OR item ->> 'verdict' NOT IN ('compliant','violating','insufficient_evidence')
+            OR item ->> 'verification_status' NOT IN (
+                'verified','deterministic_failed','semantic_failed','insufficient'
+            ) OR NOT (jsonb_typeof(item -> 'reason_code') = 'null'
+                       OR specpilot_trace_identifier(item -> 'reason_code', 128))
+            OR jsonb_typeof(item -> 'citations') <> 'array'
+        THEN RETURN false; END IF;
+        IF item ->> 'verdict' = 'insufficient_evidence'
+            AND jsonb_array_length(item -> 'citations') <> 0 THEN RETURN false; END IF;
+        IF item ->> 'verdict' <> 'insufficient_evidence'
+            AND (item ->> 'verification_status' <> 'verified'
+                 OR jsonb_array_length(item -> 'citations') = 0) THEN RETURN false; END IF;
+        FOR citation IN SELECT element FROM jsonb_array_elements(item -> 'citations') AS t(element) LOOP
+            IF NOT specpilot_trace_exact_object(citation, ARRAY[
+                    'clause_id','corpus_manifest_id','document_id','document_version',
+                    'section_number','content_hash'
+                ]) OR NOT (citation ?& ARRAY[
+                    'clause_id','corpus_manifest_id','document_id','document_version',
+                    'section_number','content_hash'
+                ]) OR NOT specpilot_trace_sha256(citation -> 'clause_id')
+                OR NOT specpilot_trace_sha256(citation -> 'corpus_manifest_id')
+                OR NOT specpilot_trace_identifier(citation -> 'document_id', 128)
+                OR NOT specpilot_trace_identifier(citation -> 'document_version', 128)
+                OR NOT (jsonb_typeof(citation -> 'section_number') = 'null'
+                        OR specpilot_trace_identifier(citation -> 'section_number', 64))
+                OR NOT specpilot_trace_sha256(citation -> 'content_hash')
+            THEN RETURN false; END IF;
+        END LOOP;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION specpilot_checkpoint_result_ids(ids jsonb, results jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT jsonb_typeof(ids) = 'array'
+       AND jsonb_array_length(ids) = jsonb_array_length(results)
+       AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(ids) WITH ORDINALITY AS i(value, ord)
+            FULL JOIN jsonb_array_elements(results) WITH ORDINALITY AS r(value, ord)
+              USING (ord)
+            WHERE i.value IS NULL OR r.value IS NULL
+               OR NOT specpilot_trace_sha256(i.value)
+               OR i.value <> r.value -> 'claim_id'
+       )
+$$;
+
 CREATE FUNCTION specpilot_valid_checkpoint(value jsonb)
 RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 DECLARE stage_value text;
@@ -190,10 +316,8 @@ BEGIN
              (jsonb_typeof(value -> 'plan_hash') = 'null'))
         AND specpilot_checkpoint_evidence(value -> 'evidence')
         AND specpilot_trace_integer(value -> 'tool_attempts_used', 0, 8)
-        AND jsonb_typeof(value -> 'reservation_ids') = 'array'
-        AND jsonb_array_length(value -> 'reservation_ids') <= 16
-        AND jsonb_typeof(value -> 'reconstruction_generations') = 'array'
-        AND jsonb_array_length(value -> 'reconstruction_generations') <= 8
+        AND specpilot_checkpoint_uuids(value -> 'reservation_ids', 16)
+        AND specpilot_checkpoint_generations(value -> 'reconstruction_generations')
         AND jsonb_typeof(value -> 'recovery_attempted') = 'boolean'
         AND (jsonb_typeof(value -> 'recovery_reason') = 'null'
              OR specpilot_trace_reason(value -> 'recovery_reason'))
@@ -201,10 +325,10 @@ BEGIN
              OR jsonb_typeof(value -> 'recovery_reason') = 'null')
         AND (stage_value <> 'recovery_completed'
              OR value ->> 'recovery_attempted' = 'true')
-        AND jsonb_typeof(value -> 'completed_claim_ids') = 'array'
-        AND jsonb_array_length(value -> 'completed_claim_ids') <= 3
-        AND jsonb_typeof(value -> 'completed_results') = 'array'
-        AND jsonb_array_length(value -> 'completed_results') <= 3
+        AND specpilot_checkpoint_results(value -> 'completed_results')
+        AND specpilot_checkpoint_result_ids(
+            value -> 'completed_claim_ids', value -> 'completed_results'
+        )
         AND jsonb_typeof(value -> 'last_accessed_at') = 'string';
 END;
 $$;

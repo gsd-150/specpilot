@@ -17,6 +17,7 @@ from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.runs.contracts import (
     CheckpointSummaryEvent,
     ResumeDisposition,
+    ResumeSummaryEvent,
     RunRecord,
     RunStatus,
     StateTransitionEvent,
@@ -49,7 +50,12 @@ class PostgresCheckpointStore:
         self, run: RunRecord, *, stage: CheckpointStage
     ) -> RunCheckpoint:
         """Build the initial safe envelope from frozen run bindings only."""
-        if run.task_level != "L2":
+        if (
+            run.task_level != "L2"
+            or run.evaluation_root_id is None
+            or run.compliance_prompt_hash is None
+            or run.verifier_prompt_hash is None
+        ):
             raise RunStoreValidationError()
         return RunCheckpoint(
             run_id=run.run_id,
@@ -58,13 +64,13 @@ class PostgresCheckpointStore:
             stage=stage,
             task_level="L2",
             query_hash=run.query_hash,
-            evaluation_root_id=str(run.run_id),
+            evaluation_root_id=run.evaluation_root_id,
             source_manifest_id=run.source_manifest_id,
             corpus_manifest_id=run.corpus_manifest_id,
             policy_hash=run.policy_hash,
             configuration_hash=run.configuration_hash,
-            compliance_prompt_hash=run.prompt_hash,
-            verifier_prompt_hash=run.prompt_hash,
+            compliance_prompt_hash=run.compliance_prompt_hash,
+            verifier_prompt_hash=run.verifier_prompt_hash,
             provider_id=run.provider_id,
             model_id=run.model_id,
             plan_id=None,
@@ -91,6 +97,7 @@ class PostgresCheckpointStore:
                 run = await self._lock_run(connection, checkpoint.run_id)
                 if run is None or not _bindings_match(run, checkpoint):
                     raise RunStoreValidationError()
+                await self._validate_reservations(connection, checkpoint)
                 current = await (
                     await connection.execute(
                         "SELECT checkpoint_version FROM specpilot_run_checkpoint "
@@ -127,6 +134,20 @@ class PostgresCheckpointStore:
                         (allocated.run_id, now),
                     )
                 else:
+                    old_payload = await (
+                        await connection.execute(
+                            "SELECT payload FROM specpilot_run_checkpoint "
+                            "WHERE run_id = %s FOR UPDATE",
+                            (checkpoint.run_id,),
+                        )
+                    ).fetchone()
+                    if old_payload is None:
+                        raise RunStoreIntegrityError()
+                    from specpilot.checkpoints.contracts import validate_transition
+
+                    validate_transition(
+                        RunCheckpoint.model_validate(old_payload["payload"]), allocated
+                    )
                     updated = await connection.execute(
                         "UPDATE specpilot_run_checkpoint SET checkpoint_version = %s, "
                         "stage = %s, payload = %s, last_accessed_at = %s "
@@ -219,8 +240,19 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(ResumeDisposition.NOT_OWNER)
                 if run["query_hash"] != query_hash:
                     return CheckpointResumeResult(ResumeDisposition.QUERY_MISMATCH)
+                replay = await (
+                    await connection.execute(
+                        "SELECT attempt FROM specpilot_run_attempt WHERE run_id = %s "
+                        "AND resume_key_hash = %s",
+                        (run_id, key_hash),
+                    )
+                ).fetchone()
+                if replay is not None:
+                    return CheckpointResumeResult(
+                        ResumeDisposition.REPLAY, replay["attempt"]
+                    )
                 if run["status"] != RunStatus.INTERRUPTED.value:
-                    return CheckpointResumeResult(ResumeDisposition.NOT_INTERRUPTED)
+                    return CheckpointResumeResult(ResumeDisposition.LEASED)
                 checkpoint_row = await (
                     await connection.execute(
                         "SELECT payload FROM specpilot_run_checkpoint "
@@ -237,17 +269,6 @@ class PostgresCheckpointStore:
                     return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
                 if not _bindings_match(run, checkpoint):
                     return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
-                replay = await (
-                    await connection.execute(
-                        "SELECT attempt FROM specpilot_run_attempt WHERE run_id = %s "
-                        "AND resume_key_hash = %s",
-                        (run_id, key_hash),
-                    )
-                ).fetchone()
-                if replay is not None:
-                    return CheckpointResumeResult(
-                        ResumeDisposition.REPLAY, replay["attempt"]
-                    )
                 latest = await (
                     await connection.execute(
                         "SELECT COALESCE(MAX(attempt), 0) AS attempt "
@@ -280,6 +301,23 @@ class PostgresCheckpointStore:
                     "VALUES (%s, %s, %s, %s)",
                     (run_id, attempt, key_hash, now),
                 )
+                resumed_checkpoint = checkpoint.model_copy(
+                    update={
+                        "attempt": attempt,
+                        "checkpoint_version": checkpoint.checkpoint_version + 1,
+                        "last_accessed_at": now,
+                    }
+                )
+                await connection.execute(
+                    "UPDATE specpilot_run_checkpoint SET checkpoint_version = %s, "
+                    "payload = %s, last_accessed_at = %s WHERE run_id = %s",
+                    (
+                        resumed_checkpoint.checkpoint_version,
+                        Jsonb(resumed_checkpoint.model_dump(mode="json")),
+                        now,
+                        run_id,
+                    ),
+                )
                 sequence = await self._next_sequence(connection, run_id)
                 transition = StateTransitionEvent(
                     sequence=sequence,
@@ -296,6 +334,22 @@ class PostgresCheckpointStore:
                         sequence,
                         transition.kind.value,
                         Jsonb(transition.model_dump(mode="json")),
+                        now,
+                    ),
+                )
+                resume_event = ResumeSummaryEvent(
+                    sequence=sequence + 1,
+                    attempt=attempt,
+                )
+                await connection.execute(
+                    "INSERT INTO specpilot_run_event "
+                    "(run_id, sequence, kind, payload, recorded_at) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        run_id,
+                        resume_event.sequence,
+                        resume_event.kind.value,
+                        Jsonb(resume_event.model_dump(mode="json")),
                         now,
                     ),
                 )
@@ -322,7 +376,13 @@ class PostgresCheckpointStore:
                 if checkpoint.stage is not CheckpointStage.COMPLETED:
                     return False
                 await connection.execute(
-                    "DELETE FROM specpilot_run_checkpoint WHERE run_id = %s", (run_id,)
+                    "UPDATE specpilot_run_checkpoint SET payload = %s, "
+                    "last_accessed_at = %s WHERE run_id = %s",
+                    (
+                        Jsonb(checkpoint.model_dump(mode="json")),
+                        self._now(),
+                        run_id,
+                    ),
                 )
                 return True
         except psycopg.Error:
@@ -358,9 +418,12 @@ class PostgresCheckpointStore:
     ) -> dict[str, Any] | None:
         return await (
             await connection.execute(
-                "SELECT run_id, session_id, task_level, source_manifest_id, "
+                "SELECT run_id, session_id, task_level, evaluation_root_id, "
+                "source_manifest_id, "
                 "corpus_manifest_id, policy_hash, configuration_hash, provider_id, "
-                "model_id, query_hash, status FROM specpilot_run WHERE run_id = %s "
+                "model_id, query_hash, compliance_prompt_hash, "
+                "verifier_prompt_hash, status "
+                "FROM specpilot_run WHERE run_id = %s "
                 "FOR UPDATE",
                 (run_id,),
             )
@@ -380,6 +443,26 @@ class PostgresCheckpointStore:
             raise RunStoreIntegrityError()
         return row["sequence"]
 
+    async def _validate_reservations(
+        self,
+        connection: psycopg.AsyncConnection[dict[str, Any]],
+        checkpoint: RunCheckpoint,
+    ) -> None:
+        for reservation_id in checkpoint.reservation_ids:
+            row = await (
+                await connection.execute(
+                    "SELECT evaluation_root_id, run_id FROM egress_reservation "
+                    "WHERE reservation_id = %s",
+                    (reservation_id,),
+                )
+            ).fetchone()
+            if (
+                row is None
+                or row["evaluation_root_id"] != checkpoint.evaluation_root_id
+                or row["run_id"] != str(checkpoint.run_id)
+            ):
+                raise RunStoreValidationError()
+
     def _now(self) -> datetime:
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
@@ -390,10 +473,13 @@ class PostgresCheckpointStore:
 def _bindings_match(run: dict[str, Any], checkpoint: RunCheckpoint) -> bool:
     values = (
         ("task_level", checkpoint.task_level),
+        ("evaluation_root_id", checkpoint.evaluation_root_id),
         ("source_manifest_id", checkpoint.source_manifest_id),
         ("corpus_manifest_id", checkpoint.corpus_manifest_id),
         ("policy_hash", checkpoint.policy_hash),
         ("configuration_hash", checkpoint.configuration_hash),
+        ("compliance_prompt_hash", checkpoint.compliance_prompt_hash),
+        ("verifier_prompt_hash", checkpoint.verifier_prompt_hash),
         ("provider_id", checkpoint.provider_id),
         ("model_id", checkpoint.model_id),
         ("query_hash", checkpoint.query_hash),

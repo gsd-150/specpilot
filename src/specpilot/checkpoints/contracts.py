@@ -165,6 +165,29 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
         raise ValueError("checkpoint versions advance by one")
     if current.stage not in LEGAL_TRANSITIONS[previous.stage]:
         raise ValueError("checkpoint stage transition is illegal")
+    immutable = (
+        "task_level",
+        "query_hash",
+        "evaluation_root_id",
+        "source_manifest_id",
+        "corpus_manifest_id",
+        "policy_hash",
+        "configuration_hash",
+        "compliance_prompt_hash",
+        "verifier_prompt_hash",
+        "provider_id",
+        "model_id",
+    )
+    if any(getattr(previous, field) != getattr(current, field) for field in immutable):
+        raise ValueError("checkpoint binding is immutable")
+    if current.tool_attempts_used < previous.tool_attempts_used:
+        raise ValueError("tool attempts are monotonic")
+    if not set(previous.reservation_ids).issubset(current.reservation_ids):
+        raise ValueError("reservation IDs are monotonic")
+    if not set(previous.reconstruction_generations).issubset(
+        current.reconstruction_generations
+    ):
+        raise ValueError("reconstruction generations are monotonic")
     if previous.recovery_attempted and not current.recovery_attempted:
         raise ValueError("recovery attempt is monotonic")
     if (

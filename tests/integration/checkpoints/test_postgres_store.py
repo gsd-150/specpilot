@@ -13,7 +13,13 @@ pytestmark = pytest.mark.integration
 
 def _l2_run(clock: Clock):  # type: ignore[no-untyped-def]
     return _new_run(clock).model_copy(
-        update={"task_level": "L2", "prompt_id": "compliance-v1"}
+        update={
+            "task_level": "L2",
+            "evaluation_root_id": "l2-root-1",
+            "prompt_id": "compliance-v1",
+            "compliance_prompt_hash": "1" * 64,
+            "verifier_prompt_hash": "2" * 64,
+        }
     )
 
 

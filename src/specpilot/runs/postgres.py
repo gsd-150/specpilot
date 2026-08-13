@@ -29,9 +29,11 @@ _EVENT_ADAPTER: TypeAdapter[RunEvent] = TypeAdapter(RunEvent)
 _IDENTIFIER_ADAPTER: TypeAdapter[str] = TypeAdapter(TraceIdentifier)
 _UUID_ADAPTER: TypeAdapter[UUID] = TypeAdapter(UUID)
 _RUN_COLUMNS = (
-    "run_id, request_id, session_id, task_level, profile, source_manifest_id, "
+    "run_id, request_id, session_id, task_level, evaluation_root_id, profile, "
+    "source_manifest_id, "
     "corpus_manifest_id, policy_hash, configuration_hash, prompt_id, "
-    "prompt_hash, provider_id, model_id, query_hash, status, terminal_reason, "
+    "prompt_hash, compliance_prompt_hash, verifier_prompt_hash, provider_id, "
+    "model_id, query_hash, status, terminal_reason, "
     "created_at, started_at, completed_at, lease_owner, lease_expires_at, "
     "last_heartbeat_at"
 )
@@ -102,7 +104,7 @@ class PostgresRunStore:
             async with connection, connection.transaction():
                 await connection.execute(
                     "INSERT INTO specpilot_run (" + _RUN_COLUMNS + ") VALUES ("
-                    + ", ".join(["%s"] * 22)
+                    + ", ".join(["%s"] * 25)
                     + ")",
                     _run_values(queued),
                 )
@@ -377,6 +379,11 @@ class PostgresRunStore:
                     )
                     if updated.rowcount != 1:
                         continue
+                    await connection.execute(
+                        "UPDATE specpilot_run_attempt SET ended_at = %s, "
+                        "end_reason = %s WHERE run_id = %s AND ended_at IS NULL",
+                        (effective_now, _LEASE_EXPIRED_REASON, run_id),
+                    )
                     await _insert_event(connection, run_id, event, effective_now)
                     changed += 1
         except psycopg.Error:

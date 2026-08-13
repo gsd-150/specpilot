@@ -25,6 +25,27 @@ collected the three fresh-DB store tests but skipped all of them because
 must run migration 006 against a fresh PostgreSQL database before W4 can claim
 full persistence evidence.
 
+## Review remediation
+
+- Added immutable/monotonic transition validation before a non-initial CAS
+  update, including bindings, tool attempts, reservations, reconstruction
+  generations, and recovery state.
+- The L2 run binding now carries an explicit evaluation root and independent
+  Compliance/Verifier prompt hashes. The checkpoint never derives any of them
+  from a run ID or the L1 prompt hash; referenced reservations are verified
+  against the same root and run.
+- Resume key replay is checked before the interrupted-status gate, and a newly
+  acquired attempt atomically updates the checkpoint attempt/version and emits
+  both state-transition and `resume_summary` events. Lease reconciliation seals
+  an open attempt with `lease_expired`.
+- Migration validators now recurse through reservation UUIDs, stage
+  generations, completed result/citation metadata and ordered claim IDs, and
+  enforce Compliance summary hash uniqueness/counts. Completed checkpoints are
+  retained as their sanitized result projection when compacted.
+- Re-run after remediation: `make check` passed (`1483 passed, 2 skipped` unit;
+  `181 passed` CLI). PostgreSQL tests still skipped only because the DSN is
+  unset; no database was used.
+
 ## Scope
 
 - Closed prose-free checkpoint envelope and legal stage transitions.

@@ -374,6 +374,7 @@ class RunRecord(_FrozenModel):
     request_id: UUID
     session_id: TraceIdentifier
     task_level: Literal["L1", "L2"]
+    evaluation_root_id: TraceIdentifier | None = None
     profile: TraceIdentifier
     source_manifest_id: Sha256
     corpus_manifest_id: Sha256
@@ -381,6 +382,8 @@ class RunRecord(_FrozenModel):
     configuration_hash: Sha256
     prompt_id: TraceIdentifier
     prompt_hash: Sha256
+    compliance_prompt_hash: Sha256 | None = None
+    verifier_prompt_hash: Sha256 | None = None
     provider_id: TraceIdentifier
     model_id: TraceIdentifier
     query_hash: Sha256
@@ -453,6 +456,19 @@ class RunRecord(_FrozenModel):
             floor = self.started_at or self.created_at
             if not floor <= self.last_heartbeat_at <= self.lease_expires_at:
                 raise ValueError("heartbeat must fall within the active lease")
+        if self.task_level == "L2":
+            if (
+                self.evaluation_root_id is None
+                or self.compliance_prompt_hash is None
+                or self.verifier_prompt_hash is None
+            ):
+                raise ValueError("L2 requires evaluation_root and stage prompt hashes")
+        elif (
+            self.evaluation_root_id is not None
+            or self.compliance_prompt_hash is not None
+            or self.verifier_prompt_hash is not None
+        ):
+            raise ValueError("L1 has no L2 recovery bindings")
         return self
 
 
