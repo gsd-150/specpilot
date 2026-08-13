@@ -1508,3 +1508,35 @@ One replacement dev item, **clause-first**, to restore L1 to 40/40 and the
 clause-first share to 0.60. It needs drafting, a forced-choice review, and its
 own pooling run — `create_run` accepts a new item set, so a 40-item run over the
 corrected set registers cleanly.
+
+#### The replacement item, drafted against the lesson that produced it
+
+`l1-dev-016`, clause-first, dev, gold RFC 9110 §4.2.4 ¶3 — "A sender MUST NOT
+generate the userinfo subcomponent (and its "@" delimiter) when an "http" or
+"https" URI reference is generated within a message as a target URI or field
+value."
+
+> Which URI subcomponent is a sender forbidden from generating when it produces
+> an http or https URI reference inside a message?
+
+Three things were done differently because of `l1-dev-001`:
+
+- **No unverified absolute.** `single`, `only`, `always`, `never` are premises,
+  and a premise the corpus contradicts makes an item unanswerable rather than
+  hard. The scope this clause needs — inside a message, as a target URI or field
+  value — is stated in the question instead.
+- **The neighbours were read before drafting rather than after.** §4.2.4 ¶1 and
+  ¶2 are context about the userinfo subcomponent; ¶4 is the *recipient's* rule.
+  Nothing in the section permits a sender to do what ¶3 forbids, so there is no
+  second respect waiting to invalidate the question.
+- **The discriminator is deliberate.** All four candidates come from §4.2.4 and
+  the one that separates a careful reader from a fast one is ¶4: it is also
+  about userinfo, and it is about receiving rather than generating. The second
+  key point names exactly that.
+
+§4.2.4 also adds an eleventh section family no other item covers, and clause-first
+restores §8.2.2's share: 23 of 39 becomes 24 of 40.
+
+Owed: the forced-choice review of this one item, then a pooling run over the
+corrected 40-item set. `create_run` takes a new item set, so it registers
+cleanly; the sealed run `831069…` stays as the record of the 39 audited before it.
