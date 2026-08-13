@@ -9,6 +9,7 @@ from specpilot.contracts.verdict import (
     ComplianceBatch,
     ComplianceCandidate,
     ComplianceResult,
+    IdentifiedCandidate,
     SemanticDecision,
     SemanticEvidenceDecision,
     normalized_claim_id,
@@ -69,6 +70,15 @@ def test_normalized_claims_have_stable_ids_and_duplicates_are_rejected() -> None
     ).hexdigest()
     with pytest.raises(ValidationError, match="duplicate normalized claim"):
         ComplianceBatch(candidates=(candidate(), candidate()))
+
+
+def test_identified_candidate_requires_the_derived_claim_id() -> None:
+    parsed = ComplianceCandidate.model_validate(candidate())
+    claim_id = normalized_claim_id(parsed.claim)
+
+    assert IdentifiedCandidate(claim_id=claim_id, candidate=parsed).claim_id == claim_id
+    with pytest.raises(ValidationError, match="claim_id must match normalized claim"):
+        IdentifiedCandidate(claim_id="b" * 64, candidate=parsed)
 
 
 def test_candidate_evidence_ids_are_unique_full_hashes_and_limited_to_four() -> None:

@@ -91,6 +91,12 @@ class IdentifiedCandidate(_FrozenModel):
     claim_id: Sha256
     candidate: ComplianceCandidate
 
+    @model_validator(mode="after")
+    def _require_the_server_derived_claim_id(self) -> Self:
+        if self.claim_id != normalized_claim_id(self.candidate.claim):
+            raise ValueError("claim_id must match normalized claim")
+        return self
+
 
 class SemanticEvidenceDecision(_FrozenModel):
     evidence_id: Sha256
