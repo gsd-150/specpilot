@@ -118,9 +118,10 @@ No trace event stores claim text.
 ### Compliance candidate
 
 The Compliance Agent returns a closed structured object with one to three
-atomic candidates. Each candidate contains:
+atomic candidates. Each model candidate contains:
 
-- `claim_id` and the normalized atomic claim;
+- the normalized atomic claim; the server derives `claim_id` as SHA-256 of
+  those normalized UTF-8 bytes and never trusts a model-supplied identifier;
 - a proposed verdict in `compliant`, `violating`, or
   `insufficient_evidence`;
 - one or more Evidence IDs for a determinate proposal, or none for an
@@ -240,6 +241,9 @@ The checkpoint contains only:
 - planning, Compliance, Verifier, and answer reservation IDs that already
   exist;
 - `recovery_attempted`, the recovery reason code, and completed claim IDs;
+- completed `ComplianceResult` metadata: claim hash, verdict, verification
+  status, verified citations, and stable reason code, never claim/rationale
+  prose;
 - timestamps needed for retention and recovery audit.
 
 The allowed stages are:
@@ -296,13 +300,25 @@ same `run_id`, and delivers a reconstructed in-memory job. The original
 `evaluation_root_id` must therefore become a durable opaque checkpoint field;
 it is not sensitive prose and is required to continue the same root budget.
 
-Provider operations use stable stage keys derived from `(run_id, logical stage,
-claim_id, recovery_attempt)`, not from the process attempt. Reaching a stage
-whose reservation was already committed replays that reservation rather than
-sending again. A stage whose local result prose was lost may need to rerun the
-model to reconstruct it; that is permitted only when the ledger records no
-completed attempt for that logical stage. An ambiguous reservation state fails
-closed.
+Provider operations use keys derived from `(run_id, logical stage, claim_id,
+recovery_attempt, reconstruction_generation)`. Within one process generation a
+duplicate call reuses the same key and the transport refuses a second send. The
+ledger intentionally stores no provider response, so a consumed reservation
+cannot replay model output after process loss. If a checkpoint proves that a
+model result existed but its prohibited prose was lost, resume increments the
+stage's reconstruction generation and sends that stage again with a new key.
+That transmission is charged in full to the same evaluation root, run, stage,
+corpus and transmitted caps; it receives no fresh unique, tool or recovery
+allowance. Locally reconstructible stages are never resent. An ambiguous
+reservation or reconstruction generation fails closed.
+
+Concretely, recovery from `planned` resends planning because the plan's query
+arguments are not durable; recovery from `candidate_built` or
+`deterministic_verified` resends Compliance because atomic claim prose is not
+durable. Evidence references are reconstructed locally from the frozen corpus,
+and completed `ComplianceResult` metadata is reused without another semantic
+call. A reconstructed batch must reproduce the same server-derived claim IDs
+for any completed claim; disagreement is integrity failure, not a new result.
 
 A duplicate resume request with the same idempotency key returns the existing
 attempt and never enqueues twice. A later process loss may be resumed with a new
@@ -396,7 +412,8 @@ then submit an owner-bound resume:
   prompt drift, and ambiguous ledger state invoke no provider;
 - duplicate resume keys enqueue once;
 - a distinct concurrent resume loses the lease race and does not enqueue;
-- committed stage reservations replay and transmitted accounting does not reset;
+- a lost model result is resent under a new reconstruction-generation key and
+  transmitted accounting increases without resetting any cap;
 - tool calls before interruption remain charged against the L2 limit;
 - event/checkpoint writes stay monotonic under concurrent resume requests.
 
