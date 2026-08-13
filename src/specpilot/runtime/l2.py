@@ -96,6 +96,7 @@ type CheckpointWriter = Callable[[int | None, RunCheckpoint], Awaitable[RunCheck
 type EvidenceRestorer = Callable[
     [tuple[EvidenceCheckpointRef, ...]], tuple[Evidence, ...]
 ]
+type PlanRestorer = Callable[[str, str], ToolPlan | None]
 type LeaseIsLive = Callable[[], bool]
 
 
@@ -116,6 +117,7 @@ class L2RunContext:
     checkpoint_factory: Callable[[], RunCheckpoint] | None = None
     checkpoint_writer: CheckpointWriter | None = None
     evidence_restorer: EvidenceRestorer | None = None
+    plan_restorer: PlanRestorer | None = None
     lease_is_live: LeaseIsLive = lambda: True
 
 
@@ -214,6 +216,39 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 recovered=recovered,
             )
             plan = planning.plan
+        else:
+            if (
+                checkpoint.plan_id is None
+                or checkpoint.plan_hash is None
+                or context.plan_restorer is None
+            ):
+                return _fault(
+                    "checkpoint_plan_unavailable",
+                    attempts,
+                    reservations,
+                    recovered,
+                    written,
+                )
+            restored_plan = context.plan_restorer(
+                checkpoint.plan_id, checkpoint.plan_hash
+            )
+            if restored_plan is None:
+                return _fault(
+                    "checkpoint_plan_binding_mismatch",
+                    attempts,
+                    reservations,
+                    recovered,
+                    written,
+                )
+            if _plan_hash(restored_plan) != checkpoint.plan_hash:
+                return _fault(
+                    "checkpoint_plan_binding_mismatch",
+                    attempts,
+                    reservations,
+                    recovered,
+                    written,
+                )
+            plan = restored_plan
         if checkpoint is not None and checkpoint.stage is CheckpointStage.COMPLETED:
             return L2Outcome(
                 checkpoint.completed_results,
@@ -294,15 +329,35 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         if not context.lease_is_live():
             return _abandoned(attempts, reservations, recovered, written)
         reservations.append(compliance.reservation_id)
-        await write(
-            CheckpointStage.CANDIDATE_BUILT,
-            reservation_ids=reservations,
-            attempts=attempts,
-            recovered=recovered,
-        )
+        if (
+            checkpoint is not None
+            and checkpoint.stage is CheckpointStage.EVIDENCE_COLLECTED
+        ):
+            await write(
+                CheckpointStage.CANDIDATE_BUILT,
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
+            )
+        elif checkpoint is not None:
+            # Later-stage resume loses candidate prose, so it must resend
+            # Compliance. Keep its receipt via a legal same-stage mutation;
+            # never rewind the checkpoint graph merely to record the send.
+            await write(
+                checkpoint.stage,
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
+                allow_same_stage=True,
+            )
 
         results: list[ComplianceResult] = []
+        completed_ids = set(
+            () if checkpoint is None else checkpoint.completed_claim_ids
+        )
         for candidate in compliance.candidates:
+            if candidate.claim_id in completed_ids:
+                continue
             (
                 result,
                 evidence,

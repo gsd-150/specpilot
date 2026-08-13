@@ -210,8 +210,8 @@ def context(*, deterministic: object, semantic: Semantic):
     )
 
 
-def checkpoint(stage: str = "planned"):
-    from specpilot.checkpoints.contracts import RunCheckpoint
+def checkpoint(stage: str = "planned", *, items: tuple[Evidence, ...] = ()):
+    from specpilot.checkpoints.contracts import EvidenceCheckpointRef, RunCheckpoint
 
     return RunCheckpoint(
         run_id=uuid4(),
@@ -230,12 +230,27 @@ def checkpoint(stage: str = "planned"):
         provider_id="provider",
         model_id="model",
         plan_id="plan-1",
-        plan_hash="1" * 64,
-        evidence=(),
+        plan_hash=hashlib.sha256(b'{"plan_id":"plan-1"}').hexdigest(),
+        evidence=tuple(
+            EvidenceCheckpointRef(
+                evidence_id=item.excerpt.content_hash,
+                content_hash=item.excerpt.content_hash,
+                quote_hash=item.excerpt.quote_hash,
+                clause_id=item.disclosed.clause_id,
+                document_id=item.disclosed.document_id,
+                document_version=item.disclosed.document_version,
+                section_number=item.disclosed.section_number,
+                paragraph_start=item.excerpt.span.paragraph_start,
+                paragraph_end=item.excerpt.span.paragraph_end,
+                token_start=item.excerpt.span.token_start,
+                token_end=item.excerpt.span.token_end,
+            )
+            for item in items
+        ),
         tool_attempts_used=0,
         reservation_ids=(),
         reconstruction_generations=(),
-        recovery_attempted=False,
+        recovery_attempted=stage == "recovery_completed",
         recovery_reason=None,
         completed_claim_ids=(),
         completed_results=(),
@@ -472,6 +487,43 @@ async def test_lease_loss_after_checkpoint_fences_compliance_send() -> None:
 
     assert outcome.parse_fault == "lease_lost"
     assert made.compliance_agent.calls == 0
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "evidence_collected",
+        "candidate_built",
+        "deterministic_verified",
+        "recovery_completed",
+        "semantic_verified",
+    ],
+)
+async def test_resume_each_legal_stage_uses_only_validated_local_restorers(
+    stage: str,
+) -> None:
+    item = evidence()
+    seed = checkpoint(stage, items=(item,))
+    if stage == "recovery_completed":
+        seed = seed.model_copy(update={"recovery_attempted": True})
+    writer = StatefulWriter(current=seed, writes=seed.checkpoint_version)
+    made = context(deterministic=lambda *_: passed(item), semantic=Semantic([True]))
+    made = dataclass_replace(
+        made,
+        checkpoint=seed,
+        checkpoint_writer=writer,
+        evidence_restorer=lambda refs: (item,),
+        plan_restorer=lambda plan_id, plan_hash: FakePlan(),
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault not in {
+        "checkpoint_plan_unavailable",
+        "checkpoint_evidence_unavailable",
+    }
+    assert made.planner.calls == 0
 
 
 def dataclass_replace(value: object, **changes: object):

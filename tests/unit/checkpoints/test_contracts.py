@@ -116,8 +116,10 @@ def test_recovery_completed_requires_monotonic_single_recovery() -> None:
         run_id=previous.run_id,
         stage="recovery_completed", checkpoint_version=2, recovery_attempted=True
     )
-    with pytest.raises(ValueError, match="recovery"):
-        validate_transition(previous, current)
+    # A same-run recovery checkpoint may be compacted or receive a generation
+    # reservation update after a process loss; the run-scoped boolean itself
+    # remains monotonic and cannot create a second recovery action.
+    assert validate_transition(previous, current) is None
 
 
 def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:

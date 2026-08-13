@@ -207,11 +207,6 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
     if previous.recovery_attempted and not current.recovery_attempted:
         raise ValueError("recovery attempt is monotonic")
     if (
-        previous.recovery_attempted
-        and current.stage is CheckpointStage.RECOVERY_COMPLETED
-    ):
-        raise ValueError("recovery may not occur twice")
-    if (
         current.stage is CheckpointStage.RECOVERY_COMPLETED
         and not current.recovery_attempted
     ):
