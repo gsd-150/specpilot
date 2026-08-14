@@ -1,7 +1,7 @@
 # W4 Compliance, Verifier, and recovery engineering evidence
 
-Date: 2026-08-14  
-Code tested: `062c0bbb82b39f9c19789ea9fc9945d7c0d31c38`  
+Date: 2026-08-14
+Code tested: `e93be8f27d97b0ecfb05975fde97d97351b70488`
 Scope: fixture-only engineering and service integration evidence; this is not a
 quality, calibration, or release-evaluation report.
 
@@ -14,6 +14,9 @@ quality, calibration, or release-evaluation report.
 - Two semantic `exception_missing` decisions: two separately recorded Verifier
   receipts, exactly one recovery, and an `insufficient_evidence` result after
   the second failure.
+- Sanitized tool and deterministic-verifier trace summaries, in execution
+  order, with bounded opaque evidence IDs and no query, claim, excerpt or
+  rationale prose.
 - Owner-assisted process loss at every nonterminal checkpoint stage (`planned`,
   `evidence_collected`, `candidate_built`, `deterministic_verified`,
   `recovery_completed`, and `semantic_verified`), including repeated client
@@ -22,6 +25,9 @@ quality, calibration, or release-evaluation report.
 - Persistence sentinel checks covering run, event, checkpoint, attempt and
   egress records. The question and excerpt sentinel prose are absent from all
   checked durable records.
+- Completed-checkpoint compaction and operator-driven TTL cleanup: sanitized
+  terminal metadata remains, active reconstruction detail is cleared, only an
+  old inactive eligible checkpoint is deleted, and running/retained rows remain.
 - L1 integration and migration regressions, including closed W4 trace shapes,
   checkpoint CAS, and resumed attempt closure.
 
@@ -40,7 +46,7 @@ accuracy, recall, calibration, latency, or production quality.
   `specpilot_ff4841e2d846388014efa06870fbbdb7`; service inspection reported
   1,922 points, vector size 1,024, cosine distance and green status.
 - PostgreSQL test database:
-  `specpilot_w4_final_20260814`, newly created for this command and dropped
+  `specpilot_w4_review_final2_20260814`, newly created for this command and dropped
   after it completed. It was never a shared or hand-migrated database.
 
 The test worktree needed the local restricted RFC fixture for two pre-existing
@@ -54,23 +60,34 @@ user-owned source files; a symlink was rejected by the intentional
 PYTHONPATH=src make check
 # ruff: all checks passed
 # mypy: Success: no issues found in 105 source files
-# unit: 1523 passed in 4.00s
-# CLI: 181 passed in 1.58s
+# unit: 1523 passed in 3.86s
+# CLI: 181 passed in 1.39s
 ```
 
 ```bash
 curl --fail --silent \
+  http://127.0.0.1:6334/
+# HTTP 200; Qdrant 1.12.4, commit 5b578c4f34188f0474f901e49d4726213596433d
+
+curl --fail --silent \
   http://127.0.0.1:6334/collections/specpilot_ff4841e2d846388014efa06870fbbdb7
 # HTTP 200; frozen collection metadata recorded above
 
-docker exec specpilot-w4-postgres-20260814 createdb -U specpilot \
-  specpilot_w4_final_20260814
-SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_final_20260814' \
+PGPASSWORD='specpilot-w4-test-only' psql -h 127.0.0.1 -p 55432 \
+  -U specpilot -d postgres -Atc 'select version();'
+# PostgreSQL 17.10 on aarch64-unknown-linux-musl
+
+PGPASSWORD='specpilot-w4-test-only' createdb -h 127.0.0.1 -p 55432 \
+  -U specpilot specpilot_w4_review_final2_20260814
+SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_review_final2_20260814' \
 SPECPILOT_TEST_QDRANT_URL='http://127.0.0.1:6334' \
-PYTHONPATH=src .venv/bin/python -m pytest --import-mode=importlib -q -rs
-docker exec specpilot-w4-postgres-20260814 dropdb -U specpilot \
-  specpilot_w4_final_20260814
-# 1978 passed in 32.31s; 0 skipped
+PYTHONPATH=src .venv/bin/python -m pytest --import-mode=importlib -q -rs \
+  > /tmp/specpilot-w4-final2.log 2>&1
+# unified execution session exit code: 0
+tail -30 /tmp/specpilot-w4-final2.log
+# 1980 passed in 34.13s; 0 skipped
+PGPASSWORD='specpilot-w4-test-only' dropdb -h 127.0.0.1 -p 55432 \
+  -U specpilot specpilot_w4_review_final2_20260814
 ```
 
 `--import-mode=importlib` is required for the whole tree because the existing
@@ -81,8 +98,8 @@ applied by the fresh-database fixture in filename order.
 
 ```bash
 git diff --check
-# leakage-marker search over migrations, source and product documentation
-# no whitespace errors; no marker occurs in product code or product docs
+git diff --check 1017c1668da7e6cb9a83dd6107be6a84b052f566..HEAD
+# no whitespace errors
 ```
 
 ## Operational boundaries
@@ -90,9 +107,10 @@ git diff --check
 The checkpoint retains only reconstruction-safe metadata: immutable bindings,
 hashes/opaque evidence IDs, stage/budget metadata, reservations and explicit
 generation keys. It does not retain question, claim/design, rationale, query,
-excerpt or provider-response prose. Completed checkpoints can be compacted;
+excerpt or provider-response prose. Completed checkpoints can be compacted. Old
 noncompleted checkpoints are deleted only when an operator invokes the supplied
-seven-day retention operation. There is no automatic cleanup daemon.
+retention operation and the owning run is neither queued nor running; completed
+and active state is retained. There is no automatic cleanup daemon.
 
 Resume is client/owner assisted: the same question must hash to the stored
 query hash, and root, bindings, reservation state and a new lease must all

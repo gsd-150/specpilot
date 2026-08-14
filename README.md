@@ -181,13 +181,12 @@ recovered candidate goes through the complete deterministic and semantic gates
 again. Semantic support remains a model judgement, not a quality metric.
 
 W4 requires migrations 006--012 in filename order, in addition to the earlier
-operator-applied migrations. Startup still never applies migrations:
+operator-applied migrations. Applying the repository's zero-padded migration
+glob keeps that order and also includes future migrations. Startup still never
+applies migrations:
 
 ```bash
-for migration in migrations/006_w4_checkpoint_resume.sql migrations/007_w4_compliance.sql \
-  migrations/008_w4_checkpoint_validator.sql migrations/009_w4_checkpoint_evidence_validator.sql \
-  migrations/010_w4_checkpoint_generation_validator.sql migrations/011_w4_checkpoint_results_validator.sql \
-  migrations/012_w4_checkpoint_verifier_claim_scope.sql; do
+for migration in migrations/[0-9][0-9][0-9]_*.sql; do
   psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f "$migration"
 done
 ```
@@ -197,8 +196,10 @@ bindings, hashes/opaque evidence IDs, budgets, reservation IDs, stage and
 generation metadata. It never holds a question, design/claim/rationale,
 retrieval query, excerpt, or provider response. `compact(run_id)` may erase the
 completed checkpoint's evidence, reservations and generation state; an operator
-must arrange retention by calling `delete_expired(now - 7 days)` for noncompleted
-checkpoints. Neither operation is an automatic background cleanup job.
+must arrange retention by calling `delete_expired(now - 7 days)`. That operation
+deletes only old, noncompleted checkpoints whose run is no longer queued or
+running; completed, queued and running state is retained. Neither operation is
+an automatic background cleanup job.
 
 After a lease-expired L2 run, its owner may call `POST /runs/{run_id}/resume`
 with the same question and an idempotency `resume_key`. Resume verifies owner,
