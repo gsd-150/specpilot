@@ -1464,6 +1464,14 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
         # set, and an L2 item's input is a design description rather than a
         # query, so mixing them would report one number over two populations.
         heads = _annotation_heads(arguments.annotation_dir, ("l1",))
+        # A retired item is disclosed rather than deleted, so its record is
+        # still readable and still has gold. Scoring it would put an item the
+        # set no longer contains into a reported denominator — the pooling
+        # audit already excludes retirements for the same reason.
+        retired = {
+            entry.item_id
+            for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
+        }
         corpus = _pool_corpus(resolved)
     except (OSError, ValueError):
         return _refuse("invalid_annotation_record")
@@ -1476,6 +1484,7 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
         if record.split.value == arguments.split
         and not record.expected_refusal
         and record.gold_clause_ids
+        and record.item_id not in retired
     )
     if not scored_heads:
         return _refuse("no_scorable_annotations")
