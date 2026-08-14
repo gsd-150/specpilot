@@ -693,6 +693,34 @@ async def test_provider_failure_reservation_is_durable_before_return() -> None:
     assert len(writer.current.reservation_ids) == 1
 
 
+async def test_first_semantic_receipt_is_cas_written_before_recovery_await() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+    observed: list[object] = []
+
+    async def recover(*args: object) -> RecoveryOutcome:
+        assert writer.current is not None
+        observed.append(writer.current)
+        assert len(writer.current.reservation_ids) >= 2  # compliance + semantic
+        return RecoveryOutcome((item,), (), 1)
+
+    made = dataclass_replace(
+        context(
+            deterministic=lambda *_: passed(item), semantic=Semantic([False, True])
+        ),
+        checkpoint_factory=checkpoint,
+        checkpoint_writer=writer,
+        recovery_runner=recover,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert observed
+    assert outcome.recovery_attempted
+    assert len(outcome.reservation_ids) >= 3
+
+
 def dataclass_replace(value: object, **changes: object):
     from dataclasses import replace
 

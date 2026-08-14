@@ -6,7 +6,7 @@ CREATE OR REPLACE FUNCTION specpilot_checkpoint_generations(value jsonb)
 RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 DECLARE item jsonb;
 BEGIN
-    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 64 THEN
+    IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 8 THEN
         RETURN false;
     END IF;
     FOR item IN SELECT element FROM jsonb_array_elements(value) AS t(element) LOOP

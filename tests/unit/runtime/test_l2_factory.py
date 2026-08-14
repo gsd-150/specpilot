@@ -140,3 +140,16 @@ async def test_runtime_delivery_builder_calls_l2_factory_for_new_and_resume() ->
 
     assert resumed.lease_acquired is True
     assert resumed.attempt == 2
+
+
+@pytest.mark.anyio
+async def test_l2_factory_replaces_builder_planner_bindings_with_run_bindings() -> None:
+    run = fixture_run()
+    job = await L2JobFactory(Store(), builder).new_job(run, "private")
+
+    assert job.l2_context is not None
+    planner = job.l2_context.planner_context
+    assert planner.run_id == str(run.run_id)
+    assert planner.corpus_manifest_id == run.corpus_manifest_id
+    assert planner.evaluation_root_id == run.evaluation_root_id
+    assert planner.idempotency_key == f"{run.run_id}-planning-initial"

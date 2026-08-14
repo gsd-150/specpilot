@@ -50,7 +50,7 @@ BEGIN
              (jsonb_typeof(value -> 'plan_hash') = 'null'))
         AND specpilot_checkpoint_evidence(value -> 'evidence')
         AND specpilot_trace_integer(value -> 'tool_attempts_used', 0, 8)
-        AND specpilot_checkpoint_uuids(value -> 'reservation_ids', 16)
+        AND specpilot_checkpoint_uuids(value -> 'reservation_ids', 8)
         AND specpilot_checkpoint_generations(value -> 'reconstruction_generations')
         AND jsonb_typeof(value -> 'recovery_attempted') = 'boolean'
         AND (jsonb_typeof(value -> 'recovery_reason') = 'null'

@@ -128,9 +128,9 @@ class RunCheckpoint(_FrozenModel):
     plan_hash: Sha256 | None
     evidence: Annotated[tuple[EvidenceCheckpointRef, ...], Field(max_length=12)]
     tool_attempts_used: Annotated[int, Field(ge=0, le=8)]
-    reservation_ids: Annotated[tuple[UUID, ...], Field(max_length=16)]
+    reservation_ids: Annotated[tuple[UUID, ...], Field(max_length=8)]
     reconstruction_generations: Annotated[
-        tuple[StageGeneration, ...], Field(max_length=64)
+        tuple[StageGeneration, ...], Field(max_length=8)
     ]
     recovery_attempted: bool
     recovery_reason: TerminalReason | None

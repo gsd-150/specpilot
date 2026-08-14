@@ -37,7 +37,7 @@ from specpilot.contracts.verdict import (
     VerificationStatus,
 )
 from specpilot.egress.enforcer import EgressPolicyViolation
-from specpilot.providers.transport import ProviderAttemptError
+from specpilot.providers.transport import ProviderAttemptError, TransportReplayError
 from specpilot.verifier.deterministic import DeterministicResult
 from specpilot.verifier.recovery import RecoveryOutcome
 from specpilot.verifier.semantic import (
@@ -49,6 +49,10 @@ from specpilot.verifier.semantic import (
 _L2_TOOL_BUDGET = 8
 _MAX_EVIDENCE = 12
 _MAX_CANDIDATE_EVIDENCE = 4
+
+
+class _GenerationBudgetExhausted(Exception):
+    """The durable eight-send boundary is reached before an egress call."""
 
 
 class Planner(Protocol):
@@ -162,6 +166,10 @@ def _idempotency_suffix(
     return logical[len(prefix) : -len(marker)]
 
 
+def _planning_suffix(run_id: str) -> str:
+    return logical_stage_key(run_id, "planning", None, False, 0).removesuffix("-g0")
+
+
 async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
     """Execute exactly the missing portion of the closed checkpoint graph."""
     checkpoint = context.checkpoint
@@ -214,7 +222,11 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 return _abandoned(attempts, reservations, recovered, written)
             planning = await context.planner.plan(
                 context.question,
-                replace(context.planner_context, reconstruction_generation=0),
+                replace(
+                    context.planner_context,
+                    idempotency_key=_planning_suffix(context.run_id),
+                    reconstruction_generation=0,
+                ),
             )
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
@@ -240,7 +252,11 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             generation = _latest_generation(checkpoint, "planning", None, False)
             planning = await context.planner.plan(
                 context.question,
-                replace(context.planner_context, reconstruction_generation=generation),
+                replace(
+                    context.planner_context,
+                    idempotency_key=_planning_suffix(context.run_id),
+                    reconstruction_generation=generation,
+                ),
             )
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
@@ -299,6 +315,15 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             attempts = collected.attempts_used
+            prior_attempts = checkpoint.tool_attempts_used if checkpoint else 0
+            if attempts < prior_attempts or attempts > _L2_TOOL_BUDGET:
+                return _fault(
+                    "checkpoint_attempt_integrity",
+                    attempts,
+                    reservations,
+                    recovered,
+                    written,
+                )
             evidence = _bounded_evidence(collected.evidence)
             evidence_calls = tuple(collected.calls)
             await write(
@@ -347,6 +372,15 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 attempts=attempts,
                 recovered=recovered,
                 candidate_count=len(compliance.candidates),
+            )
+
+        if not _candidate_batch_is_consistent(checkpoint, compliance.candidates):
+            return _fault(
+                "checkpoint_candidate_integrity",
+                attempts,
+                reservations,
+                recovered,
+                written,
             )
         elif checkpoint is not None:
             # Later-stage resume loses candidate prose, so it must resend
@@ -445,6 +479,27 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             error.public_error_code,
             None,
             checkpoints=tuple(written),
+        )
+    except TransportReplayError as error:
+        reservations.append(error.reservation_id)
+        if checkpoint is not None:
+            await write(
+                checkpoint.stage,
+                reservation_ids=reservations,
+                attempts=attempts,
+                recovered=recovered,
+                allow_same_stage=True,
+            )
+        return _fault(
+            "transport_replay_refused", attempts, reservations, recovered, written
+        )
+    except _GenerationBudgetExhausted:
+        return _fault(
+            "reconstruction_generation_exhausted",
+            attempts,
+            reservations,
+            recovered,
+            written,
         )
     except InvalidComplianceReply as error:
         reservations.append(error.reservation_id)
@@ -618,6 +673,23 @@ async def _one_claim(
             None,
             recovery,
         )
+    if checkpoint is not None:
+        # A first semantic receipt is itself an egress fact.  Persist it before
+        # recovery can await MCP so an intervening crash cannot erase the send.
+        checkpoint = await _advance(
+            context,
+            checkpoint,
+            checkpoint.stage,
+            reservation_ids=[
+                *(str(item) for item in checkpoint.reservation_ids),
+                semantic.reservation_id,
+            ],
+            attempts=attempts,
+            recovered=recovered,
+            allow_same_stage=True,
+        )
+        if checkpoint is not None:
+            written.append(checkpoint)
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
             checkpoint = await _advance(
@@ -627,7 +699,6 @@ async def _one_claim(
                 evidence=evidence,
                 reservation_ids=[
                     *(str(item) for item in checkpoint.reservation_ids),
-                    semantic.reservation_id,
                 ],
                 attempts=attempts,
                 recovered=recovered,
@@ -735,6 +806,21 @@ async def _one_claim(
             ),
         ),
     )
+    if checkpoint is not None:
+        checkpoint = await _advance(
+            context,
+            checkpoint,
+            checkpoint.stage,
+            reservation_ids=[
+                *(str(item) for item in checkpoint.reservation_ids),
+                semantic.reservation_id,
+            ],
+            attempts=attempts,
+            recovered=True,
+            allow_same_stage=True,
+        )
+        if checkpoint is not None:
+            written.append(checkpoint)
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
             checkpoint = await _advance(
@@ -744,7 +830,6 @@ async def _one_claim(
                 evidence=evidence,
                 reservation_ids=[
                     *(str(item) for item in checkpoint.reservation_ids),
-                    semantic.reservation_id,
                 ],
                 attempts=attempts,
                 recovered=True,
@@ -814,6 +899,8 @@ async def _prepare_generation(
 ) -> RunCheckpoint | None:
     if checkpoint is None:
         return None
+    if len(checkpoint.reconstruction_generations) >= 8:
+        raise _GenerationBudgetExhausted()
     # Before *every* send record the generation token. New runs record g0;
     # an interrupted checkpoint advances to g1 before the reconstructed send.
     existing = [
@@ -879,9 +966,7 @@ async def _advance(
             "evidence": refs,
             "reservation_ids": tuple(
                 UUID(value)
-                for value in (
-                    reservation_ids or [str(item) for item in previous.reservation_ids]
-                )
+                for value in _merged_reservations(previous, reservation_ids)
             ),
             "tool_attempts_used": attempts,
             "recovery_attempted": recovered,
@@ -898,6 +983,17 @@ async def _advance(
             previous.checkpoint_version, next_checkpoint
         )
     return next_checkpoint
+
+
+def _merged_reservations(
+    previous: RunCheckpoint, reservation_ids: list[str] | None
+) -> list[str]:
+    """A local outcome may lag a same-stage receipt checkpoint; never erase it."""
+    values = [str(item) for item in previous.reservation_ids]
+    for reservation_id in reservation_ids or ():
+        if reservation_id not in values:
+            values.append(reservation_id)
+    return values
 
 
 async def _first_checkpoint(
@@ -969,6 +1065,20 @@ def _bounded_evidence(evidence: tuple[Evidence, ...]) -> tuple[Evidence, ...]:
         if len(unique) == _MAX_EVIDENCE:
             break
     return tuple(unique.values())
+
+
+def _candidate_batch_is_consistent(
+    checkpoint: RunCheckpoint | None, candidates: tuple[IdentifiedCandidate, ...]
+) -> bool:
+    """Reject reconstructed batches that could rewrite a saved claim cursor."""
+    if checkpoint is None:
+        return len(candidates) <= 3
+    ids = tuple(candidate.claim_id for candidate in candidates)
+    if len(ids) != len(set(ids)) or len(ids) > 3:
+        return False
+    if checkpoint.candidate_count and len(ids) != checkpoint.candidate_count:
+        return False
+    return set(checkpoint.completed_claim_ids).issubset(ids)
 
 
 def _rebuilt(

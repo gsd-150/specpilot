@@ -61,6 +61,7 @@ class L2JobFactory:
         context = self.context_builder(run, question, None, first)
         context = replace(
             context,
+            planner_context=_planner_context(run, context),
             checkpoint=None,
             checkpoint_factory=first,
             checkpoint_writer=self.checkpoint_store.write,
@@ -95,6 +96,7 @@ class L2JobFactory:
         context = self.context_builder(run, question, checkpoint, first)
         context = replace(
             context,
+            planner_context=_planner_context(run, context),
             checkpoint=checkpoint,
             checkpoint_factory=first,
             checkpoint_writer=self.checkpoint_store.write,
@@ -152,6 +154,19 @@ def _job(
         l2_context=context,
         lease_acquired=lease_acquired,
         attempt=attempt,
+    )
+
+
+def _planner_context(run: RunRecord, context: L2RunContext) -> PlannerContext:
+    """Run bindings replace every caller-supplied planner identity."""
+    return PlannerContext(
+        source_manifest=context.planner_context.source_manifest,
+        corpus_manifest_id=run.corpus_manifest_id,
+        evaluation_root_id=run.evaluation_root_id or "invalid-root",
+        run_id=str(run.run_id),
+        model_id=run.model_id,
+        idempotency_key=f"{run.run_id}-planning-initial",
+        task_level=TaskLevel.L2,
     )
 
 
