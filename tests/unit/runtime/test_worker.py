@@ -34,6 +34,7 @@ from specpilot.runtime.worker import (
     WorkerQueueFull,
     WorkerUnavailable,
 )
+from specpilot.verifier.deterministic import DeterministicCheck, DeterministicResult
 
 pytestmark = pytest.mark.anyio
 
@@ -866,3 +867,28 @@ async def test_sent_answer_emits_real_egress_metadata_with_unknown_cost() -> Non
         ("evidence", 120),
     ]
     assert all(event.cost_microunits is None for event in egress)
+
+
+async def test_distinct_claims_have_distinct_stable_audit_anchors() -> None:
+    from specpilot.runtime.l2 import L2DeterministicAudit
+    from specpilot.runtime.worker import _l2_audit_batches
+
+    result = DeterministicResult(
+        checks=(DeterministicCheck("a" * 64, None),),
+        citations=(),
+    )
+    first = L2DeterministicAudit(
+        "1" * 64, "deterministic/" + "1" * 64 + "/initial/a1", result
+    )
+    second = L2DeterministicAudit(
+        "2" * 64, "deterministic/" + "2" * 64 + "/initial/a1", result
+    )
+
+    first_batch = _l2_audit_batches(first)[0]
+    retried_batch = _l2_audit_batches(first)[0]
+    second_batch = _l2_audit_batches(second)[0]
+
+    assert first_batch[1] == retried_batch[1]
+    assert first_batch[1] != second_batch[1]
+    assert first_batch[0][1] == second_batch[0][1]
+    assert "1" * 64 not in first_batch[1].step_id

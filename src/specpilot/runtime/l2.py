@@ -137,6 +137,7 @@ class L2PlanningAudit:
 @dataclass(frozen=True, slots=True)
 class L2EvidenceAudit:
     calls: tuple[ToolCallSummary, ...]
+    audit_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +156,7 @@ class L2EgressAudit:
 @dataclass(frozen=True, slots=True)
 class L2DeterministicAudit:
     claim_id: str
+    audit_id: str
     result: DeterministicResult
 
 
@@ -166,6 +168,7 @@ class L2SemanticAudit:
 
 @dataclass(frozen=True, slots=True)
 class L2RecoveryAudit:
+    audit_id: str
     outcome: RecoveryOutcome
 
 
@@ -399,7 +402,18 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 attempt_budget=_L2_TOOL_BUDGET,
                 attempts_used=attempts,
             )
-            await _emit_audit(context, L2EvidenceAudit(tuple(collected.calls)))
+            evidence_audit_calls = tuple(collected.calls)
+            attempt_number = 1 if checkpoint is None else checkpoint.attempt
+            await _emit_audit(
+                context,
+                L2EvidenceAudit(
+                    evidence_audit_calls,
+                    tuple(
+                        f"tool/initial/a{attempt_number}/{call.step_id}"
+                        for call in evidence_audit_calls
+                    ),
+                ),
+            )
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             attempts = collected.attempts_used
@@ -665,13 +679,35 @@ async def _verify_and_record(
     evidence: tuple[Evidence, ...],
     deterministic_outcomes: list[tuple[str, DeterministicResult]],
     audit_events: list[L2AuditEvent],
+    *,
+    phase: str,
 ) -> DeterministicResult:
     result = context.deterministic_verifier(candidate.candidate, evidence)
     deterministic_outcomes.append((candidate.claim_id, result))
-    audit = L2DeterministicAudit(candidate.claim_id, result)
+    attempt = 1 if context.checkpoint is None else context.checkpoint.attempt
+    audit = L2DeterministicAudit(
+        candidate.claim_id,
+        f"deterministic/{candidate.claim_id}/{phase}/a{attempt}",
+        result,
+    )
     audit_events.append(audit)
     await _emit_audit(context, audit)
     return result
+
+
+def _reserve_recovery_attempts(attempts: int, reasons: tuple[str, ...]) -> int:
+    if any(
+        reason in {"not_disclosed", "document_scope_mismatch"}
+        for reason in reasons
+    ):
+        maximum_calls = 2
+    elif "content_hash_mismatch" in reasons:
+        maximum_calls = 1
+    elif "exception_missing" in reasons:
+        maximum_calls = 2
+    else:
+        maximum_calls = 0
+    return min(_L2_TOOL_BUDGET, attempts + maximum_calls)
 
 
 async def _one_claim(
@@ -693,6 +729,19 @@ async def _one_claim(
     RecoveryOutcome | None,
 ]:
     resumed_from_recovery = recovered
+    if checkpoint is not None and checkpoint.stage is CheckpointStage.RECOVERY_RESERVED:
+        return (
+            _insufficient(
+                candidate.claim_id,
+                VerificationStatus.INSUFFICIENT,
+                "recovery_result_lost",
+            ),
+            evidence,
+            checkpoint.tool_attempts_used,
+            True,
+            (),
+            None,
+        )
     if candidate.candidate.proposed_verdict is ComplianceVerdict.INSUFFICIENT_EVIDENCE:
         return (
             _insufficient(
@@ -707,9 +756,36 @@ async def _one_claim(
             None,
         )
     deterministic = await _verify_and_record(
-        context, candidate, evidence, deterministic_outcomes, audit_events
+        context,
+        candidate,
+        evidence,
+        deterministic_outcomes,
+        audit_events,
+        phase="initial",
     )
     if not deterministic.passed:
+        reserved_attempts = attempts
+        if checkpoint is not None and not recovered:
+            reserved_attempts = _reserve_recovery_attempts(
+                attempts,
+                tuple(
+                    check.fault.value
+                    for check in deterministic.checks
+                    if check.fault
+                ),
+            )
+            if reserved_attempts > attempts:
+                checkpoint = await _advance(
+                    context,
+                    checkpoint,
+                    CheckpointStage.RECOVERY_RESERVED,
+                    evidence=evidence,
+                    attempts=reserved_attempts,
+                    recovered=True,
+                    recovery_reason=_reason(deterministic),
+                )
+                if checkpoint is not None:
+                    written.append(checkpoint)
         replacement = await _recover(
             context, candidate, evidence, deterministic, attempts, recovered
         )
@@ -721,13 +797,19 @@ async def _one_claim(
                     _reason(deterministic),
                 ),
                 evidence,
-                attempts,
-                recovered,
+                reserved_attempts,
+                reserved_attempts > attempts or recovered,
                 (),
                 None,
             )
         evidence, attempts, recovery = replacement
-        recovery_audit = L2RecoveryAudit(recovery)
+        attempts = max(attempts, reserved_attempts)
+        recovery = replace(recovery, attempts_used=attempts)
+        recovery_audit = L2RecoveryAudit(
+            f"recovery/{candidate.claim_id}/deterministic/"
+            f"a{1 if checkpoint is None else checkpoint.attempt}",
+            recovery,
+        )
         audit_events.append(recovery_audit)
         await _emit_audit(context, recovery_audit)
         recovered = True
@@ -744,7 +826,12 @@ async def _one_claim(
                 written.append(checkpoint)
         rebuilt = _rebuilt(candidate, evidence)
         deterministic = await _verify_and_record(
-            context, rebuilt, evidence, deterministic_outcomes, audit_events
+            context,
+            rebuilt,
+            evidence,
+            deterministic_outcomes,
+            audit_events,
+            phase="post_deterministic_recovery",
         )
         if not deterministic.passed:
             return (
@@ -780,7 +867,12 @@ async def _one_claim(
         # the semantic payload; otherwise its citations describe the pre-crash
         # candidate while the semantic gate sees the rebuilt candidate.
         deterministic = await _verify_and_record(
-            context, active, evidence, deterministic_outcomes, audit_events
+            context,
+            active,
+            evidence,
+            deterministic_outcomes,
+            audit_events,
+            phase="resume_recovery",
         )
         if not deterministic.passed:
             return (
@@ -889,6 +981,23 @@ async def _one_claim(
             (semantic,),
             recovery,
         )
+    reserved_attempts = attempts
+    if checkpoint is not None and not recovered:
+        reserved_attempts = _reserve_recovery_attempts(
+            attempts, (semantic.decision.reason.value,)
+        )
+        if reserved_attempts > attempts:
+            checkpoint = await _advance(
+                context,
+                checkpoint,
+                CheckpointStage.RECOVERY_RESERVED,
+                evidence=evidence,
+                attempts=reserved_attempts,
+                recovered=True,
+                recovery_reason=semantic.decision.reason.value,
+            )
+            if checkpoint is not None:
+                written.append(checkpoint)
     replacement = await _recover(
         context,
         active,
@@ -906,13 +1015,19 @@ async def _one_claim(
                 semantic.decision.reason.value,
             ),
             evidence,
-            attempts,
-            recovered,
+            reserved_attempts,
+            reserved_attempts > attempts or recovered,
             (semantic,),
             recovery,
         )
     evidence, attempts, recovery = replacement
-    recovery_audit = L2RecoveryAudit(recovery)
+    attempts = max(attempts, reserved_attempts)
+    recovery = replace(recovery, attempts_used=attempts)
+    recovery_audit = L2RecoveryAudit(
+        f"recovery/{active.claim_id}/semantic/"
+        f"a{1 if checkpoint is None else checkpoint.attempt}",
+        recovery,
+    )
     audit_events.append(recovery_audit)
     await _emit_audit(context, recovery_audit)
     recovered = True
@@ -929,7 +1044,12 @@ async def _one_claim(
             written.append(checkpoint)
     active = _rebuilt(active, evidence)
     deterministic = await _verify_and_record(
-        context, active, evidence, deterministic_outcomes, audit_events
+        context,
+        active,
+        evidence,
+        deterministic_outcomes,
+        audit_events,
+        phase="post_semantic_recovery",
     )
     if not deterministic.passed:
         return (
@@ -1147,6 +1267,7 @@ async def _advance(
     reservation_ids: list[str] | None = None,
     attempts: int = 0,
     recovered: bool = False,
+    recovery_reason: str | None = None,
     plan_id: str | None = None,
     plan_hash: str | None = None,
     generation: StageGeneration | None = None,
@@ -1174,6 +1295,11 @@ async def _advance(
             ),
             "tool_attempts_used": attempts,
             "recovery_attempted": recovered,
+            "recovery_reason": (
+                previous.recovery_reason
+                if recovery_reason is None
+                else recovery_reason
+            ),
             "completed_claim_ids": tuple(item.claim_id for item in completed_results)
             or previous.completed_claim_ids,
             "completed_results": completed_results or previous.completed_results,

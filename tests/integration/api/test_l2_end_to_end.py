@@ -17,7 +17,7 @@ from specpilot.api.app import create_app
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.contracts.egress import L2AtomicClaimPayload, L2DesignPayload
 from specpilot.providers.base import ProviderResponse
-from specpilot.runs.contracts import RunStatus
+from specpilot.runs.contracts import EgressSummaryEvent, RunStatus
 from specpilot.runtime import RunWorker
 from tests.integration.api import test_l1_end_to_end as l1_fixture
 
@@ -226,6 +226,211 @@ async def test_l2_happy_path_records_every_outward_stage_in_owner_trace(
     assert kinds.index("verifier_summary") < kinds.index("semantic_summary")
     assert payload["question"] not in trace.text
     assert "A sender" not in trace.text
+
+
+async def test_resume_reconciles_provider_receipt_lost_before_audit_checkpoint(
+    clean_ledger: str,
+    qdrant_url: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settled provider send is recovered even absent from the checkpoint."""
+    del qdrant_url
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
+        runtime,
+        issuer,
+    ):
+        assert runtime.checkpoint_store is not None
+        original_append = runtime.store.append_many_once
+        lost = asyncio.Event()
+
+        async def lose_after_provider(
+            run_id: UUID,
+            lease_owner: str,
+            events: Any,
+            *,
+            anchor: Any,
+        ) -> Any:
+            if (
+                not lost.is_set()
+                and isinstance(anchor, EgressSummaryEvent)
+                and anchor.stage.value == "verifier"
+            ):
+                lost.set()
+                raise _ProcessLostAfterRecovery("after_provider_before_audit")
+            return await original_append(
+                run_id, lease_owner, events, anchor=anchor
+            )
+
+        monkeypatch.setattr(runtime.store, "append_many_once", lose_after_provider)
+        owner = "l2-lost-provider-audit-owner"
+        question = "Which retry requirement applies?"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        app = create_app(runtime=runtime)
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post(
+                "/chat",
+                headers=headers,
+                json=_l2_request(runtime, root="l2-lost-provider-audit-root"),
+            )
+            assert accepted.status_code == 202
+            run_id = UUID(accepted.json()["run_id"])
+            await asyncio.wait_for(lost.wait(), timeout=3)
+            checkpoint = await runtime.checkpoint_store.read(run_id)
+            assert checkpoint is not None
+            settled_before = await _reservations(clean_ledger, run_id)
+            lost_ids = {
+                item
+                for item, (_, stage, _) in settled_before.items()
+                if stage == "verifier"
+            }
+            assert lost_ids
+            assert lost_ids.isdisjoint(set(checkpoint.reservation_ids))
+
+            monkeypatch.setattr(
+                runtime.store, "append_many_once", original_append
+            )
+            await _restart_worker(runtime)
+            future = datetime.now(tz=UTC) + timedelta(seconds=60)
+            assert await runtime.store.reconcile_expired(future) == 1
+            resumed = await client.post(
+                f"/runs/{run_id}/resume",
+                headers=headers,
+                json={"question": question, "resume_key": "lost-audit-resume"},
+            )
+            assert resumed.status_code == 202
+            terminal = await _wait_terminal(runtime, run_id, owner)
+            trace = await client.get(f"/runs/{run_id}", headers=headers)
+            settled_after = await _reservations(clean_ledger, run_id)
+
+    assert terminal.status is RunStatus.ANSWERED
+    trace_ids = {
+        UUID(event["reservation_id"])
+        for event in trace.json()["events"]
+        if event["kind"] == "egress_summary" and event["admitted"]
+    }
+    assert set(settled_after) == trace_ids
+    assert lost_ids <= trace_ids
+
+
+async def test_resume_after_recovery_tool_return_does_not_call_mcp_twice(
+    clean_ledger: str,
+    qdrant_url: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-call reservation closes the tool-return crash window."""
+    del qdrant_url
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
+        runtime,
+        issuer,
+    ):
+        assert runtime.checkpoint_store is not None
+        adapter = _adapter(runtime)
+        original_send = adapter.send
+        semantic_calls = 0
+
+        async def reject_first_semantic(payload: Any) -> ProviderResponse:
+            nonlocal semantic_calls
+            response = await original_send(payload)
+            if not isinstance(payload, L2AtomicClaimPayload):
+                return response
+            semantic_calls += 1
+            if semantic_calls != 1:
+                return response
+            return response.model_copy(
+                update={
+                    "content": json.dumps(
+                        {
+                            "supports_verdict": False,
+                            "evidence": [
+                                {
+                                    "evidence_id": item.content_hash,
+                                    "supports": False,
+                                }
+                                for item in payload.evidence_excerpts
+                            ],
+                            "reason": "exception_missing",
+                            "rationale": "lost provider prose",
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                }
+            )
+
+        monkeypatch.setattr(adapter, "send", reject_first_semantic)
+        import specpilot.api.runtime as api_runtime
+
+        original_recovery = api_runtime.execute_recovery
+        recovery_calls = 0
+        returned = asyncio.Event()
+
+        async def lose_after_tool_return(*args: Any, **kwargs: Any) -> Any:
+            nonlocal recovery_calls
+            recovery_calls += 1
+            await original_recovery(*args, **kwargs)
+            returned.set()
+            raise _ProcessLostAfterRecovery("after_tool_return")
+
+        monkeypatch.setattr(api_runtime, "execute_recovery", lose_after_tool_return)
+        owner = "l2-lost-recovery-result-owner"
+        question = "Which retry requirement applies?"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        app = create_app(runtime=runtime)
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post(
+                "/chat",
+                headers=headers,
+                json=_l2_request(runtime, root="l2-lost-recovery-result-root"),
+            )
+            assert accepted.status_code == 202
+            run_id = UUID(accepted.json()["run_id"])
+            await asyncio.wait_for(returned.wait(), timeout=3)
+            reserved = await _wait_checkpoint(
+                runtime.checkpoint_store,
+                run_id,
+                CheckpointStage.RECOVERY_RESERVED,
+            )
+            assert recovery_calls == 1
+            assert reserved.recovery_attempted is True
+            assert reserved.tool_attempts_used <= 8
+
+            await _restart_worker(runtime)
+            future = datetime.now(tz=UTC) + timedelta(seconds=60)
+            assert await runtime.store.reconcile_expired(future) == 1
+            resumed = await client.post(
+                f"/runs/{run_id}/resume",
+                headers=headers,
+                json={"question": question, "resume_key": "lost-recovery-resume"},
+            )
+            assert resumed.status_code == 202
+            terminal = await _wait_terminal(runtime, run_id, owner)
+            final_checkpoint = await runtime.checkpoint_store.read(run_id)
+            trace = await client.get(f"/runs/{run_id}", headers=headers)
+
+    assert terminal.status is RunStatus.ANSWERED
+    assert recovery_calls == 1
+    assert final_checkpoint is not None
+    assert final_checkpoint.stage is CheckpointStage.COMPLETED
+    assert final_checkpoint.tool_attempts_used == reserved.tool_attempts_used
+    assert final_checkpoint.tool_attempts_used <= 8
+    assert final_checkpoint.completed_results[0].reason_code == "recovery_result_lost"
+    assert "lost provider prose" not in trace.text
 
 
 async def test_deterministic_mismatch_recovers_before_the_first_semantic_send(
@@ -668,15 +873,12 @@ async def test_client_resume_rebuilds_local_state_and_charges_lost_model_generat
         if event["kind"] == "tool_finished"
         and event["step_id"].startswith("recovery_")
     ]
-    verifier_events = [
-        event for event in body["events"] if event["kind"] == "verifier_summary"
-    ]
     semantic_events = [
         event for event in body["events"] if event["kind"] == "semantic_summary"
     ]
     assert len(recovery_events) == 1
     assert recovery_tools
-    for events in (recovery_events, recovery_tools, verifier_events):
+    for events in (recovery_events, recovery_tools):
         closed_payloads = [
             json.dumps(
                 {key: value for key, value in event.items() if key != "sequence"},
@@ -685,6 +887,13 @@ async def test_client_resume_rebuilds_local_state_and_charges_lost_model_generat
             for event in events
         ]
         assert len(closed_payloads) == len(set(closed_payloads))
+    audit_steps = [
+        event["step_id"]
+        for event in body["events"]
+        if event["kind"] == "agent_step"
+        and event["step_id"].startswith("audit-")
+    ]
+    assert len(audit_steps) == len(set(audit_steps))
     verifier_reservations = {
         reservation_id
         for reservation_id, (_, stage, _) in reservations_after.items()

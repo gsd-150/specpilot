@@ -283,7 +283,7 @@ class CheckpointSummaryEvent(_RunEventBase):
         StringConstraints(
             pattern=(
                 r"^(planned|evidence_collected|candidate_built|"
-                r"deterministic_verified|recovery_completed|"
+                r"deterministic_verified|recovery_reserved|recovery_completed|"
                 r"semantic_verified|completed)$"
             )
         ),

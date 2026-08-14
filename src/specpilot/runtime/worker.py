@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -16,6 +17,7 @@ from specpilot.agents.contracts import ToolCallSummary, ToolPlan
 from specpilot.agents.evidence import EvidenceResult
 from specpilot.agents.planner import InvalidToolPlan, PlannerContext, PlannerResult
 from specpilot.answer.run import AnswerOutcome, run_answer
+from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.contracts.egress import EgressStage
 from specpilot.egress.enforcer import EgressPolicyViolation
 from specpilot.egress.ledger import RequestSize
@@ -85,7 +87,7 @@ class RunStore(Protocol):
         self,
         run_id: UUID,
         lease_owner: str,
-        reservation_ids: Sequence[str],
+        checkpoint: RunCheckpoint,
     ) -> tuple[EgressSummaryEvent, ...]: ...
 
     async def complete(
@@ -545,10 +547,7 @@ class RunWorker:
                 await self._store.reconcile_l2_egress(
                     job.run_id,
                     self._worker_id,
-                    tuple(
-                        str(item)
-                        for item in job.l2_context.checkpoint.reservation_ids
-                    ),
+                    job.l2_context.checkpoint,
                 )
             context = replace_l2_runtime(
                 job.l2_context,
@@ -646,10 +645,16 @@ def _l2_audit_batches(
         planning_event = _planning_egress_event(audit.outcome)
         return (((planning_event,), planning_event),)
     if isinstance(audit, L2EvidenceAudit):
-        evidence_events = tuple(
-            ToolFinishedEvent(sequence=1, **call.model_dump()) for call in audit.calls
+        return tuple(
+            (
+                (
+                    _audit_identity_event(audit_id, AgentName.EVIDENCE_AGENT),
+                    ToolFinishedEvent(sequence=1, **call.model_dump()),
+                ),
+                _audit_identity_event(audit_id, AgentName.EVIDENCE_AGENT),
+            )
+            for call, audit_id in zip(audit.calls, audit.audit_ids, strict=True)
         )
-        return tuple(((item,), item) for item in evidence_events)
     if isinstance(audit, L2ComplianceAudit):
         outcome = audit.outcome
         compliance_summary = ComplianceSummaryEvent(
@@ -673,6 +678,7 @@ def _l2_audit_batches(
         )
         return (((egress_event,), egress_event),)
     if isinstance(audit, L2DeterministicAudit):
+        identity = _audit_identity_event(audit.audit_id, AgentName.VERIFIER)
         verifier_event = VerifierSummaryEvent(
             sequence=1,
             checks=tuple(
@@ -685,7 +691,7 @@ def _l2_audit_batches(
             ),
             duration_ms=0,
         )
-        return (((verifier_event,), verifier_event),)
+        return (((identity, verifier_event), identity),)
     if isinstance(audit, L2SemanticAudit):
         semantic = audit.outcome
         semantic_summary = SemanticSummaryEvent(
@@ -702,6 +708,7 @@ def _l2_audit_batches(
         )
         return (((semantic_summary, egress), egress),)
     recovery = audit.outcome
+    identity = _audit_identity_event(audit.audit_id, AgentName.EVIDENCE_AGENT)
     recovery_events: tuple[RunEvent, ...] = tuple(
         ToolFinishedEvent(sequence=1, **call.model_dump()) for call in recovery.calls
     )
@@ -710,14 +717,25 @@ def _l2_audit_batches(
         or recovery.kind is None
         or recovery.reason_code is None
     ):
-        return tuple(((item,), item) for item in recovery_events)
+        return (((identity, *recovery_events), identity),)
     recovery_summary = RecoverySummaryEvent(
         sequence=1,
         kind_name=recovery.kind.value,
         reason=recovery.reason_code,
         remaining_tool_attempts=8 - recovery.attempts_used,
     )
-    return (((*recovery_events, recovery_summary), recovery_summary),)
+    return (((identity, *recovery_events, recovery_summary), identity),)
+
+
+def _audit_identity_event(audit_id: str, agent: AgentName) -> AgentStepEvent:
+    return AgentStepEvent(
+        sequence=1,
+        agent=agent,
+        step_id=f"audit-{hashlib.sha256(audit_id.encode('utf-8')).hexdigest()}",
+        phase=AgentStepPhase.FINISHED,
+        duration_ms=0,
+        error_code=None,
+    )
 
 
 def replace_l2_runtime(

@@ -82,9 +82,13 @@ def test_transition_rejects_binding_rollback_and_attempt_drift() -> None:
         ("planned", "evidence_collected"),
         ("evidence_collected", "candidate_built"),
         ("candidate_built", "deterministic_verified"),
+        ("candidate_built", "recovery_reserved"),
         ("candidate_built", "recovery_completed"),
         ("deterministic_verified", "semantic_verified"),
+        ("deterministic_verified", "recovery_reserved"),
         ("deterministic_verified", "recovery_completed"),
+        ("recovery_reserved", "recovery_completed"),
+        ("recovery_reserved", "semantic_verified"),
         ("recovery_completed", "deterministic_verified"),
         ("semantic_verified", "completed"),
     ],
@@ -93,20 +97,24 @@ def test_legal_checkpoint_transitions(stage: str, next_stage: str) -> None:
     from specpilot.checkpoints.contracts import validate_transition
 
     previous = _checkpoint(
-        stage=stage, recovery_attempted=stage == "recovery_completed"
+        stage=stage,
+        recovery_attempted=stage in {"recovery_reserved", "recovery_completed"},
     )
     current = _checkpoint(
         run_id=previous.run_id,
         stage=next_stage,
         checkpoint_version=2,
         recovery_attempted=(
-            stage == "recovery_completed" or next_stage == "recovery_completed"
+            stage in {"recovery_reserved", "recovery_completed"}
+            or next_stage in {"recovery_reserved", "recovery_completed"}
         ),
     )
     assert validate_transition(previous, current) is None
 
 
 def test_recovery_completed_requires_monotonic_single_recovery() -> None:
+    with pytest.raises(ValidationError, match="recovery"):
+        _checkpoint(stage="recovery_reserved")
     with pytest.raises(ValidationError, match="recovery"):
         _checkpoint(stage="recovery_completed")
 

@@ -257,7 +257,7 @@ def checkpoint(stage: str = "planned", *, items: tuple[Evidence, ...] = ()):
         tool_attempts_used=0,
         reservation_ids=(),
         reconstruction_generations=(),
-        recovery_attempted=stage == "recovery_completed",
+        recovery_attempted=stage in {"recovery_reserved", "recovery_completed"},
         recovery_reason=None,
         candidate_count=0,
         completed_claim_ids=(),
@@ -554,6 +554,40 @@ async def test_resume_after_evidence_does_not_require_durable_plan_prose() -> No
     assert outcome.parse_fault != "checkpoint_plan_unavailable"
     assert outcome.results[0].verification_status.value == "verified"
     assert made.planner.calls == 0
+
+
+async def test_reserved_recovery_resume_does_not_repeat_tool_call() -> None:
+    item = evidence()
+    seed = checkpoint("recovery_reserved", items=(item,)).model_copy(
+        update={
+            "tool_attempts_used": 8,
+            "recovery_attempted": True,
+            "recovery_reason": "exception_missing",
+        }
+    )
+    recovery_calls = 0
+
+    async def forbidden_recovery(*args: object) -> RecoveryOutcome:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return RecoveryOutcome((item,), (), 8)
+
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True])),
+        checkpoint=seed,
+        checkpoint_writer=StatefulWriter(current=seed, writes=1),
+        evidence_restorer=lambda refs: (item,),
+        recovery_runner=forbidden_recovery,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert recovery_calls == 0
+    assert outcome.tool_attempts_used == 8
+    assert outcome.recovery_attempted is True
+    assert outcome.results[0].verification_status.value == "insufficient"
+    assert outcome.results[0].reason_code == "recovery_result_lost"
 
 
 async def test_completed_checkpoint_fast_path_needs_no_restorer_or_provider() -> None:

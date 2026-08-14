@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter, ValidationError
 
+from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.contracts.egress import EgressStage
 from specpilot.runs.contracts import (
     EgressSummaryEvent,
@@ -329,7 +330,7 @@ class PostgresRunStore:
         self,
         run_id: UUID,
         lease_owner: str,
-        reservation_ids: Sequence[str],
+        checkpoint: RunCheckpoint,
     ) -> tuple[EgressSummaryEvent, ...]:
         """Rebuild only missing closed egress receipts from settled ledger rows."""
         validated_run_id = _validated_uuid(run_id)
@@ -346,8 +347,31 @@ class PostgresRunStore:
                     or row["lease_expires_at"] <= now
                 ):
                     raise RunStoreValidationError()
-                if not reservation_ids:
-                    return ()
+                binding = await (
+                    await connection.execute(
+                        "SELECT evaluation_root_id, source_manifest_id, "
+                        "corpus_manifest_id, policy_hash, configuration_hash, "
+                        "compliance_prompt_hash, verifier_prompt_hash, provider_id, "
+                        "model_id FROM specpilot_run "
+                        "WHERE run_id = %s",
+                        (validated_run_id,),
+                    )
+                ).fetchone()
+                if binding is None or any(
+                    binding[field] != getattr(checkpoint, field)
+                    for field in (
+                        "evaluation_root_id",
+                        "source_manifest_id",
+                        "corpus_manifest_id",
+                        "policy_hash",
+                        "configuration_hash",
+                        "compliance_prompt_hash",
+                        "verifier_prompt_hash",
+                        "provider_id",
+                        "model_id",
+                    )
+                ):
+                    raise RunStoreValidationError()
                 rows = await (
                     await connection.execute(
                         "SELECT reservation.reservation_id, reservation.stage, "
@@ -358,9 +382,21 @@ class PostgresRunStore:
                         "reservation.reservation_id ORDER BY recorded_at DESC, "
                         "attempt_id DESC LIMIT 1) AS attempt ON TRUE "
                         "WHERE reservation.run_id = %s "
-                        "AND reservation.reservation_id = ANY(%s) "
+                        "AND reservation.evaluation_root_id = %s "
+                        "AND reservation.policy_hash = %s "
+                        "AND reservation.corpus_manifest_id = %s "
+                        "AND reservation.provider_id = %s "
+                        "AND reservation.model_id = %s "
+                        "AND reservation.state IN ('succeeded','failed_known') "
                         "ORDER BY reservation.created_at, reservation.reservation_id",
-                        (str(validated_run_id), list(reservation_ids)),
+                        (
+                            str(validated_run_id),
+                            checkpoint.evaluation_root_id,
+                            checkpoint.policy_hash,
+                            checkpoint.corpus_manifest_id,
+                            checkpoint.provider_id,
+                            checkpoint.model_id,
+                        ),
                     )
                 ).fetchall()
                 rebuilt: list[EgressSummaryEvent] = []

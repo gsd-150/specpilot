@@ -9,11 +9,16 @@ from typing import Any
 import pytest
 
 from specpilot.runs.contracts import (
+    AgentName,
+    AgentStepEvent,
+    AgentStepPhase,
     PlanSummaryEvent,
     RunRecord,
     RunStatus,
     StateTransitionEvent,
     TerminalEvent,
+    VerifierCheckSummary,
+    VerifierSummaryEvent,
 )
 from specpilot.runs.postgres import (
     PostgresRunStore,
@@ -356,6 +361,56 @@ async def test_concurrent_append_allocates_unique_gapless_sequences(
     view = await seed_store.read_owned(created.run_id, created.session_id)
     assert view is not None
     assert [event.sequence for event in view.events] == [1, 2, 3, 4]
+
+
+@pytest.mark.anyio
+async def test_audit_anchor_dedup_preserves_identical_checks_for_two_claims(
+    clean_ledger: str,
+) -> None:
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock)
+    created = await store.create(_new_run(clock))
+    assert await store.claim(created.run_id, "worker-a", lease_seconds=30)
+    summary = VerifierSummaryEvent(
+        sequence=1,
+        checks=(
+            VerifierCheckSummary(
+                evidence_id="1" * 64, passed=True, fault_code=None
+            ),
+        ),
+        duration_ms=0,
+    )
+
+    def identity(step_id: str) -> AgentStepEvent:
+        return AgentStepEvent(
+            sequence=1,
+            agent=AgentName.VERIFIER,
+            step_id=step_id,
+            phase=AgentStepPhase.FINISHED,
+            duration_ms=0,
+            error_code=None,
+        )
+
+    first = identity("audit-" + "1" * 64)
+    second = identity("audit-" + "2" * 64)
+    assert len(
+        await store.append_many_once(
+            created.run_id, "worker-a", (first, summary), anchor=first
+        )
+    ) == 2
+    assert await store.append_many_once(
+        created.run_id, "worker-a", (first, summary), anchor=first
+    ) == ()
+    assert len(
+        await store.append_many_once(
+            created.run_id, "worker-a", (second, summary), anchor=second
+        )
+    ) == 2
+
+    view = await store.read_owned(created.run_id, created.session_id)
+    assert view is not None
+    assert sum(isinstance(event, VerifierSummaryEvent) for event in view.events) == 2
 
 
 @pytest.mark.anyio

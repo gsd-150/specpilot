@@ -26,6 +26,7 @@ class CheckpointStage(StrEnum):
     EVIDENCE_COLLECTED = "evidence_collected"
     CANDIDATE_BUILT = "candidate_built"
     DETERMINISTIC_VERIFIED = "deterministic_verified"
+    RECOVERY_RESERVED = "recovery_reserved"
     RECOVERY_COMPLETED = "recovery_completed"
     SEMANTIC_VERIFIED = "semantic_verified"
     COMPLETED = "completed"
@@ -42,6 +43,7 @@ LEGAL_TRANSITIONS: dict[CheckpointStage, frozenset[CheckpointStage]] = {
         {
             CheckpointStage.CANDIDATE_BUILT,
             CheckpointStage.DETERMINISTIC_VERIFIED,
+            CheckpointStage.RECOVERY_RESERVED,
             CheckpointStage.RECOVERY_COMPLETED,
         }
     ),
@@ -49,7 +51,15 @@ LEGAL_TRANSITIONS: dict[CheckpointStage, frozenset[CheckpointStage]] = {
         {
             CheckpointStage.DETERMINISTIC_VERIFIED,
             CheckpointStage.SEMANTIC_VERIFIED,
+            CheckpointStage.RECOVERY_RESERVED,
             CheckpointStage.RECOVERY_COMPLETED,
+        }
+    ),
+    CheckpointStage.RECOVERY_RESERVED: frozenset(
+        {
+            CheckpointStage.RECOVERY_RESERVED,
+            CheckpointStage.RECOVERY_COMPLETED,
+            CheckpointStage.SEMANTIC_VERIFIED,
         }
     ),
     CheckpointStage.RECOVERY_COMPLETED: frozenset(
@@ -169,7 +179,8 @@ class RunCheckpoint(_FrozenModel):
         if (self.plan_id is None) != (self.plan_hash is None):
             raise ValueError("plan id and plan hash are set together")
         if (
-            self.stage is CheckpointStage.RECOVERY_COMPLETED
+            self.stage
+            in {CheckpointStage.RECOVERY_RESERVED, CheckpointStage.RECOVERY_COMPLETED}
             and not self.recovery_attempted
         ):
             raise ValueError("recovery_completed requires recovery_attempted")
@@ -234,7 +245,8 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
     if not set(previous.completed_claim_ids).issubset(current.completed_claim_ids):
         raise ValueError("completed claim IDs are monotonic")
     if (
-        current.stage is CheckpointStage.RECOVERY_COMPLETED
+        current.stage
+        in {CheckpointStage.RECOVERY_RESERVED, CheckpointStage.RECOVERY_COMPLETED}
         and not current.recovery_attempted
     ):
         raise ValueError("recovery_completed requires recovery_attempted")
