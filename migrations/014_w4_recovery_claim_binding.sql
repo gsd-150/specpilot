@@ -4,8 +4,11 @@
 -- Version 013 did not retain the claim that owns a reserved recovery action.
 -- It cannot be inferred safely, so reject this upgrade before dropping any
 -- constraint or changing even a non-reserved checkpoint payload. Operators
--- must resume or resolve those runs under 013 first; inventing an owner would
--- let a later reconstructed batch attach a lost MCP result to the wrong claim.
+-- must quiesce new L2/recovery writes and must not client-resume an interrupted
+-- reserved run under 013. Only an original live worker may finish it. Otherwise
+-- keep 013 in place or abandon the old checkpoint through the documented
+-- operator retention path; inventing an owner would let a later reconstructed
+-- batch attach a lost MCP result to the wrong claim.
 DO $$
 BEGIN
     IF EXISTS (

@@ -200,11 +200,12 @@ do
 done
 ```
 
-Before applying 014, drain the 013-only crash window. Version 013 did not
-retain the opaque claim ID that owns a `recovery_reserved` checkpoint, so an
-operator must not guess one or manually fabricate a binding. Run this preflight
-query and require a count of zero; for each row, resume/resolve the interrupted
-run under 013, then rerun the query:
+Before applying 014, quiesce new L2 submissions, client resumes and recovery
+writes, then let only workers that still hold their original in-memory recovery
+context finish. Version 013 did not retain the opaque claim ID that owns a
+`recovery_reserved` checkpoint, so an operator must not guess one, fabricate a
+binding, or client-resume an interrupted reserved run under 013. Run this
+preflight query and require a count of zero:
 
 ```sql
 SELECT run_id, checkpoint_version, stage
@@ -217,6 +218,17 @@ Migration 014 performs the same preflight before any schema mutation and exits
 with `W4_014_RECOVERY_RESERVED_DRAIN_REQUIRED` if rows remain. Non-reserved
 legacy checkpoints are backfilled with a JSON `null` binding; the binding is
 present only during a newly reserved recovery transition.
+
+An interrupted row returned by the query cannot be safely reconstructed by
+013. Either keep the deployment quiesced on 013, or explicitly abandon its
+checkpoint through the existing operator retention path after the seven-day
+retention boundary by calling
+`PostgresCheckpointStore.delete_expired(UTC_now - timedelta(days=7))`. This
+removes only the noncompleted checkpoint; the interrupted run, attempts, events
+and ledger audit remain. Do not apply 014, and do not re-enable L2 writers,
+until the query returns zero. If policy does not permit waiting for retention
+or abandoning resumability, remain on 013 and escalate the affected runs for a
+separate audited migration; there is no safe automatic owner inference.
 
 The durable checkpoint is deliberately reconstruction-only: it holds frozen
 bindings, hashes/opaque evidence IDs, budgets, reservation IDs, stage and
