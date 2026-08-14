@@ -1,7 +1,7 @@
 # W4 Compliance, Verifier, and recovery engineering evidence
 
 Date: 2026-08-14
-Code tested: `d2eed5be149daeb63fd17c65396e581263a30e8a`
+Code tested: `b89339d2c9118fc3e5915735151e18eb3a504059`
 Scope: fixture-only engineering and service integration evidence; this is not a
 quality, calibration, or release-evaluation report.
 
@@ -43,6 +43,11 @@ quality, calibration, or release-evaluation report.
   old inactive eligible checkpoint is deleted, and running/retained rows remain.
 - L1 integration and migration regressions, including closed W4 trace shapes,
   checkpoint CAS, and resumed attempt closure.
+- Attempt-lineage fencing: a first checkpoint write is only `planned` attempt
+  1; every resume compares its persisted checkpoint attempt with the locked
+  maximum ledger attempt before an acquisition. A mismatch fails closed with no
+  new run, checkpoint, attempt or event mutation; valid attempt 1 → 2 and
+  same-key replay remain intact.
 
 The fixture adapter is `FakeProvider`; no live model or provider route was
 enabled. Deterministic checks are implementation facts. Semantic support is a
@@ -59,7 +64,7 @@ accuracy, recall, calibration, latency, or production quality.
   `specpilot_ff4841e2d846388014efa06870fbbdb7`; service inspection reported
   1,922 points, vector size 1,024, cosine distance and green status.
 - PostgreSQL test database:
-  `specpilot_w4_r8_migration014_final_20260814`, newly created for this command and dropped
+  `specpilot_w4_r9_attempt_lineage_20260814`, newly created for this command and dropped
   after it completed. It was never a shared or hand-migrated database.
 
 The test worktree needed the local restricted RFC fixture for two pre-existing
@@ -73,8 +78,8 @@ user-owned source files; a symlink was rejected by the intentional
 PYTHONPATH="$PWD:$PWD/src" SPECPILOT_PYTHON=.venv/bin/python make check
 # ruff: all checks passed
 # mypy: Success: no issues found in 105 source files
-# unit: 1534 passed in 4.40s
-# CLI: 181 passed in 1.68s
+# unit: 1534 passed in 4.55s
+# CLI: 181 passed in 1.61s
 ```
 
 ```bash
@@ -91,15 +96,15 @@ PGPASSWORD='specpilot-w4-test-only' psql -h 127.0.0.1 -p 55432 \
 # PostgreSQL 17.10 on aarch64-unknown-linux-musl
 
 PGPASSWORD='specpilot-w4-test-only' createdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_r8_migration014_final_20260814
-SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_r8_migration014_final_20260814' \
+  -U specpilot specpilot_w4_r9_attempt_lineage_20260814
+SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_r9_attempt_lineage_20260814' \
 SPECPILOT_TEST_QDRANT_URL='http://127.0.0.1:6334' \
 PYTHONPATH="$PWD:$PWD/src" \
   .venv/bin/python -m pytest --import-mode=importlib -q -rs
 # unified execution session exit code: 0
-# 1996 passed in 31.16s; 0 skipped
+# 1998 passed in 31.92s; 0 skipped
 PGPASSWORD='specpilot-w4-test-only' dropdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_r8_migration014_final_20260814
+  -U specpilot specpilot_w4_r9_attempt_lineage_20260814
 ```
 
 `--import-mode=importlib` is required for the whole tree because the existing
@@ -126,7 +131,9 @@ and active state is retained. There is no automatic cleanup daemon.
 
 Resume is client/owner assisted: the same question must hash to the stored
 query hash, and root, bindings, reservation state and a new lease must all
-validate. It keeps the same egress budget. Reconstructible local stages are
+validate. The persisted checkpoint attempt must match the locked maximum
+attempt-ledger row before a fresh acquisition; any disagreement fails closed
+without new durable records. It keeps the same egress budget. Reconstructible local stages are
 rebuilt without a provider resend; a lost provider result advances its explicit
 generation and creates another charged transmission under the original caps.
 

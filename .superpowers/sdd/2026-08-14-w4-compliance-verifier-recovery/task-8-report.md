@@ -91,6 +91,12 @@ diagnostic database remain running for review.
 - Fresh database `specpilot_w4_r8_migration014_final_20260814`, isolated Qdrant
   and `FakeProvider` only: `1996 passed in 31.16s`, 0 skipped, process exit 0. The
   database was dropped after the result.
+- Fresh database `specpilot_w4_r9_attempt_lineage_20260814`, isolated Qdrant
+  and `FakeProvider` only: `1998 passed in 31.92s`, 0 skipped, process exit 0.
+  Attempt 99 cannot create a first checkpoint, and a persisted checkpoint / max
+  ledger-attempt mismatch returns `checkpoint_invalid` with zero durable
+  mutation; valid attempt 1 → 2 and same-key replay still pass. The database was
+  dropped after the result.
 - `git diff --check` and the committed range check from
   `1017c1668da7e6cb9a83dd6107be6a84b052f566` both completed without output.
 

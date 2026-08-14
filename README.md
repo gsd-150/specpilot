@@ -243,7 +243,11 @@ an automatic background cleanup job.
 After a lease-expired L2 run, its owner may call `POST /runs/{run_id}/resume`
 with the same question and an idempotency `resume_key`. Resume verifies owner,
 question hash, frozen root/bindings, checkpoint, reservation terminal states and
-the new lease before queue delivery. It preserves the original root and budgets;
+the new lease before queue delivery. Before any new attempt is acquired, the
+checkpoint attempt must equal the locked maximum attempt-ledger row; active
+same-key replay requires that row to be open, while an interrupted resume
+requires the matching closed terminal lineage. The first checkpoint write is
+always `planned` attempt 1. It preserves the original root and budgets;
 locally reconstructible work is not repeated. A provider result lost across a
 process boundary is sent under the next explicit reconstruction generation and
 is charged as another transmitted attempt under the unchanged caps. The resume
