@@ -12,15 +12,16 @@ model/provider.
   transmitted and unique disclosure ledgers increase by the exact disclosures
   introduced by the new reservations.
 - `L2Outcome` carries ordinary evidence-tool summaries and per-claim
-  deterministic results. The worker projects these through the existing closed
-  `tool_finished` and `verifier_summary` contracts, preserving the execution
-  order around recovery and semantic receipts without persisting query, claim,
-  excerpt or rationale prose. No trace migration was needed.
+  deterministic results. A worker-injected real-time audit sink projects these
+  through the existing closed `tool_finished` and `verifier_summary` contracts
+  before later outward work, without persisting query, claim, excerpt or
+  rationale prose. No trace migration was needed.
 - PostgreSQL compaction retains sanitized final metadata while clearing active
   reconstruction detail. TTL deletion excludes completed checkpoints and runs
   that remain queued/running, and removes only inactive eligible state.
-- The README now applies all zero-padded migration files in repository order
-  instead of naming nonexistent 007/008 files.
+- The README now applies exactly the real migrations 006--012 in repository
+  order instead of naming nonexistent 007/008 files, replaying 001--005, or
+  silently including future migrations.
 
 ## RED/GREEN evidence
 
@@ -45,16 +46,28 @@ model/provider.
   17 passed in 11.82s
   ```
 
+Round-2 trace durability remediation:
+
+- Fresh database `specpilot_w4_r2_red1`: the process-loss E2E exposed duplicate
+  checkpoint summaries and missing pre-crash audit facts.
+- Fresh database `specpilot_w4_r2_green2`: real-time audit and checkpoint
+  version uniqueness passed.
+- Fresh database `specpilot_w4_r2_reconcile1`: the test removed one sealed
+  Verifier egress trace, and client resume rebuilt it from the checkpoint-bound
+  ledger without duplicates.
+- Fresh database `specpilot_w4_r2_aggregate2`: 39 focused L2/checkpoint cases
+  passed in 10.95s.
+
 Every database above was newly created for its test command and deleted after
 the result. The isolated PostgreSQL and Qdrant services and the separate
 diagnostic database remain running for review.
 
 ## Final verification
 
-- `PYTHONPATH=src make check` → ruff/mypy clean, 1,523 unit passed, 181 CLI
+- `PYTHONPATH=src make check` → ruff/mypy clean, 1,524 unit passed, 181 CLI
   passed.
-- Fresh database `specpilot_w4_review_final2_20260814`, isolated Qdrant and
-  `FakeProvider` only: `1980 passed in 34.13s`, 0 skipped, process exit 0. The
+- Fresh database `specpilot_w4_r2_final_20260814`, isolated Qdrant and
+  `FakeProvider` only: `1981 passed in 31.33s`, 0 skipped, process exit 0. The
   database was dropped after the result.
 - `git diff --check` and the committed range check from
   `1017c1668da7e6cb9a83dd6107be6a84b052f566` both completed without output.

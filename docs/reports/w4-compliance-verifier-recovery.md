@@ -1,7 +1,7 @@
 # W4 Compliance, Verifier, and recovery engineering evidence
 
 Date: 2026-08-14
-Code tested: `e93be8f27d97b0ecfb05975fde97d97351b70488`
+Code tested: `8cf14b457d8c8daecc808f02926bdfafced27bf9`
 Scope: fixture-only engineering and service integration evidence; this is not a
 quality, calibration, or release-evaluation report.
 
@@ -17,6 +17,10 @@ quality, calibration, or release-evaluation report.
 - Sanitized tool and deterministic-verifier trace summaries, in execution
   order, with bounded opaque evidence IDs and no query, claim, excerpt or
   rationale prose.
+- Real-time, lease-fenced audit batches: every provider reservation has exactly
+  one egress trace, checkpoint versions are emitted only by the atomic
+  checkpoint writer, and client resume reconciles a missing historical egress
+  row from the checkpoint-bound ledger receipt without duplicating summaries.
 - Owner-assisted process loss at every nonterminal checkpoint stage (`planned`,
   `evidence_collected`, `candidate_built`, `deterministic_verified`,
   `recovery_completed`, and `semantic_verified`), including repeated client
@@ -46,7 +50,7 @@ accuracy, recall, calibration, latency, or production quality.
   `specpilot_ff4841e2d846388014efa06870fbbdb7`; service inspection reported
   1,922 points, vector size 1,024, cosine distance and green status.
 - PostgreSQL test database:
-  `specpilot_w4_review_final2_20260814`, newly created for this command and dropped
+  `specpilot_w4_r2_final_20260814`, newly created for this command and dropped
   after it completed. It was never a shared or hand-migrated database.
 
 The test worktree needed the local restricted RFC fixture for two pre-existing
@@ -60,8 +64,8 @@ user-owned source files; a symlink was rejected by the intentional
 PYTHONPATH=src make check
 # ruff: all checks passed
 # mypy: Success: no issues found in 105 source files
-# unit: 1523 passed in 3.86s
-# CLI: 181 passed in 1.39s
+# unit: 1524 passed in 3.96s
+# CLI: 181 passed in 1.42s
 ```
 
 ```bash
@@ -78,16 +82,16 @@ PGPASSWORD='specpilot-w4-test-only' psql -h 127.0.0.1 -p 55432 \
 # PostgreSQL 17.10 on aarch64-unknown-linux-musl
 
 PGPASSWORD='specpilot-w4-test-only' createdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_review_final2_20260814
-SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_review_final2_20260814' \
+  -U specpilot specpilot_w4_r2_final_20260814
+SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_r2_final_20260814' \
 SPECPILOT_TEST_QDRANT_URL='http://127.0.0.1:6334' \
 PYTHONPATH=src .venv/bin/python -m pytest --import-mode=importlib -q -rs \
-  > /tmp/specpilot-w4-final2.log 2>&1
+  > /tmp/specpilot-w4-r2-final.log 2>&1
 # unified execution session exit code: 0
-tail -30 /tmp/specpilot-w4-final2.log
-# 1980 passed in 34.13s; 0 skipped
+tail -30 /tmp/specpilot-w4-r2-final.log
+# 1981 passed in 31.33s; 0 skipped
 PGPASSWORD='specpilot-w4-test-only' dropdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_review_final2_20260814
+  -U specpilot specpilot_w4_r2_final_20260814
 ```
 
 `--import-mode=importlib` is required for the whole tree because the existing

@@ -181,12 +181,19 @@ recovered candidate goes through the complete deterministic and semantic gates
 again. Semantic support remains a model judgement, not a quality metric.
 
 W4 requires migrations 006--012 in filename order, in addition to the earlier
-operator-applied migrations. Applying the repository's zero-padded migration
-glob keeps that order and also includes future migrations. Startup still never
-applies migrations:
+operator-applied migrations. The explicit list neither reapplies 001--005 nor
+silently expands to a future migration. Startup still never applies migrations:
 
 ```bash
-for migration in migrations/[0-9][0-9][0-9]_*.sql; do
+for migration in \
+  migrations/006_w4_checkpoint_resume.sql \
+  migrations/007_w4_checkpoint_generation_history.sql \
+  migrations/008_w4_checkpoint_candidate_cursor.sql \
+  migrations/009_w4_checkpoint_evidence_validator.sql \
+  migrations/010_w4_checkpoint_generation_validator.sql \
+  migrations/011_w4_checkpoint_results_validator.sql \
+  migrations/012_w4_checkpoint_verifier_claim_scope.sql
+do
   psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f "$migration"
 done
 ```
