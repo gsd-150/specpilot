@@ -680,3 +680,48 @@ def test_the_l2_review_sheet_carries_the_verdict_the_judgement_needs(
     assert "expected verdict violating" in captured.out
     assert "l2-dev-001-c1" in captured.out
     assert last_json(captured.out)["status"] == "sealed"
+
+
+def test_a_typo_re_asks_the_same_item_instead_of_ending_the_pass(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reviewer partway through a run should not pay for a keystroke.
+
+    Adjudicated items always survived and re-running always resumed, but the
+    restart cost is paid at exactly the point the reviewer is deepest in.
+    """
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+
+    # A stray character, a letter past this item's candidates, then a real
+    # answer for each of the two items.
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO("\\\nZ\ncomplete\ncomplete\n")
+    )
+    code = main(review_args(pooling_workspace, str(registered["run_id"])))
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    result = last_json(captured.out)
+    assert result["status"] == "sealed"
+    assert result["adjudicated_items"] == 2
+    assert captured.out.count("not a choice for this item") == 2
+
+
+def test_end_of_input_still_pauses_rather_than_looping(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What stops the re-ask loop: exhausted input is a pause, not a bad line."""
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("nonsense\n"))
+    code = main(review_args(pooling_workspace, str(registered["run_id"])))
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    assert last_json(captured.out)["status"] == "paused"

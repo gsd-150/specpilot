@@ -2203,8 +2203,10 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
                     return _refuse("pooling_candidate_hash_mismatch")
             _print_pool_sheet(current, item.candidates, unit_texts)
             started = time.monotonic()
-            chosen = _pool_choice(len(item.candidates))
-            if isinstance(chosen, str):
+            while True:
+                chosen = _pool_choice(len(item.candidates))
+                if not isinstance(chosen, str):
+                    break
                 if chosen == "pooling_review_paused":
                     return _emit(
                         {
@@ -2213,7 +2215,19 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
                             "adjudicated_items": len(applications),
                         }
                     )
-                return _refuse(chosen)
+                if chosen != "invalid_choice":
+                    return _refuse(chosen)
+                # An unreadable line used to end the pass. Adjudicated items
+                # survived and re-running resumed, but a reviewer partway
+                # through forty items paid for one keystroke with a restart —
+                # and this pass has already cost one. Re-ask instead. The loop
+                # terminates because end of input is `pooling_review_paused`,
+                # not another invalid line.
+                print(
+                    f"  not a choice for this item. Type \"complete\", "
+                    f'"blocked", or letters A-{_LETTERS[len(item.candidates) - 1]} '
+                    f"separated by commas."
+                )
             outcome, indexes = chosen
             existing = PoolingDecision(
                 run_id=cast(str, run.run_id),
