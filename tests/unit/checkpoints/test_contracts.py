@@ -142,6 +142,39 @@ def test_recovery_reservation_requires_one_opaque_claim_id_only_while_reserved(
         _checkpoint(recovery_claim_id="a" * 64)
 
 
+def test_reserved_recovery_claim_id_is_immutable_until_legal_exit() -> None:
+    from specpilot.checkpoints.contracts import validate_transition
+
+    previous = _checkpoint(
+        stage="recovery_reserved",
+        recovery_attempted=True,
+        recovery_claim_id="a" * 64,
+    )
+    same_claim = previous.model_copy(update={"checkpoint_version": 2})
+    assert validate_transition(previous, same_claim) is None
+
+    replaced = previous.model_copy(
+        update={"checkpoint_version": 2, "recovery_claim_id": "b" * 64}
+    )
+    with pytest.raises(ValueError, match="immutable"):
+        validate_transition(previous, replaced)
+
+    exited = previous.model_copy(
+        update={
+            "checkpoint_version": 2,
+            "stage": "recovery_completed",
+            "recovery_claim_id": None,
+        }
+    )
+    assert validate_transition(previous, exited) is None
+
+    leaked = previous.model_copy(
+        update={"checkpoint_version": 2, "stage": "recovery_completed"}
+    )
+    with pytest.raises(ValueError, match="clears"):
+        validate_transition(previous, leaked)
+
+
 def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:
     with pytest.raises(ValidationError, match="tool_attempts_used"):
         _checkpoint(tool_attempts_used=9)

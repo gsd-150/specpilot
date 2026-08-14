@@ -777,3 +777,158 @@ def test_migration_is_upgrade_safe_after_001_through_004(ledger_dsn: str) -> Non
             connection.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
             )
+
+
+def _apply_migrations_through_013(connection: object) -> None:
+    from tests.conftest import MIGRATIONS_DIR
+
+    for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if migration.name > "013_w4_recovery_reservation.sql":
+            continue
+        connection.execute(migration.read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+
+
+def _insert_legacy_l2_checkpoint(
+    connection: object, *, stage: str
+) -> tuple[uuid.UUID, dict[str, object]]:
+    run_id = _insert_run(connection)
+    hashes = {
+        "query_hash": "f" * 64,
+        "source_manifest_id": "c" * 64,
+        "corpus_manifest_id": "b" * 64,
+        "policy_hash": "a" * 64,
+        "configuration_hash": "d" * 64,
+        "compliance_prompt_hash": "1" * 64,
+        "verifier_prompt_hash": "2" * 64,
+    }
+    connection.execute(  # type: ignore[attr-defined]
+        "UPDATE specpilot_run SET task_level = 'L2', evaluation_root_id = 'root-1', "
+        "compliance_prompt_hash = %s, verifier_prompt_hash = %s WHERE run_id = %s",
+        (hashes["compliance_prompt_hash"], hashes["verifier_prompt_hash"], run_id),
+    )
+    payload: dict[str, object] = {
+        "schema_version": "run-checkpoint/v1",
+        "run_id": str(run_id),
+        "attempt": 1,
+        "checkpoint_version": 1,
+        "stage": stage,
+        "task_level": "L2",
+        **hashes,
+        "evaluation_root_id": "root-1",
+        "provider_id": "provider-a",
+        "model_id": "model-a",
+        "plan_id": None,
+        "plan_hash": None,
+        "evidence": [],
+        "tool_attempts_used": 0,
+        "reservation_ids": [],
+        "reconstruction_generations": [],
+        "recovery_attempted": stage == "recovery_reserved",
+        "recovery_reason": (
+            "exception_missing" if stage == "recovery_reserved" else None
+        ),
+        "candidate_count": 0,
+        "completed_claim_ids": [],
+        "completed_results": [],
+        "last_accessed_at": "2026-08-14T00:00:00+00:00",
+    }
+    connection.execute(  # type: ignore[attr-defined]
+        "INSERT INTO specpilot_run_checkpoint "
+        "(run_id, checkpoint_version, stage, payload, last_accessed_at) "
+        "VALUES (%s, 1, %s, %s::jsonb, %s::timestamptz)",
+        (run_id, stage, json.dumps(payload), payload["last_accessed_at"]),
+    )
+    return run_id, payload
+
+
+def test_migration_014_backfills_legacy_nonreserved_checkpoint(ledger_dsn: str) -> None:
+    import psycopg
+    from psycopg import sql
+
+    from tests.conftest import MIGRATIONS_DIR
+
+    schema = f"test_w4_014_backfill_{uuid.uuid4().hex}"
+    with psycopg.connect(ledger_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        try:
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+            )
+            _apply_migrations_through_013(connection)
+            run_id, _ = _insert_legacy_l2_checkpoint(connection, stage="planned")
+
+            connection.execute(
+                (MIGRATIONS_DIR / "014_w4_recovery_claim_binding.sql").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            assert connection.execute(
+                "SELECT payload -> 'recovery_claim_id', "
+                "specpilot_valid_checkpoint(payload) "
+                "FROM specpilot_run_checkpoint WHERE run_id = %s",
+                (run_id,),
+            ).fetchone() == (None, True)
+        finally:
+            connection.execute("RESET search_path")
+            connection.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+
+def test_migration_014_refuses_legacy_reserved_checkpoint_without_mutation(
+    ledger_dsn: str,
+) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.errors import RaiseException
+
+    from tests.conftest import MIGRATIONS_DIR
+
+    schema = f"test_w4_014_reserved_{uuid.uuid4().hex}"
+    with psycopg.connect(ledger_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        try:
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+            )
+            _apply_migrations_through_013(connection)
+            run_id, _ = _insert_legacy_l2_checkpoint(
+                connection, stage="recovery_reserved"
+            )
+            payload_before = connection.execute(
+                "SELECT payload::text FROM specpilot_run_checkpoint WHERE run_id = %s",
+                (run_id,),
+            ).fetchone()
+            constraint_before = _constraint_definition(
+                connection,
+                "specpilot_run_checkpoint",
+                "specpilot_run_checkpoint_payload_check",
+            )
+
+            with pytest.raises(RaiseException, match="W4_014_RECOVERY_RESERVED"):
+                connection.execute(
+                    (MIGRATIONS_DIR / "014_w4_recovery_claim_binding.sql").read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+            assert connection.execute(
+                "SELECT payload::text FROM specpilot_run_checkpoint WHERE run_id = %s",
+                (run_id,),
+            ).fetchone() == payload_before
+            assert _constraint_definition(
+                connection,
+                "specpilot_run_checkpoint",
+                "specpilot_run_checkpoint_payload_check",
+            ) == constraint_before
+            assert connection.execute(
+                "SELECT specpilot_valid_checkpoint(payload) "
+                "FROM specpilot_run_checkpoint WHERE run_id = %s",
+                (run_id,),
+            ).fetchone() == (True,)
+        finally:
+            connection.execute("RESET search_path")
+            connection.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )

@@ -258,6 +258,12 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
         raise ValueError("candidate cursor is monotonic")
     if not set(previous.completed_claim_ids).issubset(current.completed_claim_ids):
         raise ValueError("completed claim IDs are monotonic")
+    if previous.stage is CheckpointStage.RECOVERY_RESERVED:
+        if current.stage is CheckpointStage.RECOVERY_RESERVED:
+            if current.recovery_claim_id != previous.recovery_claim_id:
+                raise ValueError("reserved recovery claim ID is immutable")
+        elif current.recovery_claim_id is not None:
+            raise ValueError("recovery claim ID clears when reservation exits")
     if (
         current.stage
         in {CheckpointStage.RECOVERY_RESERVED, CheckpointStage.RECOVERY_COMPLETED}

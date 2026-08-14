@@ -1,6 +1,25 @@
 -- A reserved recovery action is bound to one opaque claim identity.  The
 -- field exists only in that pre-MCP crash window; no claim prose is retained.
 
+-- Version 013 did not retain the claim that owns a reserved recovery action.
+-- It cannot be inferred safely, so reject this upgrade before dropping any
+-- constraint or changing even a non-reserved checkpoint payload. Operators
+-- must resume or resolve those runs under 013 first; inventing an owner would
+-- let a later reconstructed batch attach a lost MCP result to the wrong claim.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM specpilot_run_checkpoint
+        WHERE stage = 'recovery_reserved'
+           OR payload ->> 'stage' = 'recovery_reserved'
+    ) THEN
+        RAISE EXCEPTION
+            'W4_014_RECOVERY_RESERVED_DRAIN_REQUIRED: resolve recovery_reserved checkpoints before migration 014';
+    END IF;
+END;
+$$;
+
 BEGIN;
 
 ALTER TABLE specpilot_run_checkpoint
