@@ -34,8 +34,8 @@ v5 把上述承诺收紧为可执行契约：所有 provider 调用统一经过�
 > full-service 证据：**1998 passed, 0 skipped**。
 >
 > 后一项仅是 fixture-only 的工程与服务集成证据，不代表真实 provider 验收、质量、
-> 校准、延迟、L2 开发集指标、locked evaluation 或发布结果。历史上“输错 pooling
-> choice 会结束本轮”的限制已失效：现在会重新提示，**does not end the pass**。SSE/
+> 校准、延迟、L2 开发集指标、locked evaluation 或发布结果。历史上的 pooling typo
+> 限制已失效：现在会重新提示，**does not end the pass**。SSE/
 > reconnect、四场景 demo/profile matrix、evaluation `run_spec` 与第一次 locked
 > evaluation 仍是 W5/W6 工作。
 
