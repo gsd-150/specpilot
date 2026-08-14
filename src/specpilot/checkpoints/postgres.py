@@ -403,14 +403,20 @@ class PostgresCheckpointStore:
                 run = await self._lock_run(connection, run_id)
                 if run is None:
                     return False
-                acquired = await (
-                    await connection.execute(
-                        "SELECT attempt FROM specpilot_run_attempt WHERE run_id = %s "
-                        "AND attempt = %s FOR UPDATE",
-                        (run_id, attempt),
-                    )
-                ).fetchone()
-                if acquired is None:
+                if (
+                    run["status"] != RunStatus.RUNNING.value
+                    or run["lease_owner"] != lease_owner
+                ):
+                    return False
+                closed = await connection.execute(
+                    "UPDATE specpilot_run_attempt SET ended_at = %s, "
+                    "end_reason = 'queue_delivery_failed' WHERE run_id = %s "
+                    "AND attempt = %s AND ended_at IS NULL AND attempt = "
+                    "(SELECT (payload ->> 'attempt')::integer "
+                    "FROM specpilot_run_checkpoint WHERE run_id = %s)",
+                    (now, run_id, attempt, run_id),
+                )
+                if closed.rowcount != 1:
                     return False
                 updated = await connection.execute(
                     "UPDATE specpilot_run SET status = 'interrupted', "
@@ -421,7 +427,7 @@ class PostgresCheckpointStore:
                     (now, run_id, lease_owner),
                 )
                 if updated.rowcount != 1:
-                    return False
+                    raise RunStoreIntegrityError()
                 sequence = await self._next_sequence(connection, run_id)
                 transition = StateTransitionEvent(
                     sequence=sequence,
@@ -526,7 +532,7 @@ class PostgresCheckpointStore:
                 "source_manifest_id, "
                 "corpus_manifest_id, policy_hash, configuration_hash, provider_id, "
                 "model_id, query_hash, terminal_reason, compliance_prompt_hash, "
-                "verifier_prompt_hash, status "
+                "verifier_prompt_hash, status, lease_owner "
                 "FROM specpilot_run WHERE run_id = %s "
                 "FOR UPDATE",
                 (run_id,),

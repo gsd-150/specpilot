@@ -182,6 +182,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
     semantic_outcomes: list[tuple[str, SemanticOutcome]] = []
     recovery_outcomes: list[RecoveryOutcome] = []
     evidence_calls: tuple[object, ...] = ()
+    plan: ToolPlan | None = None
     if checkpoint is not None and checkpoint.stage is CheckpointStage.COMPLETED:
         return L2Outcome(
             checkpoint.completed_results,
@@ -270,12 +271,8 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 recovered=recovered,
             )
             plan = planning.plan
-        else:
-            if (
-                checkpoint.plan_id is None
-                or checkpoint.plan_hash is None
-                or context.plan_restorer is None
-            ):
+        if checkpoint is None or checkpoint.stage is CheckpointStage.PLANNED:
+            if plan is None:
                 return _fault(
                     "checkpoint_plan_unavailable",
                     attempts,
@@ -283,27 +280,6 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                     recovered,
                     written,
                 )
-            restored_plan = context.plan_restorer(
-                checkpoint.plan_id, checkpoint.plan_hash
-            )
-            if restored_plan is None:
-                return _fault(
-                    "checkpoint_plan_binding_mismatch",
-                    attempts,
-                    reservations,
-                    recovered,
-                    written,
-                )
-            if _plan_hash(restored_plan) != checkpoint.plan_hash:
-                return _fault(
-                    "checkpoint_plan_binding_mismatch",
-                    attempts,
-                    reservations,
-                    recovered,
-                    written,
-                )
-            plan = restored_plan
-        if checkpoint is None or checkpoint.stage is CheckpointStage.PLANNED:
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             collected = await context.evidence_agent.collect(

@@ -536,6 +536,26 @@ async def test_resume_each_legal_stage_uses_only_validated_local_restorers(
     assert made.planner.calls == 0
 
 
+async def test_resume_after_evidence_does_not_require_durable_plan_prose() -> None:
+    item = evidence()
+    seed = checkpoint("evidence_collected", items=(item,))
+    writer = StatefulWriter(current=seed, writes=seed.checkpoint_version)
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True])),
+        checkpoint=seed,
+        checkpoint_writer=writer,
+        evidence_restorer=lambda refs: (item,),
+        plan_restorer=None,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault != "checkpoint_plan_unavailable"
+    assert outcome.results[0].verification_status.value == "verified"
+    assert made.planner.calls == 0
+
+
 async def test_completed_checkpoint_fast_path_needs_no_restorer_or_provider() -> None:
     item = evidence()
     result = ComplianceResult(

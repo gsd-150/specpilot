@@ -165,3 +165,66 @@ async def test_resume_denials_do_not_mutate_interrupted_run(clean_ledger: str) -
     view = await runs.read_owned(created.run_id, created.session_id)
     assert view is not None
     assert view.status is RunStatus.INTERRUPTED
+
+
+@pytest.mark.anyio
+async def test_failed_resume_delivery_closes_only_the_acquired_attempt(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    from specpilot.checkpoints.contracts import CheckpointStage
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+    from specpilot.runs.contracts import ResumeDisposition
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runs = PostgresRunStore(clean_ledger, clock=clock)
+    created = await runs.create(_l2_run(clock))
+    clock.advance(seconds=31)
+    assert await runs.reconcile_expired(clock()) == 1
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+    await store.write(
+        None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
+    )
+    acquired = await store.begin_resume(
+        created.run_id,
+        created.session_id,
+        created.query_hash,
+        "resume-delivery-key",
+        lease_owner="resume-worker",
+        lease_seconds=30,
+    )
+    assert acquired.disposition is ResumeDisposition.ACQUIRED
+    assert acquired.attempt == 2
+
+    assert await store.fail_resume_delivery(
+        created.run_id, 2, lease_owner="resume-worker"
+    )
+    assert not await store.fail_resume_delivery(
+        created.run_id, 2, lease_owner="resume-worker"
+    )
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        attempts = await (
+            await connection.execute(
+                "SELECT attempt, ended_at, end_reason FROM specpilot_run_attempt "
+                "WHERE run_id = %s ORDER BY attempt",
+                (created.run_id,),
+            )
+        ).fetchall()
+    assert [(row[0], row[2]) for row in attempts] == [
+        (1, "lease_expired"),
+        (2, "queue_delivery_failed"),
+    ]
+    assert all(row[1] is not None for row in attempts)
+
+    replay = await store.begin_resume(
+        created.run_id,
+        created.session_id,
+        created.query_hash,
+        "resume-delivery-key",
+        lease_owner="other-worker",
+        lease_seconds=30,
+    )
+    assert replay.disposition is ResumeDisposition.REPLAY
+    assert replay.attempt == 2
