@@ -18,6 +18,7 @@ from specpilot.contracts.egress import EgressStage
 from specpilot.runs.contracts import (
     EgressSummaryEvent,
     RunEvent,
+    RunEventPage,
     RunRecord,
     RunStatus,
     RunView,
@@ -162,6 +163,69 @@ class PostgresRunStore:
                 started_at=record.started_at,
                 completed_at=record.completed_at,
                 events=events,
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise RunStoreIntegrityError() from None
+
+    async def read_events_owned(
+        self,
+        run_id: UUID,
+        session_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> RunEventPage | None:
+        """Read one owner-authorized page from a single durable snapshot."""
+        validated_run_id = _validated_uuid(run_id)
+        validated_session_id = _validated_identifier(session_id)
+        validated_after = _validated_cursor(after_sequence)
+        validated_limit = _validated_page_limit(limit)
+        connection = await self._connect()
+        try:
+            await connection.set_isolation_level(IsolationLevel.REPEATABLE_READ)
+            async with connection, connection.transaction():
+                run_row = await (
+                    await connection.execute(
+                        "SELECT status, (SELECT COALESCE(MAX(sequence), 0) "
+                        "FROM specpilot_run_event WHERE run_id = owned.run_id) "
+                        "AS max_sequence FROM specpilot_run AS owned "
+                        "WHERE run_id = %s AND session_id = %s",
+                        (validated_run_id, validated_session_id),
+                    )
+                ).fetchone()
+                if run_row is None:
+                    return None
+                max_sequence = run_row["max_sequence"]
+                if not isinstance(max_sequence, int):
+                    raise RunStoreIntegrityError()
+                if validated_after > max_sequence:
+                    raise RunStoreValidationError()
+                event_rows = await (
+                    await connection.execute(
+                        "SELECT sequence, kind, payload FROM specpilot_run_event "
+                        "WHERE run_id = %s AND sequence > %s ORDER BY sequence "
+                        "LIMIT %s",
+                        (validated_run_id, validated_after, validated_limit),
+                    )
+                ).fetchall()
+        except (RunStoreIntegrityError, RunStoreValidationError):
+            raise
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+
+        try:
+            status = RunStatus(run_row["status"])
+            events = tuple(_event_from_row(event_row) for event_row in event_rows)
+            last_sequence = events[-1].sequence if events else validated_after
+            terminal = (
+                bool(events)
+                and status not in {RunStatus.QUEUED, RunStatus.RUNNING}
+                and last_sequence == max_sequence
+            )
+            return RunEventPage(
+                events=events,
+                terminal=terminal,
+                last_sequence=last_sequence,
             )
         except (TypeError, ValueError, ValidationError):
             raise RunStoreIntegrityError() from None
@@ -585,6 +649,22 @@ def _lease_expiry(now: datetime, lease_seconds: int) -> datetime:
 
 def _validated_lease_seconds(value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise RunStoreValidationError()
+    return value
+
+
+def _validated_cursor(value: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= 10_000
+    ):
+        raise RunStoreValidationError()
+    return value
+
+
+def _validated_page_limit(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 256:
         raise RunStoreValidationError()
     return value
 

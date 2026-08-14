@@ -10,7 +10,7 @@ from uuid import UUID
 from specpilot.api.contracts import ChatRequest
 from specpilot.checkpoints.contracts import CheckpointBinding, RunCheckpoint
 from specpilot.checkpoints.postgres import CheckpointResumeResult
-from specpilot.runs.contracts import RunRecord, RunView, TerminalEvent
+from specpilot.runs.contracts import RunEventPage, RunRecord, RunView, TerminalEvent
 from specpilot.runtime import RunJob
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
 
@@ -19,6 +19,15 @@ class ApiRunStore(Protocol):
     async def create(self, run: RunRecord) -> RunRecord: ...
 
     async def read_owned(self, run_id: UUID, session_id: str) -> RunView | None: ...
+
+    async def read_events_owned(
+        self,
+        run_id: UUID,
+        session_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> RunEventPage | None: ...
 
     async def fail_delivery(self, run_id: UUID, event: TerminalEvent) -> bool: ...
 

@@ -285,6 +285,263 @@ async def test_create_assigns_queue_lease_and_owner_read_hides_foreign_run(
 
 
 @pytest.mark.anyio
+async def test_owner_event_read_pages_from_zero_and_retains_an_empty_cursor(
+    clean_ledger: str,
+) -> None:
+    """Catches inclusive, unbounded, or cursor-resetting incremental reads."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    assert await store.claim(created.run_id, "worker-a", lease_seconds=30)
+    await store.append(
+        created.run_id,
+        "worker-a",
+        PlanSummaryEvent(
+            sequence=1, plan_id="plan-a", step_count=1, max_tool_calls=2
+        ),
+    )
+
+    first = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=0, limit=2
+    )
+    assert first is not None
+    assert [event.sequence for event in first.events] == [1, 2]
+    assert first.last_sequence == 2
+    assert first.terminal is False
+
+    second = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=2, limit=2
+    )
+    assert second is not None
+    assert [event.sequence for event in second.events] == [3]
+    assert second.last_sequence == 3
+    assert second.terminal is False
+
+    empty = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=3, limit=256
+    )
+    assert empty is not None
+    assert empty.events == ()
+    assert empty.last_sequence == 3
+    assert empty.terminal is False
+
+
+@pytest.mark.anyio
+async def test_owner_event_read_marks_only_the_page_with_the_terminal_event(
+    clean_ledger: str,
+) -> None:
+    """Catches closing a partial page or missing the durable terminal marker."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+    assert await store.claim(created.run_id, "worker-a", lease_seconds=30)
+    assert await store.complete(
+        created.run_id,
+        "worker-a",
+        TerminalEvent(
+            sequence=1, status=RunStatus.FAILED, reason="provider_timeout"
+        ),
+    )
+
+    partial = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=0, limit=2
+    )
+    assert partial is not None
+    assert [event.sequence for event in partial.events] == [1, 2]
+    assert partial.terminal is False
+
+    terminal = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=2, limit=1
+    )
+    assert terminal is not None
+    assert len(terminal.events) == 1
+    assert isinstance(terminal.events[0], TerminalEvent)
+    assert terminal.last_sequence == 3
+    assert terminal.terminal is True
+
+
+@pytest.mark.anyio
+async def test_owner_event_read_hides_foreign_and_unknown_runs_equally(
+    clean_ledger: str,
+) -> None:
+    """Catches the incremental boundary becoming an ownership oracle."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await store.create(_new_run(clock))
+
+    foreign = await store.read_events_owned(
+        created.run_id, "owner-b", after_sequence=0, limit=1
+    )
+    unknown = await store.read_events_owned(
+        uuid.uuid4(), "owner-b", after_sequence=0, limit=1
+    )
+
+    assert foreign is unknown is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limit", [0, 257, True])
+async def test_owner_event_read_rejects_out_of_range_or_noninteger_limit(
+    clean_ledger: str, limit: int
+) -> None:
+    """Catches callers bypassing the page-size memory bound."""
+    store = PostgresRunStore(clean_ledger)
+
+    with pytest.raises(RunStoreValidationError, match="^invalid_run_data$"):
+        await store.read_events_owned(
+            uuid.uuid4(), "owner-a", after_sequence=0, limit=limit
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limit", [1, 256])
+async def test_owner_event_read_accepts_limit_boundaries(
+    clean_ledger: str, limit: int
+) -> None:
+    """Catches off-by-one rejection of either documented limit boundary."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock)
+    created = await store.create(_new_run(clock))
+
+    page = await store.read_events_owned(
+        created.run_id, created.session_id, after_sequence=0, limit=limit
+    )
+
+    assert page is not None
+    assert page.events[0].sequence == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("after_sequence", [-1, 10_001, True])
+async def test_owner_event_read_rejects_invalid_cursor(
+    clean_ledger: str, after_sequence: int
+) -> None:
+    """Catches noncanonical cursors entering authorization or SQL."""
+    store = PostgresRunStore(clean_ledger)
+
+    with pytest.raises(RunStoreValidationError, match="^invalid_run_data$"):
+        await store.read_events_owned(
+            uuid.uuid4(), "owner-a", after_sequence=after_sequence, limit=1
+        )
+
+
+@pytest.mark.anyio
+async def test_owner_event_read_refuses_a_future_cursor(clean_ledger: str) -> None:
+    """Catches silently accepting a cursor not belonging to the requested run."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock)
+    created = await store.create(_new_run(clock))
+
+    with pytest.raises(RunStoreValidationError, match="^invalid_run_data$"):
+        await store.read_events_owned(
+            created.run_id, created.session_id, after_sequence=2, limit=1
+        )
+
+
+@pytest.mark.anyio
+async def test_owner_event_read_uses_one_repeatable_snapshot(
+    clean_ledger: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches combining an authorized cursor boundary with later events."""
+    import psycopg
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    seed = PostgresRunStore(clean_ledger, clock=clock, queue_lease_seconds=5)
+    created = await seed.create(_new_run(clock))
+    read_name = f"event-page-snapshot-{uuid.uuid4().hex}"
+    reader = PostgresRunStore(_named_dsn(clean_ledger, read_name), clock=clock)
+    header_read = asyncio.Event()
+    resume = asyncio.Event()
+    original_execute = psycopg.AsyncConnection.execute
+
+    async def paused_execute(
+        connection: psycopg.AsyncConnection[Any],
+        query: Any,
+        params: Any = None,
+        *,
+        prepare: bool | None = None,
+        binary: bool = False,
+    ) -> Any:
+        cursor = await original_execute(
+            connection, query, params, prepare=prepare, binary=binary
+        )
+        if (
+            "AS max_sequence" in str(query)
+            and connection.info.parameter_status("application_name") == read_name
+        ):
+            header_read.set()
+            await resume.wait()
+        return cursor
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", paused_execute)
+    read_task = asyncio.create_task(
+        reader.read_events_owned(
+            created.run_id, created.session_id, after_sequence=0, limit=256
+        )
+    )
+    try:
+        await asyncio.wait_for(header_read.wait(), timeout=2)
+        assert await seed.claim(created.run_id, "worker-a", lease_seconds=30)
+    finally:
+        resume.set()
+
+    page = await read_task
+    assert page is not None
+    assert [event.sequence for event in page.events] == [1]
+    assert page.last_sequence == 1
+
+
+@pytest.mark.anyio
+async def test_owner_event_read_refuses_corrupted_rows_without_raw_json(
+    clean_ledger: str,
+) -> None:
+    """Catches bypassing the closed event decoder on incremental reads."""
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    store = PostgresRunStore(clean_ledger, clock=clock)
+    created = await store.create(_new_run(clock))
+    secret = "incremental-corrupt-json-secret"
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        await connection.execute(
+            "ALTER TABLE specpilot_run_event "
+            "DROP CONSTRAINT specpilot_run_event_payload_check"
+        )
+        await connection.execute(
+            "UPDATE specpilot_run_event SET payload = %s WHERE run_id = %s",
+            (Jsonb({"secret": secret}), created.run_id),
+        )
+        await connection.commit()
+
+    try:
+        with pytest.raises(RunStoreIntegrityError) as corrupted:
+            await store.read_events_owned(
+                created.run_id, created.session_id, after_sequence=0, limit=1
+            )
+        assert str(corrupted.value) == "run_store_integrity"
+        assert secret not in repr(corrupted.value)
+    finally:
+        async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+            await connection.execute(
+                "DELETE FROM specpilot_run_event WHERE run_id = %s", (created.run_id,)
+            )
+            await connection.execute(
+                "ALTER TABLE specpilot_run_event ADD CONSTRAINT "
+                "specpilot_run_event_payload_check CHECK "
+                "(specpilot_valid_run_event(kind, sequence, payload))"
+            )
+            await connection.commit()
+
+
+@pytest.mark.anyio
 async def test_two_claimers_have_exactly_one_winner(clean_ledger: str) -> None:
     """Catches a read-then-write claim race that starts one run twice."""
     await _seed_bindings(clean_ledger)

@@ -367,6 +367,28 @@ RunEvent = Annotated[
 ]
 
 
+class RunEventPage(_FrozenModel):
+    """Bounded incremental projection of the closed durable event union."""
+
+    events: Annotated[tuple[RunEvent, ...], Field(max_length=256)]
+    terminal: bool
+    last_sequence: Annotated[int, Field(strict=True, ge=0, le=10_000)]
+
+    @model_validator(mode="after")
+    def _events_and_cursor_agree(self) -> Self:
+        sequences = tuple(event.sequence for event in self.events)
+        pairs = zip(sequences, sequences[1:], strict=False)
+        if any(current <= previous for previous, current in pairs):
+            raise ValueError("run event sequences must be strictly increasing")
+        if self.events and self.events[-1].sequence != self.last_sequence:
+            raise ValueError("last event sequence must match the page cursor")
+        if self.terminal and (
+            not self.events or not isinstance(self.events[-1], TerminalEvent)
+        ):
+            raise ValueError("a terminal page requires a final terminal event")
+        return self
+
+
 class RunRecord(_FrozenModel):
     """Owner-bound persistence shape; query identity is a hash only."""
 
@@ -555,6 +577,7 @@ __all__ = [
     "PlanSummaryEvent",
     "RunEvent",
     "RunEventKind",
+    "RunEventPage",
     "RunRecord",
     "ResumeDisposition",
     "RunStatus",
