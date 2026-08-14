@@ -180,7 +180,7 @@ directed recovery only. Recovery does not reset the tool or egress budget; every
 recovered candidate goes through the complete deterministic and semantic gates
 again. Semantic support remains a model judgement, not a quality metric.
 
-W4 requires migrations 006--013 in filename order, in addition to the earlier
+W4 requires migrations 006--014 in filename order, in addition to the earlier
 operator-applied migrations. The explicit list neither reapplies 001--005 nor
 silently expands to a future migration. Startup still never applies migrations:
 
@@ -193,11 +193,30 @@ for migration in \
   migrations/010_w4_checkpoint_generation_validator.sql \
   migrations/011_w4_checkpoint_results_validator.sql \
   migrations/012_w4_checkpoint_verifier_claim_scope.sql \
-  migrations/013_w4_recovery_reservation.sql
+  migrations/013_w4_recovery_reservation.sql \
+  migrations/014_w4_recovery_claim_binding.sql
 do
   psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f "$migration"
 done
 ```
+
+Before applying 014, drain the 013-only crash window. Version 013 did not
+retain the opaque claim ID that owns a `recovery_reserved` checkpoint, so an
+operator must not guess one or manually fabricate a binding. Run this preflight
+query and require a count of zero; for each row, resume/resolve the interrupted
+run under 013, then rerun the query:
+
+```sql
+SELECT run_id, checkpoint_version, stage
+FROM specpilot_run_checkpoint
+WHERE stage = 'recovery_reserved'
+   OR payload ->> 'stage' = 'recovery_reserved';
+```
+
+Migration 014 performs the same preflight before any schema mutation and exits
+with `W4_014_RECOVERY_RESERVED_DRAIN_REQUIRED` if rows remain. Non-reserved
+legacy checkpoints are backfilled with a JSON `null` binding; the binding is
+present only during a newly reserved recovery transition.
 
 The durable checkpoint is deliberately reconstruction-only: it holds frozen
 bindings, hashes/opaque evidence IDs, budgets, reservation IDs, stage and

@@ -19,9 +19,15 @@ model/provider.
 - PostgreSQL compaction retains sanitized final metadata while clearing active
   reconstruction detail. TTL deletion excludes completed checkpoints and runs
   that remain queued/running, and removes only inactive eligible state.
-- The README now applies exactly the real migrations 006--013 in repository
+- The README now applies exactly the real migrations 006--014 in repository
   order instead of naming nonexistent 007/008 files, replaying 001--005, or
   silently including future migrations.
+- Migration 014 first refuses any legacy `recovery_reserved` checkpoint before
+  dropping a constraint or changing payload data: version 013 did not retain
+  that action's claim ID and the binding cannot be inferred safely. Once the
+  preflight query is empty, non-reserved legacy checkpoints receive a JSON
+  `null` binding; new same-stage reservation writes cannot replace the bound
+  opaque claim ID.
 
 ## RED/GREEN evidence
 
@@ -80,10 +86,10 @@ diagnostic database remain running for review.
 ## Final verification
 
 - `PYTHONPATH="$PWD:$PWD/src" SPECPILOT_PYTHON=.venv/bin/python make check` →
-  ruff/mypy clean, 1,530 unit passed, 181 CLI
+  ruff/mypy clean, 1,534 unit passed, 181 CLI
   passed.
-- Fresh database `specpilot_w4_r3_final_20260814`, isolated Qdrant and
-  `FakeProvider` only: `1990 passed in 32.58s`, 0 skipped, process exit 0. The
+- Fresh database `specpilot_w4_r8_migration014_final_20260814`, isolated Qdrant
+  and `FakeProvider` only: `1996 passed in 31.16s`, 0 skipped, process exit 0. The
   database was dropped after the result.
 - `git diff --check` and the committed range check from
   `1017c1668da7e6cb9a83dd6107be6a84b052f566` both completed without output.

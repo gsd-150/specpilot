@@ -1,7 +1,7 @@
 # W4 Compliance, Verifier, and recovery engineering evidence
 
 Date: 2026-08-14
-Code tested: `4c116b5c4d1ca6a3ce899180d3da2f937088b7e4`
+Code tested: `d2eed5be149daeb63fd17c65396e581263a30e8a`
 Scope: fixture-only engineering and service integration evidence; this is not a
 quality, calibration, or release-evaluation report.
 
@@ -59,7 +59,7 @@ accuracy, recall, calibration, latency, or production quality.
   `specpilot_ff4841e2d846388014efa06870fbbdb7`; service inspection reported
   1,922 points, vector size 1,024, cosine distance and green status.
 - PostgreSQL test database:
-  `specpilot_w4_r5_recovery_claim_20260814`, newly created for this command and dropped
+  `specpilot_w4_r8_migration014_final_20260814`, newly created for this command and dropped
   after it completed. It was never a shared or hand-migrated database.
 
 The test worktree needed the local restricted RFC fixture for two pre-existing
@@ -73,8 +73,8 @@ user-owned source files; a symlink was rejected by the intentional
 PYTHONPATH="$PWD:$PWD/src" SPECPILOT_PYTHON=.venv/bin/python make check
 # ruff: all checks passed
 # mypy: Success: no issues found in 105 source files
-# unit: 1533 passed in 4.53s
-# CLI: 181 passed in 1.55s
+# unit: 1534 passed in 4.40s
+# CLI: 181 passed in 1.68s
 ```
 
 ```bash
@@ -91,15 +91,15 @@ PGPASSWORD='specpilot-w4-test-only' psql -h 127.0.0.1 -p 55432 \
 # PostgreSQL 17.10 on aarch64-unknown-linux-musl
 
 PGPASSWORD='specpilot-w4-test-only' createdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_r5_recovery_claim_20260814
-SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_r5_recovery_claim_20260814' \
+  -U specpilot specpilot_w4_r8_migration014_final_20260814
+SPECPILOT_TEST_DSN='postgresql://specpilot:specpilot-w4-test-only@127.0.0.1:55432/specpilot_w4_r8_migration014_final_20260814' \
 SPECPILOT_TEST_QDRANT_URL='http://127.0.0.1:6334' \
 PYTHONPATH="$PWD:$PWD/src" \
   .venv/bin/python -m pytest --import-mode=importlib -q -rs
 # unified execution session exit code: 0
-# 1993 passed in 30.52s; 0 skipped
+# 1996 passed in 31.16s; 0 skipped
 PGPASSWORD='specpilot-w4-test-only' dropdb -h 127.0.0.1 -p 55432 \
-  -U specpilot specpilot_w4_r5_recovery_claim_20260814
+  -U specpilot specpilot_w4_r8_migration014_final_20260814
 ```
 
 `--import-mode=importlib` is required for the whole tree because the existing
