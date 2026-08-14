@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID
 
 import httpx
 import psycopg
@@ -17,11 +19,16 @@ from fastapi import FastAPI
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
 
+from specpilot.agents.compliance import ComplianceAgent, ComplianceContext
 from specpilot.agents.evidence import EvidenceAgent
 from specpilot.agents.planner import Planner, PlannerContext
+from specpilot.answer.evidence import Evidence, build_evidence_from_unit
 from specpilot.api.app import create_app
+from specpilot.api.contracts import ChatRequest
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
 from specpilot.api.static import install_trace_routes
+from specpilot.checkpoints.contracts import RunCheckpoint
+from specpilot.checkpoints.postgres import PostgresCheckpointStore
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
@@ -33,9 +40,19 @@ from specpilot.providers.base import _ProviderAdapter
 from specpilot.providers.fake import FakeProvider
 from specpilot.providers.http import MAIN_ROUTE, HttpChatAdapter, resolve_credential
 from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.runs.contracts import RunRecord, RunStatus
 from specpilot.runs.postgres import PostgresRunStore
-from specpilot.runtime import RunJob, RunWorker
+from specpilot.runtime import L2JobFactory, RunJob, RuntimeJobBuilder, RunWorker
+from specpilot.runtime.l2 import L2RunContext
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
+from specpilot.verifier.deterministic import verify_candidate
+from specpilot.verifier.recovery import (
+    RecoveryOutcome,
+    RecoveryRequest,
+    execute_recovery,
+    select_recovery,
+)
+from specpilot.verifier.semantic import SemanticContext, SemanticVerifier
 
 _Identifier = Annotated[
     str,
@@ -266,6 +283,7 @@ def _assemble_runtime(
     mcp_client = StreamableMcpClient(config.mcp_url, http_client=http_client)
     mcp_hook = _McpClientHook(http_client, mcp_client)
     store = PostgresRunStore(config.dsn)
+    checkpoint_store = PostgresCheckpointStore(config.dsn)
     worker = RunWorker(
         store=store,
         planner=Planner(transport),
@@ -294,27 +312,204 @@ def _assemble_runtime(
     )
     corpus_id = mcp_config.corpus_manifest_id
 
-    def build_job(run_id: Any, question: str, request: Any) -> RunJob:
+    def l1_job(run: RunRecord, question: str) -> RunJob:
         return RunJob(
-            run_id=run_id,
+            run_id=run.run_id,
             question=question,
             planner_context=PlannerContext(
                 source_manifest=source,
                 corpus_manifest_id=corpus_id,
-                evaluation_root_id=request.evaluation_root_id,
-                run_id=str(run_id),
+                evaluation_root_id=run.evaluation_root_id or "invalid-root",
+                run_id=str(run.run_id),
                 model_id=adapter.model_id,
-                idempotency_key=f"{run_id}-planning",
+                idempotency_key=f"{run.run_id}-planning",
             ),
             corpus_manifest_id=corpus_id,
             answer_context={
                 "model_id": adapter.model_id,
                 "source_manifest": source,
                 "corpus_manifest_id": corpus_id,
-                "evaluation_root_id": request.evaluation_root_id,
-                "run_id": str(run_id),
-                "idempotency_key": f"{run_id}-answer",
+                "evaluation_root_id": run.evaluation_root_id,
+                "run_id": str(run.run_id),
+                "idempotency_key": f"{run.run_id}-answer",
             },
+        )
+
+    def restore_evidence(refs: tuple[object, ...]) -> tuple[Evidence, ...]:
+        restored: list[Evidence] = []
+        for ref in refs:
+            clause_id = getattr(ref, "clause_id", None)
+            if not isinstance(clause_id, str):
+                return ()
+            unit = services.corpus.resolve(clause_id)
+            if unit is None:
+                return ()
+            item = build_evidence_from_unit(unit, corpus_manifest_id=corpus_id)
+            if (
+                item.excerpt.content_hash != getattr(ref, "content_hash", None)
+                or item.excerpt.quote_hash != getattr(ref, "quote_hash", None)
+                or item.disclosed.document_id != getattr(ref, "document_id", None)
+                or item.disclosed.document_version
+                != getattr(ref, "document_version", None)
+                or item.excerpt.span.paragraph_start
+                != getattr(ref, "paragraph_start", None)
+                or item.excerpt.span.paragraph_end
+                != getattr(ref, "paragraph_end", None)
+                or item.excerpt.span.token_start != getattr(ref, "token_start", None)
+                or item.excerpt.span.token_end != getattr(ref, "token_end", None)
+            ):
+                return ()
+            restored.append(item)
+        return tuple(restored)
+
+    async def recover(
+        candidate: object,
+        evidence: tuple[Evidence, ...],
+        reasons: tuple[str, ...],
+        attempts_used: int,
+    ) -> RecoveryOutcome:
+        from specpilot.contracts.verdict import IdentifiedCandidate, SemanticReason
+        from specpilot.verifier.deterministic import DeterministicFault
+
+        if not isinstance(candidate, IdentifiedCandidate):
+            return RecoveryOutcome(evidence, (), attempts_used)
+        closed: list[DeterministicFault | SemanticReason] = []
+        for reason in reasons:
+            try:
+                closed.append(DeterministicFault(reason))
+            except ValueError:
+                try:
+                    closed.append(SemanticReason(reason))
+                except ValueError:
+                    continue
+        clause_source = next(
+            (
+                item.disclosed.clause_id
+                for item in evidence
+                if item.excerpt.content_hash in candidate.candidate.evidence_ids
+            ),
+            None,
+        )
+        selected = select_recovery(
+            closed,
+            source_clause_id=clause_source,
+            remaining_attempts=8 - attempts_used,
+        )
+        if selected is None:
+            return RecoveryOutcome(evidence, (), attempts_used)
+        return await execute_recovery(
+            RecoveryRequest(
+                kind=selected.kind,
+                claim_id=candidate.claim_id,
+                reason_code=selected.reason_code,
+                source_clause_id=(
+                    clause_source if selected.kind.value != "scoped_search" else None
+                ),
+                corpus_manifest_id=corpus_id,
+                allowed_document_ids=(source.document_id,),
+                remaining_attempts=8 - attempts_used,
+            ),
+            claim_text=candidate.candidate.claim,
+            client=mcp_client,
+            corpus=services.corpus,
+            existing_evidence=evidence,
+            existing_calls=(),
+            attempts_used=attempts_used,
+        )
+
+    def l2_context(
+        run: RunRecord,
+        question: str,
+        checkpoint: RunCheckpoint | None,
+        first: Any,
+    ) -> L2RunContext:
+        del first
+        return L2RunContext(
+            run_id=str(run.run_id),
+            question=question,
+            planner=Planner(transport),
+            planner_context=PlannerContext(
+                source_manifest=source,
+                corpus_manifest_id=corpus_id,
+                evaluation_root_id=run.evaluation_root_id or "invalid-root",
+                run_id=str(run.run_id),
+                model_id=adapter.model_id,
+                idempotency_key=f"{run.run_id}-planning-initial-g0",
+            ),
+            evidence_agent=cast(Any, EvidenceAgent(mcp_client, services.corpus)),
+            compliance_agent=ComplianceAgent(transport),
+            compliance_context=ComplianceContext(
+                source_manifest=source,
+                corpus_manifest_id=corpus_id,
+                evaluation_root_id=run.evaluation_root_id or "invalid-root",
+                run_id=str(run.run_id),
+                model_id=adapter.model_id,
+                idempotency_key="initial",
+                reconstruction_generation=0,
+            ),
+            semantic_verifier=SemanticVerifier(transport),
+            semantic_context=SemanticContext(
+                source_manifest=source,
+                corpus_manifest_id=corpus_id,
+                evaluation_root_id=run.evaluation_root_id or "invalid-root",
+                run_id=str(run.run_id),
+                model_id=adapter.model_id,
+                idempotency_key="initial",
+                reconstruction_generation=0,
+            ),
+            deterministic_verifier=lambda candidate, evidence: verify_candidate(
+                candidate,
+                evidence,
+                services.corpus,
+                corpus_manifest_id=corpus_id,
+                allowed_document_ids=frozenset({source.document_id}),
+            ),
+            recovery_runner=recover,
+            checkpoint=checkpoint,
+            evidence_restorer=restore_evidence,
+            plan_restorer=lambda _plan_id, _plan_hash: None,
+        )
+
+    delivery = RuntimeJobBuilder(
+        l1_builder=l1_job,
+        l2_factory=L2JobFactory(cast(Any, checkpoint_store), l2_context),
+    )
+
+    async def build_job(
+        run_id: UUID,
+        question: str,
+        request: ChatRequest,
+        checkpoint: RunCheckpoint | None,
+    ) -> RunJob:
+        if request.task_level == "L1":
+            return RunJob(
+                run_id=run_id,
+                question=question,
+                planner_context=PlannerContext(
+                    source_manifest=source,
+                    corpus_manifest_id=corpus_id,
+                    evaluation_root_id=request.evaluation_root_id,
+                    run_id=str(run_id),
+                    model_id=adapter.model_id,
+                    idempotency_key=f"{run_id}-planning",
+                ),
+                corpus_manifest_id=corpus_id,
+                answer_context={
+                    "model_id": adapter.model_id,
+                    "source_manifest": source,
+                    "corpus_manifest_id": corpus_id,
+                    "evaluation_root_id": request.evaluation_root_id,
+                    "run_id": str(run_id),
+                    "idempotency_key": f"{run_id}-answer",
+                },
+            )
+        run = _ephemeral_delivery_run(
+            run_id, request, config, source, policy, adapter, checkpoint
+        )
+        return await delivery.build(
+            run,
+            question,
+            acquired_attempt=None if checkpoint is None else checkpoint.attempt,
         )
 
     hooks: tuple[Any, ...] = (
@@ -341,6 +536,7 @@ def _assemble_runtime(
         mcp_health=lambda: _mcp_health(config.mcp_url),
         demo_issuer=issuer,
         lifecycle_hooks=hooks,
+        checkpoint_store=checkpoint_store,
     )
 
 
@@ -357,6 +553,60 @@ def _provider(
         raise ValueError("source route does not match the real main provider")
     adapter = HttpChatAdapter(endpoint, api_key=resolve_credential(endpoint))
     return cast(_ProviderAdapter, adapter), _ProviderHook(adapter.aclose)
+
+
+def _ephemeral_delivery_run(
+    run_id: UUID,
+    request: ChatRequest,
+    config: ApiRuntimeConfig,
+    source: Any,
+    policy: EgressPolicy,
+    adapter: _ProviderAdapter,
+    checkpoint: RunCheckpoint | None,
+) -> RunRecord:
+    """Provide the job builder only immutable run bindings, never client state.
+
+    The durable row was already created (or leased by ``begin_resume``).  This
+    short-lived value is intentionally not persisted and exists only because
+    ``RuntimeJobBuilder`` uses the closed RunRecord binding interface.
+    """
+    now = datetime.now(tz=UTC)
+    is_l2 = request.task_level == "L2"
+    return RunRecord(
+        run_id=run_id,
+        request_id=request.request_id,
+        session_id="delivery",
+        task_level=request.task_level,
+        evaluation_root_id=request.evaluation_root_id if is_l2 else None,
+        profile=config.profile,
+        source_manifest_id=source.manifest_id,
+        corpus_manifest_id=request.corpus_manifest_id,
+        policy_hash=policy.policy_hash,
+        configuration_hash=config.configuration_hash,
+        prompt_id=config.prompt_id,
+        prompt_hash=config.prompt_hash,
+        compliance_prompt_hash=(
+            checkpoint.compliance_prompt_hash if checkpoint is not None else "f" * 64
+        )
+        if is_l2
+        else None,
+        verifier_prompt_hash=(
+            checkpoint.verifier_prompt_hash if checkpoint is not None else "0" * 64
+        )
+        if is_l2
+        else None,
+        provider_id=adapter.provider_id,
+        model_id=adapter.model_id,
+        query_hash=hashlib.sha256(request.question.encode("utf-8")).hexdigest(),
+        status=RunStatus.QUEUED,
+        terminal_reason=None,
+        created_at=now,
+        started_at=None,
+        completed_at=None,
+        lease_owner="queue-delivery",
+        lease_expires_at=now + timedelta(seconds=30),
+        last_heartbeat_at=None,
+    )
 
 
 def _require_real_route(provider_id: str, endpoint_purpose: str) -> None:

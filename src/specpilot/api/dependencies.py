@@ -8,6 +8,8 @@ from typing import Protocol
 from uuid import UUID
 
 from specpilot.api.contracts import ChatRequest
+from specpilot.checkpoints.contracts import CheckpointBinding, RunCheckpoint
+from specpilot.checkpoints.postgres import CheckpointResumeResult
 from specpilot.runs.contracts import RunRecord, RunView, TerminalEvent
 from specpilot.runtime import RunJob
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
@@ -21,6 +23,26 @@ class ApiRunStore(Protocol):
     async def fail_delivery(self, run_id: UUID, event: TerminalEvent) -> bool: ...
 
     async def reconcile_expired(self) -> int: ...
+
+
+class ApiCheckpointStore(Protocol):
+    async def begin_resume(
+        self,
+        run_id: UUID,
+        session_id: str,
+        query_hash: str,
+        resume_key: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int,
+        binding: CheckpointBinding,
+    ) -> CheckpointResumeResult: ...
+
+    async def read(self, run_id: UUID) -> RunCheckpoint | None: ...
+
+    async def fail_resume_delivery(
+        self, run_id: UUID, attempt: int, *, lease_owner: str
+    ) -> bool: ...
 
 
 class DeliveryPermit(Protocol):
@@ -44,7 +66,9 @@ class ApiLifecycleHook(Protocol):
 
 
 HealthProbe = Callable[[], Awaitable[bool]]
-JobFactory = Callable[[UUID, str, ChatRequest], RunJob]
+JobFactory = Callable[
+    [UUID, str, ChatRequest, RunCheckpoint | None], RunJob | Awaitable[RunJob]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +83,23 @@ class ApiRunBinding:
     provider_id: str
     model_id: str
     build_job: JobFactory
+    compliance_prompt_hash: str = "f" * 64
+    verifier_prompt_hash: str = "0" * 64
+    resume_lease_owner: str = "api-worker"
+    resume_lease_seconds: int = 30
+
+    @property
+    def checkpoint_binding(self) -> CheckpointBinding:
+        return CheckpointBinding(
+            source_manifest_id=self.source_manifest_id,
+            corpus_manifest_id=self.corpus_manifest_id,
+            policy_hash=self.policy_hash,
+            configuration_hash=self.configuration_hash,
+            compliance_prompt_hash=self.compliance_prompt_hash,
+            verifier_prompt_hash=self.verifier_prompt_hash,
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +113,7 @@ class ApiRuntime:
     mcp_health: HealthProbe
     demo_issuer: SessionIssuer | None = None
     lifecycle_hooks: tuple[ApiLifecycleHook, ...] = ()
+    checkpoint_store: ApiCheckpointStore | None = None
 
 
-__all__ = ["ApiRunBinding", "ApiRuntime"]
+__all__ = ["ApiCheckpointStore", "ApiRunBinding", "ApiRuntime"]

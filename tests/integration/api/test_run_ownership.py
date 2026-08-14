@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -9,6 +10,7 @@ import pytest
 
 from specpilot.api.app import create_app
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
+from specpilot.checkpoints.postgres import PostgresCheckpointStore
 from specpilot.runs.contracts import RunRecord, RunStatus
 from specpilot.runs.postgres import PostgresRunStore
 from specpilot.runtime import RunJob, WorkerUnavailable
@@ -103,7 +105,7 @@ def _runtime(dsn: str, clock: Clock, worker: Worker | None = None) -> ApiRuntime
             prompt_hash="e" * 64,
             provider_id="provider-a",
             model_id="model-a",
-            build_job=lambda run_id, question, request: RunJob(
+            build_job=lambda run_id, question, request, checkpoint: RunJob(
                 run_id=run_id,
                 question=question,
                 planner_context=object(),
@@ -115,6 +117,7 @@ def _runtime(dsn: str, clock: Clock, worker: Worker | None = None) -> ApiRuntime
         demo_issuer=issuer,
         postgres_health=_healthy,
         mcp_health=_healthy,
+        checkpoint_store=PostgresCheckpointStore(dsn, clock=clock),
     )
 
 
@@ -131,6 +134,36 @@ def _payload() -> dict[str, str]:
         "source_manifest_id": SOURCE,
         "corpus_manifest_id": CORPUS,
     }
+
+
+def _l2_run(clock: Clock, *, session_id: str, question: str) -> RunRecord:
+    return RunRecord(
+        run_id=uuid4(),
+        request_id=uuid4(),
+        session_id=session_id,
+        task_level="L2",
+        evaluation_root_id="root-1",
+        profile="fixture",
+        source_manifest_id=SOURCE,
+        corpus_manifest_id=CORPUS,
+        policy_hash=POLICY,
+        configuration_hash="d" * 64,
+        prompt_id="l2-v1",
+        prompt_hash="e" * 64,
+        compliance_prompt_hash="f" * 64,
+        verifier_prompt_hash="0" * 64,
+        provider_id="provider-a",
+        model_id="model-a",
+        query_hash=hashlib.sha256(question.encode()).hexdigest(),
+        status=RunStatus.QUEUED,
+        terminal_reason=None,
+        created_at=clock(),
+        started_at=None,
+        completed_at=None,
+        lease_owner="placeholder",
+        lease_expires_at=clock() + timedelta(seconds=1),
+        last_heartbeat_at=None,
+    )
 
 
 @pytest.mark.anyio
@@ -196,6 +229,55 @@ async def test_delivery_failure_is_interrupted_without_provider_state(
                 )
             ).fetchone()
     assert row == (RunStatus.INTERRUPTED.value, "queue_delivery_failed")
+
+
+@pytest.mark.anyio
+async def test_owner_bound_l2_resume_replays_key_without_second_delivery(
+    clean_ledger: str,
+) -> None:
+    from specpilot.checkpoints.contracts import CheckpointStage
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runtime = _runtime(clean_ledger, clock)
+    question = "resubmitted question must remain ephemeral"
+    created = await runtime.store.create(
+        _l2_run(clock, session_id="owner-a", question=question)
+    )
+    clock.value += timedelta(seconds=6)
+    assert await runtime.store.reconcile_expired(clock()) == 1
+    assert runtime.checkpoint_store is not None
+    await runtime.checkpoint_store.write(
+        None,
+        runtime.checkpoint_store.new_checkpoint(created, stage=CheckpointStage.PLANNED),
+    )
+    assert runtime.demo_issuer is not None
+    token = runtime.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    app = create_app(runtime=runtime)
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"question": question, "resume_key": "client-resume-1"}
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        acquired = await client.post(
+            f"/runs/{created.run_id}/resume", headers=headers, json=body
+        )
+        replay = await client.post(
+            f"/runs/{created.run_id}/resume", headers=headers, json=body
+        )
+
+    assert acquired.status_code == replay.status_code == 202
+    assert acquired.json() == replay.json()
+    assert acquired.json()["attempt"] == 2
+    view = await runtime.store.read_owned(created.run_id, "owner-a")
+    assert view is not None
+    assert view.status is RunStatus.RUNNING
+    assert question not in str(view.model_dump())
 
 
 @pytest.mark.anyio

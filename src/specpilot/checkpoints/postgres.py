@@ -13,7 +13,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
-from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
+from specpilot.checkpoints.contracts import (
+    CheckpointBinding,
+    CheckpointStage,
+    RunCheckpoint,
+)
 from specpilot.runs.contracts import (
     CheckpointSummaryEvent,
     ResumeDisposition,
@@ -21,6 +25,7 @@ from specpilot.runs.contracts import (
     RunRecord,
     RunStatus,
     StateTransitionEvent,
+    TerminalEvent,
 )
 from specpilot.runs.postgres import (
     RunStoreIntegrityError,
@@ -227,6 +232,7 @@ class PostgresCheckpointStore:
         *,
         lease_owner: str,
         lease_seconds: int,
+        binding: CheckpointBinding | None = None,
     ) -> CheckpointResumeResult:
         """Atomically replay or acquire one owner-bound interrupted L2 attempt."""
         if lease_seconds <= 0 or not resume_key:
@@ -279,6 +285,10 @@ class PostgresCheckpointStore:
                 except (TypeError, ValueError, ValidationError):
                     return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
                 if not _bindings_match(run, checkpoint):
+                    return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
+                if binding is not None and not _checkpoint_matches_binding(
+                    checkpoint, binding
+                ):
                     return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
                 disposition = await self._resume_reservation_disposition(
                     connection, checkpoint
@@ -372,6 +382,72 @@ class PostgresCheckpointStore:
                 return CheckpointResumeResult(ResumeDisposition.ACQUIRED, attempt)
         except RunStoreIntegrityError:
             raise
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+
+    async def fail_resume_delivery(
+        self, run_id: UUID, attempt: int, *, lease_owner: str
+    ) -> bool:
+        """Seal a leased resume whose job never reached the worker queue.
+
+        This deliberately is not a retry transition: the client must not gain a
+        second lease or accounting window after the API has acquired an attempt
+        but cannot deliver its ephemeral question to the worker.
+        """
+        if attempt < 2 or not lease_owner:
+            raise RunStoreValidationError()
+        now = self._now()
+        try:
+            connection = await self._connect()
+            async with connection, connection.transaction():
+                run = await self._lock_run(connection, run_id)
+                if run is None:
+                    return False
+                acquired = await (
+                    await connection.execute(
+                        "SELECT attempt FROM specpilot_run_attempt WHERE run_id = %s "
+                        "AND attempt = %s FOR UPDATE",
+                        (run_id, attempt),
+                    )
+                ).fetchone()
+                if acquired is None:
+                    return False
+                updated = await connection.execute(
+                    "UPDATE specpilot_run SET status = 'interrupted', "
+                    "terminal_reason = 'queue_delivery_failed', completed_at = %s, "
+                    "lease_owner = NULL, lease_expires_at = NULL, "
+                    "last_heartbeat_at = NULL WHERE run_id = %s "
+                    "AND status = 'running' AND lease_owner = %s",
+                    (now, run_id, lease_owner),
+                )
+                if updated.rowcount != 1:
+                    return False
+                sequence = await self._next_sequence(connection, run_id)
+                transition = StateTransitionEvent(
+                    sequence=sequence,
+                    previous_status=RunStatus.RUNNING,
+                    status=RunStatus.INTERRUPTED,
+                    reason="queue_delivery_failed",
+                )
+                terminal = TerminalEvent(
+                    sequence=sequence + 1,
+                    status=RunStatus.INTERRUPTED,
+                    reason="queue_delivery_failed",
+                )
+                for event in (transition, terminal):
+                    await connection.execute(
+                        "INSERT INTO specpilot_run_event "
+                        "(run_id, sequence, kind, payload, recorded_at) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            run_id,
+                            event.sequence,
+                            event.kind.value,
+                            Jsonb(event.model_dump(mode="json")),
+                            now,
+                        ),
+                    )
+                return True
         except psycopg.Error:
             raise RunStoreUnavailable() from None
 
@@ -538,6 +614,24 @@ def _bindings_match(run: dict[str, Any], checkpoint: RunCheckpoint) -> bool:
     return all(
         isinstance(run.get(key), str) and run[key] == expected
         for key, expected in values
+    )
+
+
+def _checkpoint_matches_binding(
+    checkpoint: RunCheckpoint, binding: CheckpointBinding
+) -> bool:
+    return all(
+        getattr(checkpoint, field) == getattr(binding, field)
+        for field in (
+            "source_manifest_id",
+            "corpus_manifest_id",
+            "policy_hash",
+            "configuration_hash",
+            "compliance_prompt_hash",
+            "verifier_prompt_hash",
+            "provider_id",
+            "model_id",
+        )
     )
 
 

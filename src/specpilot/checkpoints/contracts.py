@@ -107,6 +107,19 @@ class StageGeneration(_FrozenModel):
         return self
 
 
+class CheckpointBinding(_FrozenModel):
+    """Current deployment identities that an interrupted run must still match."""
+
+    source_manifest_id: Sha256
+    corpus_manifest_id: Sha256
+    policy_hash: Sha256
+    configuration_hash: Sha256
+    compliance_prompt_hash: Sha256
+    verifier_prompt_hash: Sha256
+    provider_id: TraceIdentifier
+    model_id: TraceIdentifier
+
+
 class RunCheckpoint(_FrozenModel):
     schema_version: Literal["run-checkpoint/v1"] = "run-checkpoint/v1"
     run_id: UUID
@@ -229,6 +242,7 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
 
 __all__ = [
     "CheckpointStage",
+    "CheckpointBinding",
     "EvidenceCheckpointRef",
     "LEGAL_TRANSITIONS",
     "RunCheckpoint",

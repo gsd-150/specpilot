@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -18,11 +19,19 @@ from specpilot.api.contracts import (
     ChatRequest,
     DemoSessionCreated,
     HealthView,
+    ResumeAccepted,
+    ResumeRequest,
 )
 from specpilot.api.dependencies import ApiRuntime
 from specpilot.api.static import install_trace_routes
-from specpilot.runs.contracts import RunRecord, RunStatus, TerminalEvent
-from specpilot.runtime import WorkerQueueFull, WorkerUnavailable
+from specpilot.checkpoints.contracts import RunCheckpoint
+from specpilot.runs.contracts import (
+    ResumeDisposition,
+    RunRecord,
+    RunStatus,
+    TerminalEvent,
+)
+from specpilot.runtime import RunJob, WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionClaims, SessionTokenError
 
 _DELIVERY_FAILURE = "queue_delivery_failed"
@@ -178,7 +187,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 created = True
                 raise
             created = True
-            job = runtime.binding.build_job(run_id, request.question, request)
+            job = await _build_job(runtime, run_id, request.question, request, None)
             await permit.deliver(job)
             delivered = True
         except BaseException as error:
@@ -207,6 +216,81 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         if service_failed:
             raise _service_unavailable()
         return ChatAccepted(run_id=run_id)
+
+    @app.post(
+        "/runs/{run_id}/resume",
+        response_model=ResumeAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def resume_run(
+        run_id: UUID,
+        request: ResumeRequest,
+        session: SessionClaims = Depends(dependency=claims),  # noqa: B008
+    ) -> ResumeAccepted:
+        checkpoint_store = runtime.checkpoint_store
+        if checkpoint_store is None:
+            raise _service_unavailable()
+        query_hash = hashlib.sha256(request.question.encode("utf-8")).hexdigest()
+        try:
+            decision = await checkpoint_store.begin_resume(
+                run_id,
+                session.session_id,
+                query_hash,
+                request.resume_key,
+                lease_owner=runtime.binding.resume_lease_owner,
+                lease_seconds=runtime.binding.resume_lease_seconds,
+                binding=runtime.binding.checkpoint_binding,
+            )
+        except Exception:
+            raise _service_unavailable() from None
+        disposition = decision.disposition
+        if disposition in {ResumeDisposition.NOT_FOUND, ResumeDisposition.NOT_OWNER}:
+            raise HTTPException(status_code=404, detail="run_not_found")
+        if disposition is ResumeDisposition.REPLAY:
+            assert decision.attempt is not None
+            return ResumeAccepted(run_id=run_id, attempt=decision.attempt)
+        if disposition is ResumeDisposition.LEASED:
+            raise HTTPException(status_code=409, detail="run_already_leased")
+        if disposition is ResumeDisposition.QUERY_MISMATCH:
+            raise HTTPException(status_code=409, detail="resume_query_mismatch")
+        if disposition is ResumeDisposition.BINDING_MISMATCH:
+            raise HTTPException(status_code=409, detail="resume_binding_mismatch")
+        if disposition is ResumeDisposition.NOT_INTERRUPTED:
+            raise HTTPException(status_code=409, detail="run_not_resumable")
+        if disposition is ResumeDisposition.CHECKPOINT_MISSING:
+            raise HTTPException(status_code=422, detail="resume_checkpoint_missing")
+        if disposition is ResumeDisposition.CHECKPOINT_INVALID:
+            raise HTTPException(status_code=422, detail="resume_checkpoint_invalid")
+        if disposition is not ResumeDisposition.ACQUIRED or decision.attempt is None:
+            raise _service_unavailable()
+
+        delivered = False
+        permit = None
+        try:
+            checkpoint = await checkpoint_store.read(run_id)
+            if checkpoint is None or checkpoint.attempt != decision.attempt:
+                raise ValueError("resume_checkpoint_unavailable")
+            reconstructed = _resume_chat_request(request, checkpoint)
+            job = await _build_job(
+                runtime, run_id, request.question, reconstructed, checkpoint
+            )
+            permit = await runtime.worker.reserve()
+            await permit.deliver(job)
+            delivered = True
+        except BaseException as error:
+            if permit is not None and not delivered:
+                with suppress(BaseException):
+                    await permit.cancel()
+            with suppress(BaseException):
+                await checkpoint_store.fail_resume_delivery(
+                    run_id,
+                    decision.attempt,
+                    lease_owner=runtime.binding.resume_lease_owner,
+                )
+            if not isinstance(error, Exception):
+                raise error
+            raise _service_unavailable() from None
+        return ResumeAccepted(run_id=run_id, attempt=decision.attempt)
 
     @app.get("/runs/{run_id}")
     async def read_run(
@@ -307,7 +391,10 @@ def _new_run(
         run_id=run_id,
         request_id=request.request_id,
         session_id=session.session_id,
-        task_level="L1",
+        task_level=request.task_level,
+        evaluation_root_id=(
+            request.evaluation_root_id if request.task_level == "L2" else None
+        ),
         profile=binding.profile,
         source_manifest_id=binding.source_manifest_id,
         corpus_manifest_id=binding.corpus_manifest_id,
@@ -315,6 +402,12 @@ def _new_run(
         configuration_hash=binding.configuration_hash,
         prompt_id=binding.prompt_id,
         prompt_hash=binding.prompt_hash,
+        compliance_prompt_hash=(
+            binding.compliance_prompt_hash if request.task_level == "L2" else None
+        ),
+        verifier_prompt_hash=(
+            binding.verifier_prompt_hash if request.task_level == "L2" else None
+        ),
         provider_id=binding.provider_id,
         model_id=binding.model_id,
         query_hash=hashlib.sha256(request.question.encode("utf-8")).hexdigest(),
@@ -365,6 +458,33 @@ async def _capture_cleanup(operation: Awaitable[object]) -> BaseException | None
     except BaseException as error:
         return error
     return None
+
+
+async def _build_job(
+    runtime: ApiRuntime,
+    run_id: UUID,
+    question: str,
+    request: ChatRequest,
+    checkpoint: RunCheckpoint | None,
+) -> RunJob:
+    job = runtime.binding.build_job(run_id, question, request, checkpoint)
+    if inspect.isawaitable(job):
+        return await job
+    return job
+
+
+def _resume_chat_request(
+    request: ResumeRequest, checkpoint: RunCheckpoint
+) -> ChatRequest:
+    """Rebuild only server-bound request identities for the job factory."""
+    return ChatRequest(
+        question=request.question,
+        request_id=checkpoint.run_id,
+        evaluation_root_id=checkpoint.evaluation_root_id,
+        task_level="L2",
+        source_manifest_id=checkpoint.source_manifest_id,
+        corpus_manifest_id=checkpoint.corpus_manifest_id,
+    )
 
 
 def _service_unavailable() -> HTTPException:

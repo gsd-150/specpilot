@@ -11,7 +11,9 @@ import pytest
 
 from specpilot.api.app import create_app
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
-from specpilot.runs.contracts import RunRecord, RunStatus, RunView
+from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
+from specpilot.checkpoints.postgres import CheckpointResumeResult
+from specpilot.runs.contracts import ResumeDisposition, RunRecord, RunStatus, RunView
 from specpilot.runtime import RunJob, WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
 
@@ -107,7 +109,7 @@ class FakeStore:
             raise self.create_error
         self.creates += 1
         view = RunView(
-            run_id=run.run_id, request_id=run.request_id, task_level="L1",
+            run_id=run.run_id, request_id=run.request_id, task_level=run.task_level,
             profile=run.profile, corpus_manifest_id=run.corpus_manifest_id,
             status=RunStatus.QUEUED, reason=None, created_at=NOW,
             started_at=None, completed_at=None, events=(),
@@ -132,6 +134,50 @@ class FakeStore:
         self.delivery_failures += 1
         if self.fail_delivery_error is not None:
             raise self.fail_delivery_error
+        return True
+
+
+@dataclass
+class FakeCheckpointStore:
+    result: CheckpointResumeResult
+    checkpoint: RunCheckpoint
+    begin_calls: int = 0
+    reads: int = 0
+    failed_deliveries: int = 0
+
+    async def begin_resume(
+        self,
+        run_id: UUID,
+        session_id: str,
+        query_hash: str,
+        resume_key: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int,
+        binding: object,
+    ) -> CheckpointResumeResult:
+        del (
+            run_id,
+            session_id,
+            query_hash,
+            resume_key,
+            lease_owner,
+            lease_seconds,
+            binding,
+        )
+        self.begin_calls += 1
+        return self.result
+
+    async def read(self, run_id: UUID) -> RunCheckpoint | None:
+        del run_id
+        self.reads += 1
+        return self.checkpoint
+
+    async def fail_resume_delivery(
+        self, run_id: UUID, attempt: int, *, lease_owner: str
+    ) -> bool:
+        del run_id, attempt, lease_owner
+        self.failed_deliveries += 1
         return True
 
 
@@ -182,7 +228,7 @@ def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
         corpus_manifest_id=HASHES["corpus"], policy_hash=HASHES["policy"],
         configuration_hash=HASHES["configuration"], prompt_id="l1-answer-v1",
         prompt_hash=HASHES["prompt"], provider_id="provider-a", model_id="model-a",
-        build_job=lambda run_id, question, request: RunJob(
+        build_job=lambda run_id, question, request, checkpoint: RunJob(
             run_id=run_id, question=question, planner_context=object(),
             corpus_manifest_id=request.corpus_manifest_id, answer_context={}
         ),
@@ -214,6 +260,38 @@ def payload() -> dict[str, str]:
     }
 
 
+def checkpoint(run_id: UUID, *, attempt: int = 2) -> RunCheckpoint:
+    return RunCheckpoint(
+        run_id=run_id,
+        attempt=attempt,
+        checkpoint_version=2,
+        stage=CheckpointStage.PLANNED,
+        task_level="L2",
+        query_hash="a" * 64,
+        evaluation_root_id="root-1",
+        source_manifest_id=HASHES["source"],
+        corpus_manifest_id=HASHES["corpus"],
+        policy_hash=HASHES["policy"],
+        configuration_hash=HASHES["configuration"],
+        compliance_prompt_hash="f" * 64,
+        verifier_prompt_hash="0" * 64,
+        provider_id="provider-a",
+        model_id="model-a",
+        plan_id=None,
+        plan_hash=None,
+        evidence=(),
+        tool_attempts_used=3,
+        reservation_ids=(),
+        reconstruction_generations=(),
+        recovery_attempted=True,
+        recovery_reason="not_disclosed",
+        candidate_count=0,
+        completed_claim_ids=(),
+        completed_results=(),
+        last_accessed_at=NOW,
+    )
+
+
 async def test_chat_returns_202_and_foreign_trace_is_same_404_as_unknown() -> None:
     made = runtime()
     app, client = await client_for(made)
@@ -240,6 +318,122 @@ async def test_chat_returns_202_and_foreign_trace_is_same_404_as_unknown() -> No
         )
     assert owned.status_code == 200
     assert "private question" not in owned.text
+
+
+async def test_chat_accepts_l2_and_persists_the_requested_task_level() -> None:
+    made = runtime()
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    l2 = {**payload(), "task_level": "L2"}
+
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=l2
+        )
+
+    assert response.status_code == 202
+    run_id = UUID(response.json()["run_id"])
+    assert made.store.runs[run_id][1].task_level == "L2"
+
+
+@pytest.mark.parametrize(
+    ("disposition", "status_code", "detail"),
+    [
+        (ResumeDisposition.NOT_FOUND, 404, "run_not_found"),
+        (ResumeDisposition.NOT_OWNER, 404, "run_not_found"),
+        (ResumeDisposition.QUERY_MISMATCH, 409, "resume_query_mismatch"),
+        (ResumeDisposition.NOT_INTERRUPTED, 409, "run_not_resumable"),
+        (ResumeDisposition.CHECKPOINT_MISSING, 422, "resume_checkpoint_missing"),
+        (ResumeDisposition.CHECKPOINT_INVALID, 422, "resume_checkpoint_invalid"),
+        (ResumeDisposition.BINDING_MISMATCH, 409, "resume_binding_mismatch"),
+    ],
+)
+async def test_resume_denials_happen_before_queue_reservation(
+    disposition: ResumeDisposition, status_code: int, detail: str
+) -> None:
+    made = runtime()
+    run_id = uuid4()
+    object.__setattr__(
+        made,
+        "checkpoint_store",
+        FakeCheckpointStore(CheckpointResumeResult(disposition), checkpoint(run_id)),
+    )
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            f"/runs/{run_id}/resume",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"question": "private question", "resume_key": "resume-1"},
+        )
+
+    assert response.status_code == status_code
+    assert response.json() == {"detail": detail}
+    assert made.worker.jobs == []
+
+
+async def test_resume_acquire_delivers_once_and_replay_does_not_reserve_again() -> None:
+    made = runtime()
+    run_id = uuid4()
+    store = FakeCheckpointStore(
+        CheckpointResumeResult(ResumeDisposition.ACQUIRED, 2), checkpoint(run_id)
+    )
+    object.__setattr__(made, "checkpoint_store", store)
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    body = {"question": "private question", "resume_key": "resume-1"}
+    async with app.router.lifespan_context(app), client:
+        acquired = await client.post(
+            f"/runs/{run_id}/resume",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+        )
+        store.result = CheckpointResumeResult(ResumeDisposition.REPLAY, 2)
+        replay = await client.post(
+            f"/runs/{run_id}/resume",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+        )
+
+    assert acquired.status_code == replay.status_code == 202
+    assert acquired.json() == replay.json() == {
+        "run_id": str(run_id), "attempt": 2, "status": "queued"
+    }
+    assert len(made.worker.jobs) == 1
+
+
+async def test_resume_delivery_failure_cancels_capacity_and_seals_attempt() -> None:
+    made = runtime()
+    made.worker.delivery_error = True
+    run_id = uuid4()
+    store = FakeCheckpointStore(
+        CheckpointResumeResult(ResumeDisposition.ACQUIRED, 2), checkpoint(run_id)
+    )
+    object.__setattr__(made, "checkpoint_store", store)
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            f"/runs/{run_id}/resume",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"question": "private question", "resume_key": "resume-1"},
+        )
+
+    assert response.status_code == 503
+    assert made.worker.permit_cancels == store.failed_deliveries == 1
 
 
 async def test_bearer_precedes_cookie_and_both_use_identical_verification() -> None:
@@ -430,7 +624,9 @@ async def test_generic_api_exception_is_stable_marker_free_and_terminalizes(
     elif boundary == "build":
         binding = made.binding
 
-        def hostile_build(run_id: UUID, question: str, request: object) -> RunJob:
+        def hostile_build(
+            run_id: UUID, question: str, request: object, checkpoint: object
+        ) -> RunJob:
             raise RuntimeError(marker)
 
         object.__setattr__(made, "binding", ApiRunBinding(
@@ -496,7 +692,7 @@ async def test_invalid_body_never_echoes_question_or_validation_input() -> None:
         session_id="owner-a", profile="fixture", ttl_seconds=300
     )
     private = "question-must-never-return"
-    invalid = {**payload(), "question": private, "task_level": "L2"}
+    invalid = {**payload(), "question": private, "task_level": "L3"}
     async with app.router.lifespan_context(app), client:
         response = await client.post(
             "/chat", headers={"Authorization": f"Bearer {token}"}, json=invalid
