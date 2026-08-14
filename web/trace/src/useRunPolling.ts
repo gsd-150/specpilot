@@ -18,7 +18,8 @@ export type ConnectionState =
   | "not_found"
   | "service_unavailable"
   | "network_error"
-  | "invalid_response";
+  | "invalid_response"
+  | "stream_unavailable";
 
 export interface RunPollingOptions {
   runId: string;

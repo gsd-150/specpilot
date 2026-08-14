@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { createRun, type ChatAccepted, type CreateRunRequest } from "./api";
 import { StatusPanel } from "./components/StatusPanel";
 import { TraceTimeline } from "./components/TraceTimeline";
-import { useRunPolling, type RunPollingOptions, type RunPollingResult } from "./useRunPolling";
+import type { RunPollingOptions, RunPollingResult } from "./useRunPolling";
+import { useRunStream } from "./useRunStream";
 
 const QUESTION_LIMIT = 8_192;
 const DEFAULT_INTERVAL_MS = 1_000;
@@ -34,7 +35,7 @@ function ActiveRun({ runId, token, polling }: { runId: string; token?: string; p
   const { serverRun, connectionState, refresh } = polling({ runId, token, intervalMs: DEFAULT_INTERVAL_MS, deadlineMs: DEFAULT_DEADLINE_MS });
   if (serverRun === null) {
     const message = connectionState === "connecting" ? "Connecting to the sanitized trace…" : {
-      unauthorized: "Session authorization failed.", not_found: "Run is unavailable.", service_unavailable: "Trace service is unavailable.", network_error: "Network connection failed.", invalid_response: "Trace response was rejected.", poll_timeout: "Polling limit reached.", connected: "Waiting for the first trace snapshot…",
+      unauthorized: "Session authorization failed.", not_found: "Run is unavailable.", service_unavailable: "Trace service is unavailable.", network_error: "Network connection failed.", invalid_response: "Trace response was rejected.", poll_timeout: "Connection limit reached.", stream_unavailable: "Live trace is unavailable. Use Refresh for a current snapshot.", connected: "Waiting for the first trace snapshot…",
     }[connectionState];
     return <section className="trace-shell"><div className="connection-alert" role={connectionState === "connecting" || connectionState === "connected" ? "status" : "alert"}>{message}<button className="button button--quiet" type="button" onClick={() => void refresh()}>Refresh trace</button></div></section>;
   }
@@ -47,7 +48,7 @@ function ActiveRun({ runId, token, polling }: { runId: string; token?: string; p
   );
 }
 
-export function App({ api = { createRun }, usePolling: polling = useRunPolling, token, sourceManifestId, corpusManifestId }: AppProps) {
+export function App({ api = { createRun }, usePolling: polling = useRunStream, token, sourceManifestId, corpusManifestId }: AppProps) {
   const [question, setQuestion] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

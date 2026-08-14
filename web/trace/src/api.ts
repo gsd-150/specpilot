@@ -4,7 +4,7 @@ export type EgressStage = "planning" | "evidence" | "compliance" | "verifier" | 
 
 type StateTransition = { kind: "state_transition"; sequence: number; previous_status: RunStatus | null; status: RunStatus; reason: string | null };
 type PlanSummary = { kind: "plan_summary"; sequence: number; plan_id: string; step_count: number; max_tool_calls: number };
-type AgentStep = { kind: "agent_step"; sequence: number; agent: "orchestrator" | "evidence_agent" | "answer" | "verifier"; step_id: string; phase: "started" | "finished"; duration_ms: number | null; error_code: string | null };
+type AgentStep = { kind: "agent_step"; sequence: number; agent: "orchestrator" | "evidence_agent" | "answer" | "verifier" | "compliance"; step_id: string; phase: "started" | "finished"; duration_ms: number | null; error_code: string | null };
 type ToolFinished = { kind: "tool_finished"; sequence: number; step_id: string; tool: "search_clauses" | "get_clause" | "get_toc" | "expand_references" | "lookup_term"; argument_keys: string[]; result_count: number; duration_ms: number; retry_count: number; error_code: string | null };
 type CandidateSummary = { kind: "candidate_summary"; sequence: number; candidates: Array<{ candidate_id: string; score: number }> };
 type EvidenceSummary = { kind: "evidence_summary"; sequence: number; evidence: Array<{ evidence_id: string; content_hash: string }> };
@@ -12,14 +12,19 @@ type EgressSummary = { kind: "egress_summary"; sequence: number; stage: EgressSt
 type UsageSummary = { kind: "usage_summary"; sequence: number; stage: EgressStage; prompt_tokens: number; completion_tokens: number; request_bytes: number; duration_ms: number; cost_microunits: number };
 type AnswerOutcome = { kind: "answer_outcome"; sequence: number; verdict: "answered" | "refused"; refusal_reason: string | null; provider_error: string | null; reservation_id: string | null; replayed: boolean; parse_fault_code: string | null };
 type VerifierSummary = { kind: "verifier_summary"; sequence: number; checks: Array<{ evidence_id: string | null; passed: boolean; fault_code: string | null }>; duration_ms: number };
+type CheckpointSummary = { kind: "checkpoint_summary"; sequence: number; stage: "planned" | "evidence_collected" | "candidate_built" | "deterministic_verified" | "recovery_reserved" | "recovery_completed" | "semantic_verified" | "completed"; checkpoint_version: number; tool_attempts_used: number; recovery_attempted: boolean };
+type ComplianceSummary = { kind: "compliance_summary"; sequence: number; candidate_count: number; claim_ids: string[] };
+type SemanticSummary = { kind: "semantic_summary"; sequence: number; claim_id: string; supports: boolean; reason: string };
+type RecoverySummary = { kind: "recovery_summary"; sequence: number; kind_name: "scoped_search" | "get_clause" | "expand_references"; reason: string; remaining_tool_attempts: number };
+type ResumeSummary = { kind: "resume_summary"; sequence: number; attempt: number };
 type Terminal = { kind: "terminal"; sequence: number; status: TerminalStatus; reason: string | null };
 
-export type RunEvent = StateTransition | PlanSummary | AgentStep | ToolFinished | CandidateSummary | EvidenceSummary | EgressSummary | UsageSummary | AnswerOutcome | VerifierSummary | Terminal;
+export type RunEvent = StateTransition | PlanSummary | AgentStep | ToolFinished | CandidateSummary | EvidenceSummary | EgressSummary | UsageSummary | AnswerOutcome | VerifierSummary | CheckpointSummary | ComplianceSummary | SemanticSummary | RecoverySummary | ResumeSummary | Terminal;
 
 export interface RunView {
   run_id: string;
   request_id: string;
-  task_level: "L1";
+  task_level: "L1" | "L2";
   profile: string;
   corpus_manifest_id: string;
   status: RunStatus;
@@ -53,9 +58,6 @@ const ARGUMENT_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const STATUSES = ["queued", "running", "answered", "refused", "egress_blocked", "failed", "interrupted"] as const;
 const TERMINAL = ["answered", "refused", "egress_blocked", "failed", "interrupted"] as const;
 const STAGES = ["planning", "evidence", "compliance", "verifier", "judge"] as const;
-const REFUSAL_REASONS = ["no_evidence_retrieved", "evidence_insufficient", "unverifiable_citation", "invalid_tool_plan"] as const;
-const FAILURE_REASONS = ["provider_http_error", "provider_malformed_response", "provider_model_mismatch", "provider_model_not_found", "provider_rate_limited", "provider_timeout", "provider_unauthorized", "provider_unavailable", "provider_unreachable", "provider_cancelled", "provider_unclassified_error", "no_adapter_for_route", "transport_replay_refused", "queue_delivery_failed"] as const;
-const EGRESS_REASONS = ["authorization_clock_invalid", "claim_count_exceeded", "claim_payload_mismatch", "claim_unique_excerpts_exceeded", "claim_unique_tokens_exceeded", "claim_unique_bytes_exceeded", "corpus_document_cap_missing", "corpus_document_unique_excerpts_exceeded", "corpus_document_unique_tokens_exceeded", "corpus_document_unique_bytes_exceeded", "corpus_manifest_mismatch", "corpus_usage_mismatch", "corpus_unique_excerpts_exceeded", "corpus_unique_tokens_exceeded", "corpus_unique_bytes_exceeded", "disclosure_fact_mismatch", "document_id_mismatch", "document_version_mismatch", "evaluation_root_mismatch", "excerpt_bytes_exceeded", "excerpt_tokens_exceeded", "judge_unique_excerpts_exceeded", "judge_unique_tokens_exceeded", "judge_unique_bytes_exceeded", "judge_transmitted_tokens_exceeded", "judge_transmitted_bytes_exceeded", "online_unique_excerpts_exceeded", "online_unique_tokens_exceeded", "online_unique_bytes_exceeded", "online_transmitted_tokens_exceeded", "online_transmitted_bytes_exceeded", "payload_version_mismatch", "policy_snapshot_mismatch", "projected_text_tokens_exceeded", "reservation_accounting_mismatch", "reservation_primitive_invalid", "root_unique_excerpts_exceeded", "root_unique_tokens_exceeded", "root_unique_bytes_exceeded", "root_transmitted_tokens_exceeded", "root_transmitted_bytes_exceeded", "route_unauthorized", "source_manifest_mismatch", "source_manifest_unresolvable", "source_manifest_untrusted", "stage_payload_mismatch", "stage_route_mismatch", "task_level_mismatch", "toc_call_exceeded", "toc_run_exceeded", "token_accounting_unavailable", "token_counter_incompatible"] as const;
 const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function object(value: unknown): Record<string, unknown> {
@@ -101,14 +103,14 @@ function nullableTimestamp(value: unknown, label: string): string | null { retur
 function list(value: unknown, label: string, max: number): unknown[] { if (!Array.isArray(value) || value.length > max) throw new Error(`invalid ${label}`); return value; }
 function nullableCount(value: unknown, label: string, max = 1_000_000): number | null { return value === null ? null : integer(value, label, 0, max); }
 
-function decodeEvent(value: unknown): RunEvent {
+export function decodeRunEvent(value: unknown): RunEvent {
   const head = object(value);
   const kind = head.kind;
   const sequence = integer(head.sequence, "sequence", 1, 10_000);
   switch (kind) {
     case "state_transition": { const r = exact(value, ["kind", "sequence", "previous_status", "status", "reason"]); return { kind, sequence, previous_status: r.previous_status === null ? null : enumeration(r.previous_status, STATUSES, "previous status"), status: enumeration(r.status, STATUSES, "status"), reason: reason(r.reason, "reason") }; }
-    case "plan_summary": { const r = exact(value, ["kind", "sequence", "plan_id", "step_count", "max_tool_calls"]); return { kind, sequence, plan_id: identifier(r.plan_id, "plan id"), step_count: integer(r.step_count, "step count", 1, 4), max_tool_calls: integer(r.max_tool_calls, "max tool calls", 1, 6) }; }
-    case "agent_step": { const r = exact(value, ["kind", "sequence", "agent", "step_id", "phase", "duration_ms", "error_code"]); return { kind, sequence, agent: enumeration(r.agent, ["orchestrator", "evidence_agent", "answer", "verifier"] as const, "agent"), step_id: identifier(r.step_id, "step id"), phase: enumeration(r.phase, ["started", "finished"] as const, "phase"), duration_ms: nullableCount(r.duration_ms, "duration", 3_600_000), error_code: reason(r.error_code, "error code") }; }
+    case "plan_summary": { const r = exact(value, ["kind", "sequence", "plan_id", "step_count", "max_tool_calls"]); return { kind, sequence, plan_id: identifier(r.plan_id, "plan id"), step_count: integer(r.step_count, "step count", 1, 4), max_tool_calls: integer(r.max_tool_calls, "max tool calls", 1, 8) }; }
+    case "agent_step": { const r = exact(value, ["kind", "sequence", "agent", "step_id", "phase", "duration_ms", "error_code"]); return { kind, sequence, agent: enumeration(r.agent, ["orchestrator", "evidence_agent", "answer", "verifier", "compliance"] as const, "agent"), step_id: identifier(r.step_id, "step id"), phase: enumeration(r.phase, ["started", "finished"] as const, "phase"), duration_ms: nullableCount(r.duration_ms, "duration", 3_600_000), error_code: reason(r.error_code, "error code") }; }
     case "tool_finished": { const r = exact(value, ["kind", "sequence", "step_id", "tool", "argument_keys", "result_count", "duration_ms", "retry_count", "error_code"]); return { kind, sequence, step_id: identifier(r.step_id, "step id"), tool: enumeration(r.tool, ["search_clauses", "get_clause", "get_toc", "expand_references", "lookup_term"] as const, "tool"), argument_keys: list(r.argument_keys, "argument keys", 16).map((v) => string(v, "argument key", ARGUMENT_RE, 64)), result_count: integer(r.result_count, "result count", 0, 1_000_000), duration_ms: integer(r.duration_ms, "duration", 0, 3_600_000), retry_count: integer(r.retry_count, "retry count", 0, 1), error_code: reason(r.error_code, "error code") }; }
     case "candidate_summary": { const r = exact(value, ["kind", "sequence", "candidates"]); return { kind, sequence, candidates: list(r.candidates, "candidates", 20).map((item) => { const c = exact(item, ["candidate_id", "score"]); return { candidate_id: identifier(c.candidate_id, "candidate id"), score: number(c.score, "score", -1e12, 1e12) }; }) }; }
     case "evidence_summary": { const r = exact(value, ["kind", "sequence", "evidence"]); return { kind, sequence, evidence: list(r.evidence, "evidence", 5).map((item) => { const e = exact(item, ["evidence_id", "content_hash"]); return { evidence_id: hash(e.evidence_id, "evidence id"), content_hash: hash(e.content_hash, "content hash") }; }) }; }
@@ -116,6 +118,11 @@ function decodeEvent(value: unknown): RunEvent {
     case "usage_summary": { const r = exact(value, ["kind", "sequence", "stage", "prompt_tokens", "completion_tokens", "request_bytes", "duration_ms", "cost_microunits"]); return { kind, sequence, stage: enumeration(r.stage, STAGES, "stage"), prompt_tokens: integer(r.prompt_tokens, "prompt tokens", 0, 1_000_000), completion_tokens: integer(r.completion_tokens, "completion tokens", 0, 1_000_000), request_bytes: integer(r.request_bytes, "request bytes", 0, 1_000_000), duration_ms: integer(r.duration_ms, "duration", 0, 3_600_000), cost_microunits: integer(r.cost_microunits, "cost", 0, 1_000_000_000) }; }
     case "answer_outcome": { const r = exact(value, ["kind", "sequence", "verdict", "refusal_reason", "provider_error", "reservation_id", "replayed", "parse_fault_code"]); const event: AnswerOutcome = { kind, sequence, verdict: enumeration(r.verdict, ["answered", "refused"] as const, "verdict"), refusal_reason: reason(r.refusal_reason, "refusal reason"), provider_error: reason(r.provider_error, "provider error"), reservation_id: nullableUuid(r.reservation_id, "reservation id"), replayed: bool(r.replayed, "replayed"), parse_fault_code: reason(r.parse_fault_code, "parse fault code") }; if ((event.verdict === "answered" && event.refusal_reason !== null) || (event.verdict === "refused" && event.refusal_reason === null)) throw new Error("invalid answer outcome"); return event; }
     case "verifier_summary": { const r = exact(value, ["kind", "sequence", "checks", "duration_ms"]); return { kind, sequence, checks: list(r.checks, "checks", 20).map((item) => { const c = exact(item, ["evidence_id", "passed", "fault_code"]); const check = { evidence_id: c.evidence_id === null ? null : hash(c.evidence_id, "evidence id"), passed: bool(c.passed, "passed"), fault_code: reason(c.fault_code, "fault code") }; if ((check.passed && check.fault_code !== null) || (!check.passed && check.fault_code === null)) throw new Error("invalid verifier check"); return check; }), duration_ms: integer(r.duration_ms, "duration", 0, 3_600_000) }; }
+    case "checkpoint_summary": { const r = exact(value, ["kind", "sequence", "stage", "checkpoint_version", "tool_attempts_used", "recovery_attempted"]); return { kind, sequence, stage: enumeration(r.stage, ["planned", "evidence_collected", "candidate_built", "deterministic_verified", "recovery_reserved", "recovery_completed", "semantic_verified", "completed"] as const, "checkpoint stage"), checkpoint_version: integer(r.checkpoint_version, "checkpoint version", 1, Number.MAX_SAFE_INTEGER), tool_attempts_used: integer(r.tool_attempts_used, "tool attempts used", 0, 8), recovery_attempted: bool(r.recovery_attempted, "recovery attempted") }; }
+    case "compliance_summary": { const r = exact(value, ["kind", "sequence", "candidate_count", "claim_ids"]); const claimIds = list(r.claim_ids, "claim ids", 3).map((item) => hash(item, "claim id")); const candidateCount = integer(r.candidate_count, "candidate count", 1, 3); if (claimIds.length !== candidateCount || new Set(claimIds).size !== claimIds.length) throw new Error("invalid compliance summary"); return { kind, sequence, candidate_count: candidateCount, claim_ids: claimIds }; }
+    case "semantic_summary": { const r = exact(value, ["kind", "sequence", "claim_id", "supports", "reason"]); const stableReason = reason(r.reason, "reason"); if (stableReason === null) throw new Error("invalid semantic reason"); return { kind, sequence, claim_id: hash(r.claim_id, "claim id"), supports: bool(r.supports, "supports"), reason: stableReason }; }
+    case "recovery_summary": { const r = exact(value, ["kind", "sequence", "kind_name", "reason", "remaining_tool_attempts"]); const stableReason = reason(r.reason, "reason"); if (stableReason === null) throw new Error("invalid recovery reason"); return { kind, sequence, kind_name: enumeration(r.kind_name, ["scoped_search", "get_clause", "expand_references"] as const, "recovery kind"), reason: stableReason, remaining_tool_attempts: integer(r.remaining_tool_attempts, "remaining tool attempts", 0, 8) }; }
+    case "resume_summary": { const r = exact(value, ["kind", "sequence", "attempt"]); return { kind, sequence, attempt: integer(r.attempt, "resume attempt", 2, Number.MAX_SAFE_INTEGER) }; }
     case "terminal": { const r = exact(value, ["kind", "sequence", "status", "reason"]); const event: Terminal = { kind, sequence, status: enumeration(r.status, TERMINAL, "terminal status"), reason: reason(r.reason, "reason") }; if ((event.status === "answered" && event.reason !== null) || (event.status !== "answered" && event.reason === null)) throw new Error("invalid terminal event"); return event; }
     default: throw new Error("unknown trace event");
   }
@@ -123,8 +130,8 @@ function decodeEvent(value: unknown): RunEvent {
 
 export function decodeRun(value: unknown): RunView {
   const r = exact(value, ["run_id", "request_id", "task_level", "profile", "corpus_manifest_id", "status", "reason", "created_at", "started_at", "completed_at", "events"]);
-  const taskLevel = enumeration(r.task_level, ["L1"] as const, "task level");
-  const events = list(r.events, "events", 10_000).map(decodeEvent);
+  const taskLevel = enumeration(r.task_level, ["L1", "L2"] as const, "task level");
+  const events = list(r.events, "events", 10_000).map(decodeRunEvent);
   if (events.some((event, index) => index > 0 && event.sequence <= events[index - 1]!.sequence)) throw new Error("invalid event order");
   const view: RunView = { run_id: uuid(r.run_id, "run id"), request_id: uuid(r.request_id, "request id"), task_level: taskLevel, profile: identifier(r.profile, "profile"), corpus_manifest_id: hash(r.corpus_manifest_id, "corpus manifest id"), status: enumeration(r.status, STATUSES, "status"), reason: reason(r.reason, "reason"), created_at: timestamp(r.created_at, "created at"), started_at: nullableTimestamp(r.started_at, "started at"), completed_at: nullableTimestamp(r.completed_at, "completed at"), events };
   const nonterminal = view.status === "queued" || view.status === "running";
@@ -133,10 +140,8 @@ export function decodeRun(value: unknown): RunView {
   if (view.status === "running" && view.started_at === null) throw new Error("invalid running start");
   if (nonterminal && view.completed_at !== null) throw new Error("invalid nonterminal completion");
   if (view.status === "answered" && (view.reason !== null || view.completed_at === null)) throw new Error("invalid answered view");
-  if (view.status === "refused" && (view.reason === null || !REFUSAL_REASONS.includes(view.reason as typeof REFUSAL_REASONS[number]) || view.completed_at === null)) throw new Error("invalid refused view");
-  if (view.status === "failed" && (view.reason === null || !FAILURE_REASONS.includes(view.reason as typeof FAILURE_REASONS[number]) || view.completed_at === null)) throw new Error("invalid failed view");
-  if (view.status === "egress_blocked" && (view.reason === null || !EGRESS_REASONS.includes(view.reason as typeof EGRESS_REASONS[number]) || view.completed_at === null)) throw new Error("invalid egress-blocked view");
-  if (view.status === "interrupted" && (view.reason !== "lease_expired" || view.completed_at !== null)) throw new Error("invalid interrupted view");
+  if (["refused", "failed", "egress_blocked"].includes(view.status) && (view.reason === null || view.completed_at === null)) throw new Error("invalid terminal view");
+  if (view.status === "interrupted" && view.reason === null) throw new Error("invalid interrupted view");
   const created = Date.parse(view.created_at);
   const started = view.started_at === null ? null : Date.parse(view.started_at);
   const completed = view.completed_at === null ? null : Date.parse(view.completed_at);

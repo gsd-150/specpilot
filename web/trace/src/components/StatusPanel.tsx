@@ -18,6 +18,7 @@ const CONNECTION_COPY: Partial<Record<ConnectionState, string>> = {
   service_unavailable: "Trace service is unavailable.",
   network_error: "Network connection failed.",
   invalid_response: "Trace response was rejected.",
+  stream_unavailable: "Live trace is unavailable. The last server status is preserved; use Refresh for a current snapshot.",
 };
 
 export interface StatusPanelProps {

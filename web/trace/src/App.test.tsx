@@ -179,6 +179,14 @@ describe("terminal status semantics", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Polling limit reached");
   });
 
+  it("preserves the last server status and manual refresh when the stream is unavailable", async () => {
+    const h = harness(view("running"), "stream_unavailable");
+    await submit(h);
+    expect(await screen.findByRole("status", { name: "Run status" })).toHaveTextContent("Running");
+    expect(screen.getByRole("alert")).toHaveTextContent("Live trace is unavailable");
+    expect(screen.getByRole("button", { name: "Refresh trace" })).toBeVisible();
+  });
+
   it.each([
     ["unauthorized", "Session authorization failed"],
     ["not_found", "Run is unavailable"],

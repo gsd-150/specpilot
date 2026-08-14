@@ -79,6 +79,57 @@ describe("decodeRun", () => {
     expect(decoded.events.map((event) => event.kind)).toHaveLength(11);
   });
 
+  it("accepts the current L2 and W4 event union emitted by Python models", () => {
+    // Generated with RunView(...).model_dump(mode="json") against the current
+    // Python contract so this fixture catches drift at the browser boundary.
+    const pythonFixture = {
+      ...run(),
+      task_level: "L2",
+      status: "answered",
+      completed_at: "2026-08-12T00:00:02Z",
+      events: [
+        { sequence: 1, kind: "state_transition", previous_status: "queued", status: "running", reason: null },
+        { sequence: 2, kind: "plan_summary", plan_id: "plan-l2", step_count: 4, max_tool_calls: 8 },
+        { sequence: 3, kind: "agent_step", agent: "compliance", step_id: "compliance-1", phase: "finished", duration_ms: 2, error_code: null },
+        { sequence: 4, kind: "tool_finished", step_id: "tool-1", tool: "expand_references", argument_keys: ["document_id"], result_count: 1, duration_ms: 2, retry_count: 1, error_code: null },
+        { sequence: 5, kind: "candidate_summary", candidates: [{ candidate_id: "candidate-1", score: -2.5 }] },
+        { sequence: 6, kind: "evidence_summary", evidence: [{ evidence_id: HASH, content_hash: "b".repeat(64) }] },
+        { sequence: 7, kind: "egress_summary", stage: "compliance", reservation_id: UUID, ledger_id: UUID, admitted: true, replayed: false, request_tokens: 2, request_bytes: 10, cost_microunits: null, error_code: null },
+        { sequence: 8, kind: "usage_summary", stage: "judge", prompt_tokens: 2, completion_tokens: 1, request_bytes: 10, duration_ms: 4, cost_microunits: 3 },
+        { sequence: 9, kind: "answer_outcome", verdict: "answered", refusal_reason: null, provider_error: null, reservation_id: UUID, replayed: false, parse_fault_code: null },
+        { sequence: 10, kind: "verifier_summary", checks: [{ evidence_id: HASH, passed: true, fault_code: null }], duration_ms: 2 },
+        { sequence: 11, kind: "checkpoint_summary", stage: "recovery_completed", checkpoint_version: 2, tool_attempts_used: 8, recovery_attempted: true },
+        { sequence: 12, kind: "compliance_summary", candidate_count: 2, claim_ids: [HASH, "b".repeat(64)] },
+        { sequence: 13, kind: "semantic_summary", claim_id: HASH, supports: false, reason: "unsupported_claim" },
+        { sequence: 14, kind: "recovery_summary", kind_name: "scoped_search", reason: "unsupported_claim", remaining_tool_attempts: 0 },
+        { sequence: 15, kind: "resume_summary", attempt: 2 },
+        { sequence: 16, kind: "terminal", status: "answered", reason: null },
+      ],
+    };
+
+    const decoded = decodeRun(pythonFixture);
+    expect(decoded.task_level).toBe("L2");
+    expect(decoded.events.map((event) => event.kind)).toEqual(pythonFixture.events.map((event) => event.kind));
+  });
+
+  it("accepts any bounded stable reason allowed by the Python contract", () => {
+    expect(decodeRun({
+      ...run(),
+      status: "refused",
+      reason: "provider_timeout",
+      completed_at: "2026-08-12T00:00:02Z",
+    }).reason).toBe("provider_timeout");
+  });
+
+  it("accepts an interrupted view with an optional completion time like Python", () => {
+    expect(decodeRun({
+      ...run(),
+      status: "interrupted",
+      reason: "lease_expired",
+      completed_at: "2026-08-12T00:00:02Z",
+    }).completed_at).toBe("2026-08-12T00:00:02Z");
+  });
+
   it("accepts the canonical UUID forms emitted by Python", () => {
     const decoded = decodeRun({ ...run(), run_id: NIL_UUID, request_id: NIL_UUID });
     expect(decoded.run_id).toBe(NIL_UUID);
@@ -93,8 +144,6 @@ describe("decodeRun", () => {
     ["running without a start", { started_at: null }],
     ["running with a reason", { reason: "provider_timeout" }],
     ["answered with a reason", { status: "answered", reason: "provider_timeout", completed_at: "2026-08-12T00:00:02Z" }],
-    ["refused with provider reason", { status: "refused", reason: "provider_timeout", completed_at: "2026-08-12T00:00:02Z" }],
-    ["interrupted with completion", { status: "interrupted", reason: "lease_expired", completed_at: "2026-08-12T00:00:02Z" }],
   ])("rejects RunView invariant: %s", (_name, mutation) => {
     expect(() => decodeRun({ ...run(), ...mutation })).toThrow();
   });
