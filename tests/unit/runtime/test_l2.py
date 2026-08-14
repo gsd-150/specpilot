@@ -84,9 +84,14 @@ def passed(item: Evidence) -> DeterministicResult:
 @dataclass
 class Planner:
     calls: int = 0
+    contexts: list[object] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.contexts = []
 
     async def plan(self, question: str, context: object) -> PlannerResult:
         self.calls += 1
+        self.contexts.append(context)
         return PlannerResult(
             plan=FakePlan(),  # type: ignore[arg-type]
             reservation_id="00000000-0000-0000-0000-000000000001",
@@ -306,6 +311,8 @@ async def test_l2_runs_both_gates_and_returns_a_verified_metadata_result() -> No
     assert outcome.results[0].verification_status.value == "verified"
     assert semantic.calls == 1
     assert outcome.recovery_attempted is False
+    assert made.planner.contexts[0].idempotency_key == "run-1-planning-initial-g0"  # type: ignore[attr-defined]
+    assert made.planner.contexts[0].reconstruction_generation == 0  # type: ignore[attr-defined]
 
 
 async def test_deterministic_failure_recovers_once_then_reruns_every_gate() -> None:
@@ -719,6 +726,36 @@ async def test_first_semantic_receipt_is_cas_written_before_recovery_await() -> 
     assert observed
     assert outcome.recovery_attempted
     assert len(outcome.reservation_ids) >= 3
+
+
+async def test_semantic_receipt_seals_before_post_response_lease_exit() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+    live = True
+
+    class LeaseDroppingSemantic(Semantic):
+        async def verify(self, *args: object) -> SemanticOutcome:
+            nonlocal live
+            result = await super().verify(*args)
+            live = False
+            return result
+
+    semantic = LeaseDroppingSemantic([False])
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=semantic),
+        checkpoint_factory=checkpoint,
+        checkpoint_writer=writer,
+        lease_is_live=lambda: live,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault == "lease_lost"
+    assert writer.current is not None
+    # Planning, Compliance, then the sealed Semantic receipt.
+    assert len(writer.current.reservation_ids) == 3
+    assert semantic.calls == 1
 
 
 def dataclass_replace(value: object, **changes: object):

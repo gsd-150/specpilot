@@ -167,7 +167,7 @@ def _idempotency_suffix(
 
 
 def _planning_suffix(run_id: str) -> str:
-    return logical_stage_key(run_id, "planning", None, False, 0).removesuffix("-g0")
+    return logical_stage_key(run_id, "planning", None, False, 0)
 
 
 async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
@@ -662,17 +662,6 @@ async def _one_claim(
             reconstruction_generation=generation,
         ),
     )
-    if not context.lease_is_live():
-        return (
-            _insufficient(
-                active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
-            ),
-            evidence,
-            attempts,
-            recovered,
-            None,
-            recovery,
-        )
     if checkpoint is not None:
         # A first semantic receipt is itself an egress fact.  Persist it before
         # recovery can await MCP so an intervening crash cannot erase the send.
@@ -690,6 +679,17 @@ async def _one_claim(
         )
         if checkpoint is not None:
             written.append(checkpoint)
+    if not context.lease_is_live():
+        return (
+            _insufficient(
+                active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
+            ),
+            evidence,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
+        )
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
             checkpoint = await _advance(
@@ -821,6 +821,17 @@ async def _one_claim(
         )
         if checkpoint is not None:
             written.append(checkpoint)
+    if not context.lease_is_live():
+        return (
+            _insufficient(
+                active.claim_id, VerificationStatus.INSUFFICIENT, "lease_lost"
+            ),
+            evidence,
+            attempts,
+            recovered,
+            semantic,
+            recovery,
+        )
     if semantic.decision.supports_verdict:
         if checkpoint is not None:
             checkpoint = await _advance(

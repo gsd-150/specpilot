@@ -194,7 +194,7 @@ def _generation_key(key: str, generation: int) -> str:
     lost model result the resumed state requests an explicitly new generation
     that is charged to the existing root ledger.
     """
-    return key if generation == 0 else f"{key}-g{generation}"
+    return key if key.endswith(f"-g{generation}") else f"{key}-g{generation}"
 
 
 __all__ = ["InvalidToolPlan", "Planner", "PlannerContext", "PlannerResult"]

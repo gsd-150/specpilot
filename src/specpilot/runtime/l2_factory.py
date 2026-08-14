@@ -165,7 +165,7 @@ def _planner_context(run: RunRecord, context: L2RunContext) -> PlannerContext:
         evaluation_root_id=run.evaluation_root_id or "invalid-root",
         run_id=str(run.run_id),
         model_id=run.model_id,
-        idempotency_key=f"{run.run_id}-planning-initial",
+        idempotency_key=f"{run.run_id}-planning-initial-g0",
         task_level=TaskLevel.L2,
     )
 

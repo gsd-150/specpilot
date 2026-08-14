@@ -152,4 +152,4 @@ async def test_l2_factory_replaces_builder_planner_bindings_with_run_bindings() 
     assert planner.run_id == str(run.run_id)
     assert planner.corpus_manifest_id == run.corpus_manifest_id
     assert planner.evaluation_root_id == run.evaluation_root_id
-    assert planner.idempotency_key == f"{run.run_id}-planning-initial"
+    assert planner.idempotency_key == f"{run.run_id}-planning-initial-g0"
