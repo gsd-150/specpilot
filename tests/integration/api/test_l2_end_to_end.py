@@ -149,6 +149,21 @@ async def _disclosure_facts(
     return {row[0]: (int(row[1]), int(row[2])) for row in rows}
 
 
+async def _remove_egress_trace(dsn: str, run_id: UUID, reservation_id: UUID) -> None:
+    """Model the old receipt/checkpoint crash gap before client resume."""
+    async with (
+        await psycopg.AsyncConnection.connect(dsn) as connection,
+        connection.transaction(),
+    ):
+        deleted = await connection.execute(
+            "DELETE FROM specpilot_run_event WHERE run_id = %s "
+            "AND kind = 'egress_summary' "
+            "AND payload ->> 'reservation_id' = %s",
+            (run_id, str(reservation_id)),
+        )
+        assert deleted.rowcount == 1
+
+
 async def test_l2_happy_path_records_every_outward_stage_in_owner_trace(
     clean_ledger: str,
     qdrant_url: str,
@@ -552,6 +567,14 @@ async def test_client_resume_rebuilds_local_state_and_charges_lost_model_generat
             policy_before, usage_before = await _usage_snapshot(clean_ledger, root)
             reservations_before = await _reservations(clean_ledger, run_id)
             assert collection_calls == 1
+            lost_trace_reservation = next(
+                reservation_id
+                for reservation_id, (_, stage, _) in reservations_before.items()
+                if stage == "verifier"
+            )
+            await _remove_egress_trace(
+                clean_ledger, run_id, lost_trace_reservation
+            )
 
             await _restart_worker(runtime)
             future = datetime.now(tz=UTC) + timedelta(seconds=60)
@@ -621,3 +644,56 @@ async def test_client_resume_rebuilds_local_state_and_charges_lost_model_generat
     assert any(key.endswith("-compliance-initial-g0") for key in keys_before)
     assert any(key.endswith("-compliance-initial-g1") for key in keys_after)
     assert len(new_ids) == 2
+    body = trace.json()
+    checkpoint_versions = [
+        event["checkpoint_version"]
+        for event in body["events"]
+        if event["kind"] == "checkpoint_summary"
+    ]
+    assert len(checkpoint_versions) == len(set(checkpoint_versions))
+    assert max(checkpoint_versions) == final_checkpoint.checkpoint_version
+    trace_reservations = [
+        UUID(event["reservation_id"])
+        for event in body["events"]
+        if event["kind"] == "egress_summary" and event["admitted"]
+    ]
+    assert len(trace_reservations) == len(set(trace_reservations))
+    assert set(trace_reservations) == set(reservations_after)
+    recovery_events = [
+        event for event in body["events"] if event["kind"] == "recovery_summary"
+    ]
+    recovery_tools = [
+        event
+        for event in body["events"]
+        if event["kind"] == "tool_finished"
+        and event["step_id"].startswith("recovery_")
+    ]
+    verifier_events = [
+        event for event in body["events"] if event["kind"] == "verifier_summary"
+    ]
+    semantic_events = [
+        event for event in body["events"] if event["kind"] == "semantic_summary"
+    ]
+    assert len(recovery_events) == 1
+    assert recovery_tools
+    for events in (recovery_events, recovery_tools, verifier_events):
+        closed_payloads = [
+            json.dumps(
+                {key: value for key, value in event.items() if key != "sequence"},
+                sort_keys=True,
+            )
+            for event in events
+        ]
+        assert len(closed_payloads) == len(set(closed_payloads))
+    verifier_reservations = {
+        reservation_id
+        for reservation_id, (_, stage, _) in reservations_after.items()
+        if stage == "verifier"
+    }
+    assert len(semantic_events) == len(verifier_reservations) == 2
+    kinds = [event["kind"] for event in body["events"]]
+    assert (
+        kinds.index("semantic_summary")
+        < kinds.index("recovery_summary")
+        < len(kinds) - 1 - kinds[::-1].index("semantic_summary")
+    )

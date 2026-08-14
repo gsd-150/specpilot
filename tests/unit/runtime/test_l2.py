@@ -778,6 +778,29 @@ async def test_semantic_receipt_seals_before_post_response_lease_exit() -> None:
     assert semantic.calls == 1
 
 
+async def test_audit_write_failure_fails_closed_before_the_next_stage() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+
+    async def fail_audit(event: object) -> None:
+        raise RuntimeError("sanitized_audit_unavailable")
+
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True])),
+        checkpoint_factory=checkpoint,
+        checkpoint_writer=writer,
+        audit_sink=fail_audit,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    with pytest.raises(RuntimeError, match="sanitized_audit_unavailable"):
+        await run_l2_attempt(made)
+
+    assert made.planner.calls == 1
+    assert made.evidence_agent.calls == 0
+    assert made.compliance_agent.calls == 0
+
+
 def dataclass_replace(value: object, **changes: object):
     from dataclasses import replace
 

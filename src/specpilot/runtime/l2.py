@@ -29,6 +29,7 @@ from specpilot.checkpoints.contracts import (
     RunCheckpoint,
     StageGeneration,
 )
+from specpilot.contracts.egress import EgressStage
 from specpilot.contracts.verdict import (
     ComplianceCandidate,
     ComplianceResult,
@@ -37,6 +38,7 @@ from specpilot.contracts.verdict import (
     VerificationStatus,
 )
 from specpilot.egress.enforcer import EgressPolicyViolation
+from specpilot.egress.ledger import RequestSize
 from specpilot.providers.transport import ProviderAttemptError, TransportReplayError
 from specpilot.verifier.deterministic import DeterministicResult
 from specpilot.verifier.recovery import RecoveryOutcome
@@ -102,6 +104,7 @@ type EvidenceRestorer = Callable[
 ]
 type PlanRestorer = Callable[[str, str], ToolPlan | None]
 type LeaseIsLive = Callable[[], bool]
+type L2AuditSink = Callable[["L2AuditEvent"], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +126,30 @@ class L2RunContext:
     evidence_restorer: EvidenceRestorer | None = None
     plan_restorer: PlanRestorer | None = None
     lease_is_live: LeaseIsLive = lambda: True
+    audit_sink: L2AuditSink | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class L2PlanningAudit:
+    outcome: PlannerResult
+
+
+@dataclass(frozen=True, slots=True)
+class L2EvidenceAudit:
+    calls: tuple[ToolCallSummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class L2ComplianceAudit:
+    outcome: ComplianceOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class L2EgressAudit:
+    stage: EgressStage
+    reservation_id: str
+    replayed: bool
+    request_size: RequestSize | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +169,15 @@ class L2RecoveryAudit:
     outcome: RecoveryOutcome
 
 
-type L2AuditEvent = L2DeterministicAudit | L2SemanticAudit | L2RecoveryAudit
+type L2AuditEvent = (
+    L2PlanningAudit
+    | L2EvidenceAudit
+    | L2ComplianceAudit
+    | L2EgressAudit
+    | L2DeterministicAudit
+    | L2SemanticAudit
+    | L2RecoveryAudit
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +226,32 @@ def _idempotency_suffix(
 
 def _planning_suffix(run_id: str) -> str:
     return logical_stage_key(run_id, "planning", None, False, 0)
+
+
+async def _emit_audit(context: L2RunContext, event: L2AuditEvent) -> None:
+    """Persist one closed audit fact before any later outward operation."""
+    if context.audit_sink is not None:
+        await context.audit_sink(event)
+
+
+async def _emit_exception_egress(
+    context: L2RunContext,
+    stage: EgressStage,
+    error: ProviderAttemptError
+    | TransportReplayError
+    | InvalidToolPlan
+    | InvalidComplianceReply
+    | InvalidSemanticReply,
+) -> None:
+    await _emit_audit(
+        context,
+        L2EgressAudit(
+            stage=stage,
+            reservation_id=error.reservation_id,
+            replayed=error.replayed,
+            request_size=getattr(error, "request_size", None),
+        ),
+    )
 
 
 async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
@@ -251,15 +312,24 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             )
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
-            planning = await context.planner.plan(
-                context.question,
-                replace(
-                    context.planner_context,
-                    idempotency_key=_planning_suffix(context.run_id),
-                    reconstruction_generation=0,
-                ),
-            )
+            try:
+                planning = await context.planner.plan(
+                    context.question,
+                    replace(
+                        context.planner_context,
+                        idempotency_key=_planning_suffix(context.run_id),
+                        reconstruction_generation=0,
+                    ),
+                )
+            except (
+                ProviderAttemptError,
+                TransportReplayError,
+                InvalidToolPlan,
+            ) as error:
+                await _emit_exception_egress(context, EgressStage.PLANNING, error)
+                raise
             planning_result = planning
+            await _emit_audit(context, L2PlanningAudit(planning))
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             reservations.append(planning.reservation_id)
@@ -282,15 +352,24 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             generation = _latest_generation(checkpoint, "planning", None, False)
-            planning = await context.planner.plan(
-                context.question,
-                replace(
-                    context.planner_context,
-                    idempotency_key=_planning_suffix(context.run_id),
-                    reconstruction_generation=generation,
-                ),
-            )
+            try:
+                planning = await context.planner.plan(
+                    context.question,
+                    replace(
+                        context.planner_context,
+                        idempotency_key=_planning_suffix(context.run_id),
+                        reconstruction_generation=generation,
+                    ),
+                )
+            except (
+                ProviderAttemptError,
+                TransportReplayError,
+                InvalidToolPlan,
+            ) as error:
+                await _emit_exception_egress(context, EgressStage.PLANNING, error)
+                raise
             planning_result = planning
+            await _emit_audit(context, L2PlanningAudit(planning))
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             reservations.append(planning.reservation_id)
@@ -320,6 +399,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 attempt_budget=_L2_TOOL_BUDGET,
                 attempts_used=attempts,
             )
+            await _emit_audit(context, L2EvidenceAudit(tuple(collected.calls)))
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
             attempts = collected.attempts_used
@@ -356,17 +436,26 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         if not context.lease_is_live():
             return _abandoned(attempts, reservations, recovered, written)
         generation = _latest_generation(checkpoint, "compliance", None, False)
-        compliance = await context.compliance_agent.evaluate(
-            context.question,
-            evidence,
-            replace(
-                context.compliance_context,
-                idempotency_key=_idempotency_suffix(
-                    context.run_id, "compliance", None, False, generation
+        try:
+            compliance = await context.compliance_agent.evaluate(
+                context.question,
+                evidence,
+                replace(
+                    context.compliance_context,
+                    idempotency_key=_idempotency_suffix(
+                        context.run_id, "compliance", None, False, generation
+                    ),
+                    reconstruction_generation=generation,
                 ),
-                reconstruction_generation=generation,
-            ),
-        )
+            )
+        except (
+            ProviderAttemptError,
+            TransportReplayError,
+            InvalidComplianceReply,
+        ) as error:
+            await _emit_exception_egress(context, EgressStage.COMPLIANCE, error)
+            raise
+        await _emit_audit(context, L2ComplianceAudit(compliance))
         if not context.lease_is_live():
             return _abandoned(attempts, reservations, recovered, written)
         reservations.append(compliance.reservation_id)
@@ -570,7 +659,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         return _fault("invalid_tool_plan", attempts, reservations, recovered, written)
 
 
-def _verify_and_record(
+async def _verify_and_record(
     context: L2RunContext,
     candidate: IdentifiedCandidate,
     evidence: tuple[Evidence, ...],
@@ -579,7 +668,9 @@ def _verify_and_record(
 ) -> DeterministicResult:
     result = context.deterministic_verifier(candidate.candidate, evidence)
     deterministic_outcomes.append((candidate.claim_id, result))
-    audit_events.append(L2DeterministicAudit(candidate.claim_id, result))
+    audit = L2DeterministicAudit(candidate.claim_id, result)
+    audit_events.append(audit)
+    await _emit_audit(context, audit)
     return result
 
 
@@ -615,7 +706,7 @@ async def _one_claim(
             (),
             None,
         )
-    deterministic = _verify_and_record(
+    deterministic = await _verify_and_record(
         context, candidate, evidence, deterministic_outcomes, audit_events
     )
     if not deterministic.passed:
@@ -636,7 +727,9 @@ async def _one_claim(
                 None,
             )
         evidence, attempts, recovery = replacement
-        audit_events.append(L2RecoveryAudit(recovery))
+        recovery_audit = L2RecoveryAudit(recovery)
+        audit_events.append(recovery_audit)
+        await _emit_audit(context, recovery_audit)
         recovered = True
         if checkpoint is not None:
             checkpoint = await _advance(
@@ -650,7 +743,7 @@ async def _one_claim(
             if checkpoint is not None:
                 written.append(checkpoint)
         rebuilt = _rebuilt(candidate, evidence)
-        deterministic = _verify_and_record(
+        deterministic = await _verify_and_record(
             context, rebuilt, evidence, deterministic_outcomes, audit_events
         )
         if not deterministic.passed:
@@ -686,7 +779,7 @@ async def _one_claim(
         # must be recomputed against that same rebuilt set before it can bind
         # the semantic payload; otherwise its citations describe the pre-crash
         # candidate while the semantic gate sees the rebuilt candidate.
-        deterministic = _verify_and_record(
+        deterministic = await _verify_and_record(
             context, active, evidence, deterministic_outcomes, audit_events
         )
         if not deterministic.passed:
@@ -717,19 +810,33 @@ async def _one_claim(
             recovery,
         )
     generation = _latest_generation(checkpoint, "verifier", active.claim_id, recovered)
-    semantic = await context.semantic_verifier.verify(
-        active,
-        evidence,
-        deterministic,
-        replace(
-            context.semantic_context,
-            idempotency_key=_idempotency_suffix(
-                context.run_id, "verifier", active.claim_id, recovered, generation
+    try:
+        semantic = await context.semantic_verifier.verify(
+            active,
+            evidence,
+            deterministic,
+            replace(
+                context.semantic_context,
+                idempotency_key=_idempotency_suffix(
+                    context.run_id,
+                    "verifier",
+                    active.claim_id,
+                    recovered,
+                    generation,
+                ),
+                reconstruction_generation=generation,
             ),
-            reconstruction_generation=generation,
-        ),
-    )
-    audit_events.append(L2SemanticAudit(active.claim_id, semantic))
+        )
+    except (
+        ProviderAttemptError,
+        TransportReplayError,
+        InvalidSemanticReply,
+    ) as error:
+        await _emit_exception_egress(context, EgressStage.VERIFIER, error)
+        raise
+    semantic_audit = L2SemanticAudit(active.claim_id, semantic)
+    audit_events.append(semantic_audit)
+    await _emit_audit(context, semantic_audit)
     first_semantic = semantic
     if checkpoint is not None:
         # A first semantic receipt is itself an egress fact.  Persist it before
@@ -805,7 +912,9 @@ async def _one_claim(
             recovery,
         )
     evidence, attempts, recovery = replacement
-    audit_events.append(L2RecoveryAudit(recovery))
+    recovery_audit = L2RecoveryAudit(recovery)
+    audit_events.append(recovery_audit)
+    await _emit_audit(context, recovery_audit)
     recovered = True
     if checkpoint is not None:
         checkpoint = await _advance(
@@ -819,7 +928,7 @@ async def _one_claim(
         if checkpoint is not None:
             written.append(checkpoint)
     active = _rebuilt(active, evidence)
-    deterministic = _verify_and_record(
+    deterministic = await _verify_and_record(
         context, active, evidence, deterministic_outcomes, audit_events
     )
     if not deterministic.passed:
@@ -860,25 +969,37 @@ async def _one_claim(
             (first_semantic,),
             recovery,
         )
-    semantic = await context.semantic_verifier.verify(
-        active,
-        evidence,
-        deterministic,
-        replace(
-            context.semantic_context,
-            idempotency_key=_idempotency_suffix(
-                context.run_id,
-                "verifier",
-                active.claim_id,
-                True,
-                _latest_generation(checkpoint, "verifier", active.claim_id, True),
+    try:
+        semantic = await context.semantic_verifier.verify(
+            active,
+            evidence,
+            deterministic,
+            replace(
+                context.semantic_context,
+                idempotency_key=_idempotency_suffix(
+                    context.run_id,
+                    "verifier",
+                    active.claim_id,
+                    True,
+                    _latest_generation(
+                        checkpoint, "verifier", active.claim_id, True
+                    ),
+                ),
+                reconstruction_generation=_latest_generation(
+                    checkpoint, "verifier", active.claim_id, True
+                ),
             ),
-            reconstruction_generation=_latest_generation(
-                checkpoint, "verifier", active.claim_id, True
-            ),
-        ),
-    )
-    audit_events.append(L2SemanticAudit(active.claim_id, semantic))
+        )
+    except (
+        ProviderAttemptError,
+        TransportReplayError,
+        InvalidSemanticReply,
+    ) as error:
+        await _emit_exception_egress(context, EgressStage.VERIFIER, error)
+        raise
+    semantic_audit = L2SemanticAudit(active.claim_id, semantic)
+    audit_events.append(semantic_audit)
+    await _emit_audit(context, semantic_audit)
     if checkpoint is not None:
         checkpoint = await _advance(
             context,
@@ -1269,8 +1390,12 @@ def _fault(
 
 __all__ = [
     "L2AuditEvent",
+    "L2ComplianceAudit",
     "L2DeterministicAudit",
+    "L2EgressAudit",
+    "L2EvidenceAudit",
     "L2Outcome",
+    "L2PlanningAudit",
     "L2RecoveryAudit",
     "L2RunContext",
     "L2SemanticAudit",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -13,7 +13,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter, ValidationError
 
+from specpilot.contracts.egress import EgressStage
 from specpilot.runs.contracts import (
+    EgressSummaryEvent,
     RunEvent,
     RunRecord,
     RunStatus,
@@ -276,6 +278,125 @@ class PostgresRunStore:
         except (TypeError, ValueError, ValidationError):
             raise RunStoreIntegrityError() from None
 
+    async def append_many_once(
+        self,
+        run_id: UUID,
+        lease_owner: str,
+        events: Sequence[RunEvent],
+        *,
+        anchor: RunEvent,
+    ) -> tuple[RunEvent, ...]:
+        """Lease-fenced atomic audit batch, idempotent by its closed anchor."""
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
+        validated_events = tuple(_validated_event(event) for event in events)
+        validated_anchor = _validated_event(anchor)
+        if not validated_events or isinstance(
+            validated_anchor, (StateTransitionEvent, TerminalEvent)
+        ):
+            raise RunStoreValidationError()
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
+                if (
+                    row is None
+                    or row["status"] != RunStatus.RUNNING.value
+                    or row["lease_owner"] != validated_owner
+                    or row["lease_expires_at"] <= now
+                ):
+                    raise RunStoreValidationError()
+                if await _audit_anchor_exists(
+                    connection, validated_run_id, validated_anchor
+                ):
+                    return ()
+                allocated: list[RunEvent] = []
+                for event in validated_events:
+                    sequence = await _next_sequence(connection, validated_run_id)
+                    item = _allocated_event(event, sequence)
+                    await _insert_event(connection, validated_run_id, item, now)
+                    allocated.append(item)
+                return tuple(allocated)
+        except RunStoreValidationError:
+            raise
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+        except (TypeError, ValueError, ValidationError):
+            raise RunStoreIntegrityError() from None
+
+    async def reconcile_l2_egress(
+        self,
+        run_id: UUID,
+        lease_owner: str,
+        reservation_ids: Sequence[str],
+    ) -> tuple[EgressSummaryEvent, ...]:
+        """Rebuild only missing closed egress receipts from settled ledger rows."""
+        validated_run_id = _validated_uuid(run_id)
+        validated_owner = _validated_identifier(lease_owner)
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                row = await _lock_run(connection, validated_run_id)
+                now = self._now()
+                if (
+                    row is None
+                    or row["status"] != RunStatus.RUNNING.value
+                    or row["lease_owner"] != validated_owner
+                    or row["lease_expires_at"] <= now
+                ):
+                    raise RunStoreValidationError()
+                if not reservation_ids:
+                    return ()
+                rows = await (
+                    await connection.execute(
+                        "SELECT reservation.reservation_id, reservation.stage, "
+                        "attempt.request_tokens, attempt.request_bytes "
+                        "FROM egress_reservation AS reservation "
+                        "JOIN LATERAL (SELECT request_tokens, request_bytes "
+                        "FROM egress_attempt WHERE reservation_id = "
+                        "reservation.reservation_id ORDER BY recorded_at DESC, "
+                        "attempt_id DESC LIMIT 1) AS attempt ON TRUE "
+                        "WHERE reservation.run_id = %s "
+                        "AND reservation.reservation_id = ANY(%s) "
+                        "ORDER BY reservation.created_at, reservation.reservation_id",
+                        (str(validated_run_id), list(reservation_ids)),
+                    )
+                ).fetchall()
+                rebuilt: list[EgressSummaryEvent] = []
+                for receipt in rows:
+                    event = EgressSummaryEvent(
+                        sequence=1,
+                        stage=EgressStage(receipt["stage"]),
+                        reservation_id=receipt["reservation_id"],
+                        ledger_id=None,
+                        admitted=True,
+                        replayed=False,
+                        request_tokens=receipt["request_tokens"],
+                        request_bytes=receipt["request_bytes"],
+                        cost_microunits=None,
+                        error_code=None,
+                    )
+                    if await _audit_anchor_exists(
+                        connection, validated_run_id, event
+                    ):
+                        continue
+                    sequence = await _next_sequence(connection, validated_run_id)
+                    allocated = _allocated_event(event, sequence)
+                    if not isinstance(allocated, EgressSummaryEvent):
+                        raise RunStoreIntegrityError()
+                    await _insert_event(
+                        connection, validated_run_id, allocated, now
+                    )
+                    rebuilt.append(allocated)
+                return tuple(rebuilt)
+        except RunStoreValidationError:
+            raise
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+        except (TypeError, ValueError, ValidationError):
+            raise RunStoreIntegrityError() from None
+
     async def complete(
         self,
         run_id: UUID,
@@ -501,6 +622,33 @@ async def _next_sequence(
     if row is None or not isinstance(row["sequence"], int):
         raise RunStoreIntegrityError()
     return row["sequence"]
+
+
+async def _audit_anchor_exists(
+    connection: psycopg.AsyncConnection[dict[str, Any]],
+    run_id: UUID,
+    anchor: RunEvent,
+) -> bool:
+    if isinstance(anchor, EgressSummaryEvent) and anchor.reservation_id is not None:
+        row = await (
+            await connection.execute(
+                "SELECT 1 FROM specpilot_run_event WHERE run_id = %s "
+                "AND kind = 'egress_summary' "
+                "AND payload ->> 'reservation_id' = %s LIMIT 1",
+                (run_id, str(anchor.reservation_id)),
+            )
+        ).fetchone()
+        return row is not None
+    payload = anchor.model_dump(mode="json")
+    payload.pop("sequence", None)
+    row = await (
+        await connection.execute(
+            "SELECT 1 FROM specpilot_run_event WHERE run_id = %s AND kind = %s "
+            "AND payload - 'sequence' = %s LIMIT 1",
+            (run_id, anchor.kind.value, Jsonb(payload)),
+        )
+    ).fetchone()
+    return row is not None
 
 
 def _validated_event(event: RunEvent) -> RunEvent:

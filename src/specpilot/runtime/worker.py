@@ -25,7 +25,6 @@ from specpilot.runs.contracts import (
     AgentStepEvent,
     AgentStepPhase,
     AnswerOutcomeEvent,
-    CheckpointSummaryEvent,
     ComplianceSummaryEvent,
     EgressSummaryEvent,
     EvidenceRefSummary,
@@ -47,9 +46,13 @@ from specpilot.runs.outcomes import (
     project_l2_outcome,
 )
 from specpilot.runtime.l2 import (
+    L2AuditEvent,
+    L2ComplianceAudit,
     L2DeterministicAudit,
+    L2EgressAudit,
+    L2EvidenceAudit,
     L2Outcome,
-    L2RecoveryAudit,
+    L2PlanningAudit,
     L2RunContext,
     L2SemanticAudit,
     run_l2_attempt,
@@ -68,6 +71,22 @@ class RunStore(Protocol):
     async def append(
         self, run_id: UUID, lease_owner: str, event: RunEvent
     ) -> RunEvent: ...
+
+    async def append_many_once(
+        self,
+        run_id: UUID,
+        lease_owner: str,
+        events: Sequence[RunEvent],
+        *,
+        anchor: RunEvent,
+    ) -> tuple[RunEvent, ...]: ...
+
+    async def reconcile_l2_egress(
+        self,
+        run_id: UUID,
+        lease_owner: str,
+        reservation_ids: Sequence[str],
+    ) -> tuple[EgressSummaryEvent, ...]: ...
 
     async def complete(
         self, run_id: UUID, lease_owner: str, event: TerminalEvent
@@ -522,11 +541,21 @@ class RunWorker:
             self._heartbeat(job.run_id, lease_lost, stop_heartbeat)
         )
         try:
-            context = replace_l2_lease(job.l2_context, lease_lost)
+            if job.attempt > 1 and job.l2_context.checkpoint is not None:
+                await self._store.reconcile_l2_egress(
+                    job.run_id,
+                    self._worker_id,
+                    tuple(
+                        str(item)
+                        for item in job.l2_context.checkpoint.reservation_ids
+                    ),
+                )
+            context = replace_l2_runtime(
+                job.l2_context,
+                lease_lost,
+                lambda event: self._append_l2_audit(job.run_id, event),
+            )
             outcome = await self._l2_runner(context)
-            if lease_lost.is_set():
-                return
-            await self._append_l2_summaries(job.run_id, outcome)
             if lease_lost.is_set():
                 return
             terminal = project_l2_outcome(outcome)
@@ -545,112 +574,13 @@ class RunWorker:
             with suppress(asyncio.CancelledError):
                 await heartbeat
 
-    async def _append_l2_summaries(self, run_id: UUID, outcome: L2Outcome) -> None:
-        """Persist only opaque L2 accounting/verdict metadata, never prose."""
-        if outcome.planning is not None:
-            await self._append(
-                run_id,
-                _admitted_egress_event(
-                    EgressStage.PLANNING,
-                    reservation_id=outcome.planning.reservation_id,
-                    replayed=outcome.planning.replayed,
-                    request_size=outcome.planning.request_size,
-                ),
+    async def _append_l2_audit(self, run_id: UUID, audit: L2AuditEvent) -> None:
+        """Append one real-time L2 audit fact under the live worker lease."""
+        batches = _l2_audit_batches(audit)
+        for events, anchor in batches:
+            await self._store.append_many_once(
+                run_id, self._worker_id, events, anchor=anchor
             )
-        for call in outcome.evidence_calls:
-            await self._append(
-                run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
-            )
-        for checkpoint in outcome.checkpoints:
-            await self._append(
-                run_id,
-                CheckpointSummaryEvent(
-                    sequence=1,
-                    stage=checkpoint.stage.value,
-                    checkpoint_version=checkpoint.checkpoint_version,
-                    tool_attempts_used=checkpoint.tool_attempts_used,
-                    recovery_attempted=checkpoint.recovery_attempted,
-                ),
-            )
-        if outcome.compliance is not None:
-            await self._append(
-                run_id,
-                ComplianceSummaryEvent(
-                    sequence=1,
-                    candidate_count=len(outcome.compliance.candidates),
-                    claim_ids=tuple(
-                        item.claim_id for item in outcome.compliance.candidates
-                    ),
-                ),
-            )
-            await self._append(
-                run_id,
-                _admitted_egress_event(
-                    EgressStage.COMPLIANCE,
-                    reservation_id=outcome.compliance.reservation_id,
-                    replayed=outcome.compliance.replayed,
-                    request_size=outcome.compliance.request_size,
-                ),
-            )
-        for audit in outcome.audit_events:
-            if isinstance(audit, L2DeterministicAudit):
-                await self._append(
-                    run_id,
-                    VerifierSummaryEvent(
-                        sequence=1,
-                        checks=tuple(
-                            VerifierCheckSummary(
-                                evidence_id=check.evidence_id,
-                                passed=check.fault is None,
-                                fault_code=(
-                                    None if check.fault is None else check.fault.value
-                                ),
-                            )
-                            for check in audit.result.checks
-                        ),
-                        duration_ms=0,
-                    ),
-                )
-            elif isinstance(audit, L2SemanticAudit):
-                semantic = audit.outcome
-                await self._append(
-                    run_id,
-                    SemanticSummaryEvent(
-                        sequence=1,
-                        claim_id=audit.claim_id,
-                        supports=semantic.decision.supports_verdict,
-                        reason=semantic.decision.reason.value,
-                    ),
-                )
-                await self._append(
-                    run_id,
-                    _admitted_egress_event(
-                        EgressStage.VERIFIER,
-                        reservation_id=semantic.reservation_id,
-                        replayed=semantic.replayed,
-                        request_size=semantic.request_size,
-                    ),
-                )
-            elif isinstance(audit, L2RecoveryAudit):
-                recovery = audit.outcome
-                for call in recovery.calls:
-                    await self._append(
-                        run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
-                    )
-                if (
-                    recovery.calls
-                    and recovery.kind is not None
-                    and recovery.reason_code is not None
-                ):
-                    await self._append(
-                        run_id,
-                        RecoverySummaryEvent(
-                            sequence=1,
-                            kind_name=recovery.kind.value,
-                            reason=recovery.reason_code,
-                            remaining_tool_attempts=8 - recovery.attempts_used,
-                        ),
-                    )
 
     async def _finish_error_stage(
         self,
@@ -709,9 +639,98 @@ class RunWorker:
             )
 
 
-def replace_l2_lease(context: L2RunContext, lease_lost: asyncio.Event) -> L2RunContext:
-    """Fence every next L2 outward operation on the worker's lease."""
-    return replace(context, lease_is_live=lambda: not lease_lost.is_set())
+def _l2_audit_batches(
+    audit: L2AuditEvent,
+) -> tuple[tuple[tuple[RunEvent, ...], RunEvent], ...]:
+    if isinstance(audit, L2PlanningAudit):
+        planning_event = _planning_egress_event(audit.outcome)
+        return (((planning_event,), planning_event),)
+    if isinstance(audit, L2EvidenceAudit):
+        evidence_events = tuple(
+            ToolFinishedEvent(sequence=1, **call.model_dump()) for call in audit.calls
+        )
+        return tuple(((item,), item) for item in evidence_events)
+    if isinstance(audit, L2ComplianceAudit):
+        outcome = audit.outcome
+        compliance_summary = ComplianceSummaryEvent(
+            sequence=1,
+            candidate_count=len(outcome.candidates),
+            claim_ids=tuple(item.claim_id for item in outcome.candidates),
+        )
+        egress = _admitted_egress_event(
+            EgressStage.COMPLIANCE,
+            reservation_id=outcome.reservation_id,
+            replayed=outcome.replayed,
+            request_size=outcome.request_size,
+        )
+        return (((compliance_summary, egress), egress),)
+    if isinstance(audit, L2EgressAudit):
+        egress_event = _admitted_egress_event(
+            audit.stage,
+            reservation_id=audit.reservation_id,
+            replayed=audit.replayed,
+            request_size=audit.request_size,
+        )
+        return (((egress_event,), egress_event),)
+    if isinstance(audit, L2DeterministicAudit):
+        verifier_event = VerifierSummaryEvent(
+            sequence=1,
+            checks=tuple(
+                VerifierCheckSummary(
+                    evidence_id=check.evidence_id,
+                    passed=check.fault is None,
+                    fault_code=None if check.fault is None else check.fault.value,
+                )
+                for check in audit.result.checks
+            ),
+            duration_ms=0,
+        )
+        return (((verifier_event,), verifier_event),)
+    if isinstance(audit, L2SemanticAudit):
+        semantic = audit.outcome
+        semantic_summary = SemanticSummaryEvent(
+            sequence=1,
+            claim_id=audit.claim_id,
+            supports=semantic.decision.supports_verdict,
+            reason=semantic.decision.reason.value,
+        )
+        egress = _admitted_egress_event(
+            EgressStage.VERIFIER,
+            reservation_id=semantic.reservation_id,
+            replayed=semantic.replayed,
+            request_size=semantic.request_size,
+        )
+        return (((semantic_summary, egress), egress),)
+    recovery = audit.outcome
+    recovery_events: tuple[RunEvent, ...] = tuple(
+        ToolFinishedEvent(sequence=1, **call.model_dump()) for call in recovery.calls
+    )
+    if (
+        not recovery.calls
+        or recovery.kind is None
+        or recovery.reason_code is None
+    ):
+        return tuple(((item,), item) for item in recovery_events)
+    recovery_summary = RecoverySummaryEvent(
+        sequence=1,
+        kind_name=recovery.kind.value,
+        reason=recovery.reason_code,
+        remaining_tool_attempts=8 - recovery.attempts_used,
+    )
+    return (((*recovery_events, recovery_summary), recovery_summary),)
+
+
+def replace_l2_runtime(
+    context: L2RunContext,
+    lease_lost: asyncio.Event,
+    audit_sink: Callable[[L2AuditEvent], Awaitable[None]],
+) -> L2RunContext:
+    """Fence every outward operation and audit write on the worker lease."""
+    return replace(
+        context,
+        lease_is_live=lambda: not lease_lost.is_set(),
+        audit_sink=audit_sink,
+    )
 
 
 def _answer_event(outcome: AnswerOutcome) -> AnswerOutcomeEvent:
