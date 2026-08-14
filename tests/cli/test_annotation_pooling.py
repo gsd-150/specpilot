@@ -10,7 +10,7 @@ import pytest
 
 from specpilot.annotation.store import AnnotationStore
 from specpilot.cli import main
-from specpilot.contracts.annotation import L1Annotation
+from specpilot.contracts.annotation import L1Annotation, L2Annotation
 from specpilot.contracts.manifests import RfcSourceManifestDraft
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits, build_clauses
@@ -176,6 +176,7 @@ def pooling_workspace(
         "model_dir": tmp_path / "model",
         "obligation_id": obligation.clause_id,
         "fields_id": fields.clause_id,
+        "fields_path": fields.section_path,
     }
 
 
@@ -578,3 +579,104 @@ def test_a_retired_item_stops_holding_the_audit_open(
     assert progress["retired_item_ids"] == ["l1-dev-001"]
     assert progress["l1"]["completed_total"] == 1
     assert any(record.item_id == "l1-dev-001" for record in store.iter_records())
+
+
+def _store_l2_item(workspace: dict[str, object]) -> None:
+    """Add one L2 item alongside the fixture's two L1 items."""
+    AnnotationStore(Path(workspace["annotation_dir"])).create(
+        L2Annotation(
+            item_id="l2-dev-001",
+            split="dev",
+            question=(
+                "A gateway rewrites the response before forwarding it. "
+                "Assess whether that behavior conforms."
+            ),
+            direction="scenario_first",
+            content_origin="mixed",
+            label_origin="mixed",
+            document_id="ietf-rfc-9999",
+            document_version="2026-08",
+            gold_clause_ids=(cast(str, workspace["fields_id"]),),
+            gold_section_paths=(cast(str, workspace["fields_path"]),),
+            key_points=({"point_id": "kp-1", "criterion": "checks the emitted set"},),
+            question_gold_jaccard=0.1,
+            gold_origins=(
+                {"origin": "model_proposal", "producer": "draft-model"},
+                {"origin": "human_source_review"},
+            ),
+            claim_id="l2-dev-001-c1",
+            expected_verdict="violating",
+            proposed_verdict="violating",
+            supports_verdict=True,
+        )
+    )
+
+
+def test_an_l1_run_leaves_l2_items_out_of_the_pool(
+    pooling_workspace: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default keeps L1 runs meaning exactly what they meant before.
+
+    L1's audit is sealed under one retrieval fingerprint. A run that silently
+    widened to both levels would change the population being audited.
+    """
+    _store_l2_item(pooling_workspace)
+
+    assert main(registration_args(pooling_workspace)) == 0
+    registered = last_json(capsys.readouterr().out)
+
+    assert registered["item_count"] == 2
+    run = PoolingStore(Path(pooling_workspace["pool_dir"])).read_run(
+        str(registered["run_id"])
+    )
+    assert {item.item_id for item in run.items} == {"l1-dev-001", "l1-dev-010"}
+
+
+def test_an_l2_run_pools_only_the_l2_items(
+    pooling_workspace: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _store_l2_item(pooling_workspace)
+
+    assert main([*registration_args(pooling_workspace), "--level", "l2"]) == 0
+    registered = last_json(capsys.readouterr().out)
+
+    assert registered["item_count"] == 1
+    run = PoolingStore(Path(pooling_workspace["pool_dir"])).read_run(
+        str(registered["run_id"])
+    )
+    assert {item.item_id for item in run.items} == {"l2-dev-001"}
+
+
+def test_registration_refuses_a_level_with_nothing_to_audit(
+    pooling_workspace: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main([*registration_args(pooling_workspace), "--level", "l2"])
+    captured = capsys.readouterr()
+
+    assert code != 0
+    assert captured.err.strip() == "no_annotations_to_audit"
+
+
+def test_the_l2_review_sheet_carries_the_verdict_the_judgement_needs(
+    pooling_workspace: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether a candidate belongs in L2 gold depends on the verdict.
+
+    The same clause can complete the support for a `violating` scenario and be
+    exactly the clause whose absence defines an `insufficient_evidence` one, so
+    a sheet without the verdict asks a question the reviewer cannot answer.
+    """
+    _store_l2_item(pooling_workspace)
+    assert main([*registration_args(pooling_workspace), "--level", "l2"]) == 0
+    registered = last_json(capsys.readouterr().out)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("complete\n"))
+    code = main(review_args(pooling_workspace, str(registered["run_id"])))
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    assert "expected verdict violating" in captured.out
+    assert "l2-dev-001-c1" in captured.out
+    assert last_json(captured.out)["status"] == "sealed"

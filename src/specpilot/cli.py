@@ -9,7 +9,7 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from contextlib import redirect_stderr, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1386,18 +1386,29 @@ def _pool_sources(
     return tuple(sources)
 
 
-def _annotation_heads(directory: Path) -> tuple[L1Annotation, ...]:
+def _annotation_heads(
+    directory: Path, levels: Collection[str] = ("l1",)
+) -> tuple[L1Annotation, ...]:
+    """Chain heads for the requested levels.
+
+    L1-only by default, which is what every caller wanted while L2 had no
+    audit of its own. It is a parameter rather than a filter each caller
+    applies, because the two levels must not be pooled in one run: the L1
+    audit is sealed under a specific retrieval fingerprint, and quietly
+    widening a run to include L1 again would re-open forty adjudicated items.
+    """
     records = tuple(AnnotationStore(directory).iter_records())
     predecessors = {
         record.predecessor_annotation_id
         for record in records
         if record.predecessor_annotation_id is not None
     }
+    wanted = frozenset(levels)
     heads = tuple(
         record
         for record in records
         if record.annotation_id not in predecessors
-        and not isinstance(record, L2Annotation)
+        and ("l2" if isinstance(record, L2Annotation) else "l1") in wanted
     )
     by_item: dict[str, L1Annotation] = {}
     for record in heads:
@@ -1449,7 +1460,10 @@ def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
         return _refuse("corpus_source_mismatch")
 
     try:
-        heads = _annotation_heads(arguments.annotation_dir)
+        # L1 only: §8.2.2's Macro-Recall is defined over the retrieval question
+        # set, and an L2 item's input is a design description rather than a
+        # query, so mixing them would report one number over two populations.
+        heads = _annotation_heads(arguments.annotation_dir, ("l1",))
         corpus = _pool_corpus(resolved)
     except (OSError, ValueError):
         return _refuse("invalid_annotation_record")
@@ -1908,14 +1922,14 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
     if isinstance(resolved, str):
         return _refuse_source(resolved)
     try:
-        heads = _annotation_heads(arguments.annotation_dir)
+        heads = _annotation_heads(arguments.annotation_dir, (arguments.level,))
         retired = {
             entry.item_id
             for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
         }
         heads = tuple(record for record in heads if record.item_id not in retired)
         if not heads:
-            return _refuse("no_l1_annotations")
+            return _refuse("no_annotations_to_audit")
         corpus = _pool_corpus(resolved)
     except (OSError, ValueError):
         return _refuse("invalid_annotation_record")
@@ -1980,7 +1994,7 @@ def _annotation_pool_register(arguments: argparse.Namespace) -> int:
         )
         heads = tuple(record for record in heads if record.item_id not in audited)
         if not heads:
-            return _refuse("no_l1_annotations_to_audit")
+            return _refuse("no_unaudited_annotations")
         items: list[PoolingItem] = []
         try:
             for record in heads:
@@ -2048,6 +2062,17 @@ def _print_pool_sheet(
 ) -> None:
     print(f"item {record.item_id} · {record.document_id}")
     print()
+    if isinstance(record, L2Annotation):
+        # Without the verdict the L2 question is unanswerable. "Does this
+        # clause also belong in the gold?" depends entirely on what the gold
+        # has to establish: a clause that completes the support for a
+        # `violating` scenario may be exactly the clause whose absence is the
+        # point of an `insufficient_evidence` one.
+        print(
+            f"claim {record.claim_id} · "
+            f"expected verdict {record.expected_verdict.value}"
+        )
+        print()
     print(f"Q. {record.question}")
     print()
     print("Current gold:")
@@ -2114,9 +2139,13 @@ def _annotation_pool_review(arguments: argparse.Namespace) -> int:
         corpus = _pool_corpus(resolved)
         units = {unit_id: corpus.get_clause(unit_id) for unit_id in corpus.unit_ids()}
         unit_texts = {unit_id: unit.text for unit_id, unit in units.items()}
+        # Both levels: the run's own item list decides what is reviewed, so
+        # this is only the lookup that resolves those ids to records. Filtering
+        # here would make an L2 run's items unresolvable rather than out of
+        # scope.
         heads = {
             item.item_id: item
-            for item in _annotation_heads(arguments.annotation_dir)
+            for item in _annotation_heads(arguments.annotation_dir, ("l1", "l2"))
         }
     except (OSError, RuntimeError, ValueError):
         return _refuse("pooling_corpus_unavailable", EXIT_IO)
@@ -3375,6 +3404,9 @@ def _parser() -> argparse.ArgumentParser:
     pool_register.add_argument("--xml", action="append", type=Path, required=True)
     pool_register.add_argument("--model-dir", type=Path, required=True)
     pool_register.add_argument("--model-id", required=True)
+    # Defaults to l1 so every run written before L2 had an audit means the same
+    # thing today as it did then.
+    pool_register.add_argument("--level", choices=["l1", "l2"], default="l1")
     pool_register.add_argument("--device", choices=["mps", "cpu"], required=True)
     pool_register.add_argument("--qdrant-url", required=True)
     pool_register.add_argument("--collection", required=True)
