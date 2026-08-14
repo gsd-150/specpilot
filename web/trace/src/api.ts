@@ -35,6 +35,14 @@ export interface RunView {
   events: RunEvent[];
 }
 
+// SSE events do not carry the authoritative completion timestamp. A streamed
+// terminal state is therefore an explicit UI projection, never a decoded
+// RunView with a stale or invented completed_at value.
+export interface StreamRunProjection extends Omit<RunView, "completed_at"> {
+  projection: "stream";
+}
+export type RunResultView = RunView | StreamRunProjection;
+
 export interface CreateRunRequest {
   question: string;
   request_id: string;

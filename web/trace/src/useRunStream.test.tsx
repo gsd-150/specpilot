@@ -134,6 +134,8 @@ describe("useRunStream", () => {
     await flush();
 
     expect(hook.result.current.serverRun?.status).toBe("answered");
+    expect(hook.result.current.serverRun).toMatchObject({ projection: "stream" });
+    expect(hook.result.current.serverRun).not.toHaveProperty("completed_at");
     expect(hook.result.current.connectionState).toBe("connected");
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(mockedStream).toHaveBeenCalledTimes(1);
@@ -152,6 +154,8 @@ describe("useRunStream", () => {
     expect(hook.result.current.serverRun?.events.map((event) => event.sequence)).toEqual([1, 2, 3]);
     expect(hook.result.current.serverRun?.events.at(-1)?.kind).toBe("terminal");
     expect(hook.result.current.serverRun?.status).toBe("interrupted");
+    expect(hook.result.current.serverRun).toMatchObject({ projection: "stream" });
+    expect(hook.result.current.serverRun).not.toHaveProperty("completed_at");
     expect(mockedStream).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });

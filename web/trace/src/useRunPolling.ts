@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getRun, type RunView, type TerminalStatus } from "./api";
+import { getRun, type RunResultView, type RunView, type TerminalStatus } from "./api";
 
 const TERMINAL = new Set<TerminalStatus>([
   "answered",
@@ -29,7 +29,7 @@ export interface RunPollingOptions {
 }
 
 export interface RunPollingResult {
-  serverRun: RunView | null;
+  serverRun: RunResultView | null;
   connectionState: ConnectionState;
   refresh: () => Promise<void>;
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getRun, type RunEvent, type RunView, type TerminalStatus } from "./api";
+import { getRun, type RunEvent, type RunResultView, type StreamRunProjection, type TerminalStatus } from "./api";
 import { StreamProtocolError, streamRunEvents } from "./sse";
 import type { ConnectionState, RunPollingOptions, RunPollingResult } from "./useRunPolling";
 
@@ -22,9 +22,29 @@ function snapshotErrorState(error: unknown): ConnectionState {
   return "invalid_response";
 }
 
-function appendEvent(run: RunView, event: RunEvent): RunView {
+function terminalProjection(
+  run: RunResultView,
+  event: Extract<RunEvent, { kind: "state_transition" | "terminal" }>,
+): StreamRunProjection {
+  return {
+    projection: "stream",
+    run_id: run.run_id,
+    request_id: run.request_id,
+    task_level: run.task_level,
+    profile: run.profile,
+    corpus_manifest_id: run.corpus_manifest_id,
+    status: event.status,
+    reason: event.reason,
+    created_at: run.created_at,
+    started_at: run.started_at,
+    events: [...run.events, event],
+  };
+}
+
+function appendEvent(run: RunResultView, event: RunEvent): RunResultView {
   if (event.sequence !== (run.events.at(-1)?.sequence ?? 0) + 1) throw new Error("invalid stream sequence");
   if (event.kind === "state_transition" || event.kind === "terminal") {
+    if (TERMINAL.has(event.status as TerminalStatus)) return terminalProjection(run, event);
     return { ...run, status: event.status, reason: event.reason, events: [...run.events, event] };
   }
   return { ...run, events: [...run.events, event] };
@@ -32,7 +52,7 @@ function appendEvent(run: RunView, event: RunEvent): RunView {
 
 export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): RunPollingResult {
   const activationKey = JSON.stringify([runId, token ?? null]);
-  const [serverState, setServerState] = useState<{ key: string; run: RunView | null }>({ key: activationKey, run: null });
+  const [serverState, setServerState] = useState<{ key: string; run: RunResultView | null }>({ key: activationKey, run: null });
   const [connection, setConnection] = useState<{ key: string; state: ConnectionState }>({ key: activationKey, state: "connecting" });
   const refreshRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -41,7 +61,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
     let expired = false;
     let terminal = false;
     let streamUnavailable = false;
-    let currentRun: RunView | null = null;
+    let currentRun: RunResultView | null = null;
     let cursor = 0;
     let retryIndex = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -67,7 +87,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
       deadlineTimer = undefined;
     };
 
-    const publish = (run: RunView, state: ConnectionState): void => {
+    const publish = (run: RunResultView, state: ConnectionState): void => {
       currentRun = run;
       setServerState({ key: activationKey, run });
       setConnection({ key: activationKey, state });
