@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import psycopg
@@ -37,7 +37,7 @@ _RUN_COLUMNS = (
     "source_manifest_id, "
     "corpus_manifest_id, policy_hash, configuration_hash, prompt_id, "
     "prompt_hash, compliance_prompt_hash, verifier_prompt_hash, provider_id, "
-    "model_id, query_hash, status, terminal_reason, "
+    "model_id, query_hash, demo_scenario_id, status, terminal_reason, "
     "created_at, started_at, completed_at, lease_owner, lease_expires_at, "
     "last_heartbeat_at"
 )
@@ -108,7 +108,7 @@ class PostgresRunStore:
             async with connection, connection.transaction():
                 await connection.execute(
                     "INSERT INTO specpilot_run (" + _RUN_COLUMNS + ") VALUES ("
-                    + ", ".join(["%s"] * 25)
+                    + ", ".join(["%s"] * 26)
                     + ")",
                     _run_values(queued),
                 )
@@ -166,6 +166,36 @@ class PostgresRunStore:
             )
         except (TypeError, ValueError, ValidationError):
             raise RunStoreIntegrityError() from None
+
+    async def read_demo_scenario_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str | None:
+        """Read only the server-owned non-prose identity needed by resume."""
+        validated_run_id = _validated_uuid(run_id)
+        validated_session_id = _validated_identifier(session_id)
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                row = await (
+                    await connection.execute(
+                        "SELECT demo_scenario_id FROM specpilot_run "
+                        "WHERE run_id = %s AND session_id = %s",
+                        (validated_run_id, validated_session_id),
+                    )
+                ).fetchone()
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+        if row is None or row["demo_scenario_id"] is None:
+            return None
+        value = row["demo_scenario_id"]
+        if value not in {
+            "l1_answered",
+            "l2_answered",
+            "evidence_refused",
+            "verifier_recovered",
+        }:
+            raise RunStoreIntegrityError()
+        return cast(str, value)
 
     async def read_events_owned(
         self,

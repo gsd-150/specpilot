@@ -88,7 +88,9 @@ test("refuses unsupported custom fixture input without entering a provider path"
   expect((await eventResponse).headers()["content-type"]).toContain("text/event-stream");
 
   await expect(page.getByRole("heading", { name: "The system declined to answer" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("unsupported_demo_case", { exact: true })).toBeVisible();
+  await expect(
+    page.getByLabel("Run status").getByText("unsupported_demo_case", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Egress decision" })).toHaveCount(0);
   await assertNoSensitiveProse(page, responses, privateMarker);
 });

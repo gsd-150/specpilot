@@ -33,6 +33,7 @@ from specpilot.api.sse import (
 from specpilot.api.static import install_trace_routes
 from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.demo.scenarios import (
+    DemoScenarioId,
     fixture_question_for,
     public_demo_scenarios,
     scenario_for,
@@ -295,7 +296,17 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             checkpoint = await checkpoint_store.read(run_id)
             if checkpoint is None or checkpoint.attempt != decision.attempt:
                 raise ValueError("resume_checkpoint_unavailable")
-            reconstructed = _resume_chat_request(request, checkpoint)
+            stored_scenario = await runtime.store.read_demo_scenario_owned(
+                run_id, session.session_id
+            )
+            scenario_id = (
+                None
+                if stored_scenario is None
+                else DemoScenarioId(stored_scenario)
+            )
+            reconstructed = _resume_chat_request(
+                request, checkpoint, scenario_id
+            )
             job = await _build_job(
                 runtime,
                 run_id,
@@ -483,6 +494,9 @@ def _new_run(
         provider_id=binding.provider_id,
         model_id=binding.model_id,
         query_hash=query_hash,
+        demo_scenario_id=(
+            None if request.scenario_id is None else request.scenario_id.value
+        ),
         status=RunStatus.QUEUED,
         terminal_reason=None,
         created_at=now,
@@ -569,16 +583,23 @@ def _resolve_chat_request(request: ChatRequest, runtime: ApiRuntime) -> ChatRequ
 
 
 def _resume_chat_request(
-    request: ResumeRequest, checkpoint: RunCheckpoint
+    request: ResumeRequest,
+    checkpoint: RunCheckpoint,
+    scenario_id: DemoScenarioId | None,
 ) -> ChatRequest:
     """Rebuild only server-bound request identities for the job factory."""
     return ChatRequest(
-        question=request.question,
+        question=(
+            request.question
+            if scenario_id is None
+            else fixture_question_for(scenario_id)
+        ),
         request_id=checkpoint.run_id,
         evaluation_root_id=checkpoint.evaluation_root_id,
         task_level="L2",
         source_manifest_id=checkpoint.source_manifest_id,
         corpus_manifest_id=checkpoint.corpus_manifest_id,
+        scenario_id=scenario_id,
     )
 
 

@@ -14,6 +14,7 @@ import pytest
 
 from specpilot.agents.evidence import EvidenceAgent
 from specpilot.api.app import create_app
+from specpilot.api.runtime import _assemble_runtime, load_runtime_config
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.contracts.egress import L2AtomicClaimPayload, L2DesignPayload
 from specpilot.providers.base import ProviderResponse
@@ -153,6 +154,101 @@ async def _restart_worker(runtime: Any) -> RunWorker:
     object.__setattr__(runtime, "worker", restarted)
     await restarted.start()
     return restarted
+
+
+def _restart_runtime_process(runtime: Any) -> Any:
+    """Reassemble fixture dependencies so the fake adapter has no old memory."""
+    old_hook = runtime.lifecycle_hooks[0]
+    mcp_http = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=old_hook.app),
+        base_url="http://127.0.0.1:8080",
+    )
+    return _assemble_runtime(load_runtime_config(), mcp_http_client=mcp_http)
+
+
+async def test_registered_recovery_script_rebuilds_after_process_restart(
+    clean_ledger: str,
+    qdrant_url: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart uses durable scenario ID, not the old adapter's script memory."""
+    del qdrant_url
+    question = "Which retry requirement applies?"
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
+        runtime,
+        issuer,
+    ):
+        assert runtime.checkpoint_store is not None
+        checkpoint_store = runtime.checkpoint_store
+        original_write = checkpoint_store.write
+
+        async def lose_after_recovery(
+            previous_version: int | None, checkpoint: RunCheckpoint
+        ) -> RunCheckpoint:
+            saved = await original_write(previous_version, checkpoint)
+            if saved.stage is CheckpointStage.RECOVERY_COMPLETED:
+                raise _ProcessLostAfterRecovery(saved.stage.value)
+            return saved
+
+        monkeypatch.setattr(checkpoint_store, "write", lose_after_recovery)
+        owner = "registered-restart-owner"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        original_adapter = _adapter(runtime)
+        app = create_app(runtime=runtime)
+        request = _l2_request(
+            runtime,
+            root="registered-restart-root",
+            scenario_id="verifier_recovered",
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post("/chat", headers=headers, json=request)
+            assert accepted.status_code == 202
+            run_id = UUID(accepted.json()["run_id"])
+            interrupted = await _wait_checkpoint(
+                checkpoint_store, run_id, CheckpointStage.RECOVERY_COMPLETED
+            )
+            assert interrupted.recovery_attempted is True
+            await runtime.worker.aclose()
+            restarted = _restart_runtime_process(runtime)
+            assert _adapter(restarted) is not original_adapter
+            restarted_app = create_app(runtime=restarted)
+            async with (
+                restarted_app.router.lifespan_context(restarted_app),
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=restarted_app),
+                    base_url="http://127.0.0.1",
+                ) as restarted_client,
+            ):
+                future = datetime.now(tz=UTC) + timedelta(seconds=60)
+                assert await restarted.store.reconcile_expired(future) == 1
+                resumed = await restarted_client.post(
+                    f"/runs/{run_id}/resume",
+                    headers=headers,
+                    json={"question": question, "resume_key": "registered-restart"},
+                )
+                assert resumed.status_code == 202
+                terminal = await _wait_terminal(restarted, run_id, owner)
+                trace = await restarted_client.get(f"/runs/{run_id}", headers=headers)
+
+    assert terminal.status is RunStatus.ANSWERED
+    body = trace.json()
+    semantic = [
+        event for event in body["events"] if event["kind"] == "semantic_summary"
+    ]
+    recovery = [
+        event for event in body["events"] if event["kind"] == "recovery_summary"
+    ]
+    assert [event["supports"] for event in semantic] == [False, True]
+    assert len(recovery) == 1
+    assert question not in trace.text
 
 
 async def _usage_snapshot(dsn: str, root: str) -> tuple[str, dict[str, Any]]:

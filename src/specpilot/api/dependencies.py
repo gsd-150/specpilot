@@ -20,6 +20,10 @@ class ApiRunStore(Protocol):
 
     async def read_owned(self, run_id: UUID, session_id: str) -> RunView | None: ...
 
+    async def read_demo_scenario_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str | None: ...
+
     async def read_events_owned(
         self,
         run_id: UUID,

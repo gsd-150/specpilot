@@ -55,6 +55,12 @@ TerminalReason = Annotated[
         pattern=r"^[a-z][a-z0-9_]{0,63}$",
     ),
 ]
+DemoScenarioIdentity = Literal[
+    "l1_answered",
+    "l2_answered",
+    "evidence_refused",
+    "verifier_recovered",
+]
 Sequence = Annotated[int, Field(ge=1, le=10_000)]
 Count = Annotated[int, Field(strict=True, ge=0, le=1_000_000)]
 DurationMs = Annotated[int, Field(ge=0, le=3_600_000)]
@@ -409,6 +415,7 @@ class RunRecord(_FrozenModel):
     provider_id: TraceIdentifier
     model_id: TraceIdentifier
     query_hash: Sha256
+    demo_scenario_id: DemoScenarioIdentity | None = None
     status: RunStatus
     terminal_reason: TerminalReason | None
     created_at: datetime
@@ -570,6 +577,7 @@ __all__ = [
     "CandidateScoreSummary",
     "CheckpointSummaryEvent",
     "ComplianceSummaryEvent",
+    "DemoScenarioIdentity",
     "CandidateSummaryEvent",
     "EgressSummaryEvent",
     "EvidenceRefSummary",

@@ -97,13 +97,24 @@ class FakeProvider:
             ),
         )
 
-    def register_demo_script(self, run_id: str, script_version: str) -> None:
+    def register_demo_script(
+        self,
+        run_id: str,
+        script_version: str,
+        *,
+        recovery_consumed: bool = False,
+    ) -> None:
         """Bind a server-selected private fixture script to one ephemeral run."""
         if not run_id or not script_version.startswith("fixture-demo/"):
             raise ValueError("invalid_demo_script")
         existing = self._demo_scripts.setdefault(run_id, script_version)
         if existing != script_version:
             raise ValueError("demo_script_conflict")
+        if recovery_consumed and script_version == "fixture-demo/verifier-recovered/v1":
+            key = (run_id, "l2_atomic_claim")
+            self._demo_script_calls[key] = max(
+                self._demo_script_calls.get(key, 0), 1
+            )
 
     def _next_script_call(
         self,

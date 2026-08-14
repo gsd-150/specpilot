@@ -62,7 +62,7 @@ async def test_runtime_binds_only_the_server_registered_script_to_the_run() -> N
         scenario_id="evidence_refused",
     )
 
-    _register_demo_script(provider, "run-1", request)
+    _register_demo_script(provider, "run-1", request, None)
     selected = await provider.send_for_run(l1_payload(), run_id="run-1")
     unselected = await provider.send_for_run(l1_payload(), run_id="run-2")
 

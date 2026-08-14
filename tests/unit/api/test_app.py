@@ -90,6 +90,7 @@ class FakeWorker:
 @dataclass
 class FakeStore:
     runs: dict[UUID, tuple[str, RunView]] = field(default_factory=dict)
+    scenario_ids: dict[UUID, str | None] = field(default_factory=dict)
     creates: int = 0
     reconciles: int = 0
     delivery_failures: int = 0
@@ -115,6 +116,7 @@ class FakeStore:
             started_at=None, completed_at=None, events=(),
         )
         self.runs[run.run_id] = (run.session_id, view)
+        self.scenario_ids[run.run_id] = run.demo_scenario_id
         return run
 
     async def read_owned(self, run_id: UUID, session_id: str) -> RunView | None:
@@ -122,6 +124,14 @@ class FakeStore:
             raise self.read_error
         stored = self.runs.get(run_id)
         return stored[1] if stored is not None and stored[0] == session_id else None
+
+    async def read_demo_scenario_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str | None:
+        stored = self.runs.get(run_id)
+        if stored is None or stored[0] != session_id:
+            return None
+        return self.scenario_ids[run_id]
 
     async def reconcile_expired(self) -> int:
         self.reconciles += 1

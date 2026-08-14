@@ -482,7 +482,7 @@ def _assemble_runtime(
         checkpoint: RunCheckpoint | None,
         query_hash: str,
     ) -> RunJob:
-        _register_demo_script(adapter, str(run_id), request)
+        _register_demo_script(adapter, str(run_id), request, checkpoint)
         if request.task_level == "L1":
             return RunJob(
                 run_id=run_id,
@@ -550,7 +550,10 @@ def _assemble_runtime(
 
 
 def _register_demo_script(
-    adapter: _ProviderAdapter, run_id: str, request: ChatRequest
+    adapter: _ProviderAdapter,
+    run_id: str,
+    request: ChatRequest,
+    checkpoint: RunCheckpoint | None,
 ) -> None:
     """Select a fixture script from the private registry, never client content."""
     if request.scenario_id is None:
@@ -558,7 +561,13 @@ def _register_demo_script(
     if not isinstance(adapter, FakeProvider):
         raise ValueError("invalid_demo_scenario")
     script_version = scenario_for(request.scenario_id).script_version
-    adapter.register_demo_script(run_id, script_version)
+    adapter.register_demo_script(
+        run_id,
+        script_version,
+        recovery_consumed=(
+            checkpoint is not None and checkpoint.recovery_attempted
+        ),
+    )
 
 
 def _provider(

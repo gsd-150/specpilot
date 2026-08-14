@@ -156,6 +156,21 @@ describe("useRunStream", () => {
     expect(hook.result.current.connectionState).toBe("connected");
   });
 
+  it("preserves an authoritative terminal snapshot when its bounded replay fails", async () => {
+    const authoritative = view("answered", [transition(1), terminal(2)]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(authoritative)));
+    mockedStream.mockImplementation(() => eventsThenFail(transition(1)));
+    const hook = renderHook(() => useRunStream({ runId: RUN_ID, intervalMs: 1_000, deadlineMs: 60_000 }));
+    await flush();
+
+    expect(mockedStream).toHaveBeenCalledWith(RUN_ID, expect.objectContaining({ afterSequence: 0 }));
+    expect(hook.result.current.serverRun).toEqual(authoritative);
+    expect(hook.result.current.connectionState).toBe("connected");
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(mockedStream).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("retains a terminal-status transition and waits for the durable terminal event", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(view())));
     mockedStream.mockImplementation(() => (async function* () {

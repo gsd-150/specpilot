@@ -60,8 +60,10 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
     let active = true;
     let expired = false;
     let terminal = false;
+    let terminalReplay = false;
     let streamUnavailable = false;
     let currentRun: RunResultView | null = null;
+    let replayRun: RunResultView | null = null;
     let cursor = 0;
     let retryIndex = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -103,24 +105,44 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
     };
 
     const connect = async (): Promise<void> => {
-      if (!active || expired || terminal || currentRun === null) return;
+      if (!active || expired || currentRun === null || (terminal && !terminalReplay)) return;
       const controller = new AbortController();
       streamController = controller;
       try {
         for await (const event of streamRunEvents(runId, { token, afterSequence: cursor, signal: controller.signal })) {
-          if (!active || controller.signal.aborted || currentRun === null) return;
-          const next = appendEvent(currentRun, event);
+          const prior = terminalReplay ? replayRun : currentRun;
+          if (!active || controller.signal.aborted || prior === null) return;
+          const next = appendEvent(prior, event);
           cursor = event.sequence;
           retryIndex = 0;
-          publish(next, "connected");
+          if (terminalReplay) {
+            replayRun = next;
+          } else {
+            publish(next, "connected");
+          }
           if (event.kind === "terminal") {
+            terminalReplay = false;
             finishTerminal();
             return;
           }
         }
+        if (terminalReplay) {
+          terminalReplay = false;
+          finishTerminal();
+          return;
+        }
         if (!terminal) throw new Error("stream ended before terminal event");
       } catch (error: unknown) {
-        if (!active || expired || terminal || controller.signal.aborted) return;
+        if (!active || expired || controller.signal.aborted) return;
+        if (terminalReplay) {
+          // The snapshot is already authoritative.  Replay can improve the
+          // streaming trace, but it must never replace a terminal view with a
+          // partial history or turn it into a retrying nonterminal state.
+          terminalReplay = false;
+          finishTerminal();
+          return;
+        }
+        if (terminal) return;
         if (error instanceof StreamProtocolError) {
           unavailable();
           return;
@@ -191,9 +213,12 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
           // A fast terminal worker can complete before this first snapshot.
           // Replay from zero so the trace remains an SSE path rather than a
           // snapshot-only exception (notably for safe offline refusals).
-          currentRun = { ...run, events: [] };
+          currentRun = run;
+          replayRun = { ...run, events: [] };
           cursor = 0;
-          publish(currentRun, "connected");
+          terminal = true;
+          terminalReplay = true;
+          publish(run, "connected");
           void connect();
           return;
         }
