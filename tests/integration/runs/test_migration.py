@@ -28,6 +28,11 @@ _EVENT_KINDS = {
     "usage_summary",
     "answer_outcome",
     "verifier_summary",
+    "checkpoint_summary",
+    "compliance_summary",
+    "semantic_summary",
+    "recovery_summary",
+    "resume_summary",
     "terminal",
 }
 
@@ -117,9 +122,42 @@ def _valid_event_payloads() -> dict[str, dict[str, object]]:
             "checks": [{"evidence_id": "a" * 64, "passed": False, "fault_code": "x"}],
             "duration_ms": 20,
         },
+        "checkpoint_summary": {
+            "kind": "checkpoint_summary",
+            "sequence": 11,
+            "stage": "planned",
+            "checkpoint_version": 1,
+            "tool_attempts_used": 0,
+            "recovery_attempted": False,
+        },
+        "compliance_summary": {
+            "kind": "compliance_summary",
+            "sequence": 12,
+            "candidate_count": 1,
+            "claim_ids": ["a" * 64],
+        },
+        "semantic_summary": {
+            "kind": "semantic_summary",
+            "sequence": 13,
+            "claim_id": "a" * 64,
+            "supports": True,
+            "reason": "supported",
+        },
+        "recovery_summary": {
+            "kind": "recovery_summary",
+            "sequence": 14,
+            "kind_name": "scoped_search",
+            "reason": "not_disclosed",
+            "remaining_tool_attempts": 6,
+        },
+        "resume_summary": {
+            "kind": "resume_summary",
+            "sequence": 15,
+            "attempt": 2,
+        },
         "terminal": {
             "kind": "terminal",
-            "sequence": 11,
+            "sequence": 16,
             "status": "failed",
             "reason": "provider_timeout",
         },
@@ -222,6 +260,7 @@ def test_migration_creates_exact_keys_foreign_keys_and_safe_columns(
             "request_id": ("uuid", "NO"),
             "session_id": ("text", "NO"),
             "task_level": ("text", "NO"),
+            "evaluation_root_id": ("text", "YES"),
             "profile": ("text", "NO"),
             "source_manifest_id": ("text", "NO"),
             "corpus_manifest_id": ("text", "NO"),
@@ -229,6 +268,8 @@ def test_migration_creates_exact_keys_foreign_keys_and_safe_columns(
             "configuration_hash": ("text", "NO"),
             "prompt_id": ("text", "NO"),
             "prompt_hash": ("text", "NO"),
+            "compliance_prompt_hash": ("text", "YES"),
+            "verifier_prompt_hash": ("text", "YES"),
             "provider_id": ("text", "NO"),
             "model_id": ("text", "NO"),
             "query_hash": ("text", "NO"),
@@ -337,7 +378,7 @@ def test_raw_sql_accepts_every_closed_event_shape_and_raw_bm25_score(
             )
         assert connection.execute(
             "SELECT count(*) FROM specpilot_run_event WHERE run_id = %s", (run_id,)
-        ).fetchone() == (11,)
+        ).fetchone() == (16,)
 
 
 @pytest.mark.parametrize("container", ["candidates", "evidence", "checks"])

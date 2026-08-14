@@ -92,6 +92,8 @@ class RecoveryOutcome:
     evidence: tuple[Evidence, ...]
     calls: tuple[ToolCallSummary, ...]
     attempts_used: int
+    kind: RecoveryKind | None = None
+    reason_code: str | None = None
 
     @property
     def call(self) -> ToolCallSummary:
@@ -183,7 +185,13 @@ async def execute_recovery(
         calls.append(decoded.summary)
         if decoded.evidence is not None:
             evidence.append(decoded.evidence)
-        return RecoveryOutcome(_dedupe_evidence(evidence), tuple(calls), attempts)
+        return RecoveryOutcome(
+            _dedupe_evidence(evidence),
+            tuple(calls),
+            attempts,
+            request.kind,
+            request.reason_code,
+        )
 
     if request.kind is RecoveryKind.SCOPED_SEARCH:
         decoded, attempts = await _invoke(
@@ -204,7 +212,13 @@ async def execute_recovery(
         calls.append(decoded.summary)
         target = _first_verified_clause(request, corpus, decoded.ids)
         if target is None or attempts >= _L2_ATTEMPT_BUDGET:
-            return RecoveryOutcome(_dedupe_evidence(evidence), tuple(calls), attempts)
+            return RecoveryOutcome(
+                _dedupe_evidence(evidence),
+                tuple(calls),
+                attempts,
+                request.kind,
+                request.reason_code,
+            )
         fetched, attempts = await _invoke(
             client,
             tool=ToolName.GET_CLAUSE,
@@ -217,7 +231,13 @@ async def execute_recovery(
         calls.append(fetched.summary)
         if fetched.evidence is not None:
             evidence.append(fetched.evidence)
-        return RecoveryOutcome(_dedupe_evidence(evidence), tuple(calls), attempts)
+        return RecoveryOutcome(
+            _dedupe_evidence(evidence),
+            tuple(calls),
+            attempts,
+            request.kind,
+            request.reason_code,
+        )
 
     assert source is not None
     expanded, attempts = await _invoke(
@@ -236,7 +256,13 @@ async def execute_recovery(
     calls.append(expanded.summary)
     target = _first_verified_clause(request, corpus, expanded.ids)
     if target is None or attempts >= _L2_ATTEMPT_BUDGET:
-        return RecoveryOutcome(_dedupe_evidence(evidence), tuple(calls), attempts)
+        return RecoveryOutcome(
+            _dedupe_evidence(evidence),
+            tuple(calls),
+            attempts,
+            request.kind,
+            request.reason_code,
+        )
     fetched, attempts = await _invoke(
         client,
         tool=ToolName.GET_CLAUSE,
@@ -249,7 +275,13 @@ async def execute_recovery(
     calls.append(fetched.summary)
     if fetched.evidence is not None:
         evidence.append(fetched.evidence)
-    return RecoveryOutcome(_dedupe_evidence(evidence), tuple(calls), attempts)
+    return RecoveryOutcome(
+        _dedupe_evidence(evidence),
+        tuple(calls),
+        attempts,
+        request.kind,
+        request.reason_code,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,9 +335,7 @@ async def _invoke(
             attempts,
         )
     try:
-        decoded = _decode_success(
-            tool, result, arguments, corpus_manifest_id, corpus
-        )
+        decoded = _decode_success(tool, result, arguments, corpus_manifest_id, corpus)
     except EvidenceCollectionError as error:
         return (
             _Invocation(
@@ -337,9 +367,7 @@ async def _invoke(
     )
 
 
-def _verified_source(
-    request: RecoveryRequest, corpus: LocalCorpus
-) -> IndexUnit | None:
+def _verified_source(request: RecoveryRequest, corpus: LocalCorpus) -> IndexUnit | None:
     if request.source_clause_id is None:
         return None
     unit = corpus.resolve(request.source_clause_id)
@@ -410,6 +438,8 @@ def _invalid_outcome(
             ),
         ),
         attempts_used=attempts_used,
+        kind=request.kind,
+        reason_code=request.reason_code,
     )
 
 

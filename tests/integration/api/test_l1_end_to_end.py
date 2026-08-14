@@ -185,7 +185,7 @@ async def _runtime(
         assessment=assessment(
             provider_id=route.provider_id,
             endpoint_purpose=route.endpoint_purpose,
-            expires_at=datetime(2026, 8, 13, tzinfo=UTC),
+            expires_at=datetime(2026, 11, 8, tzinfo=UTC),
         ),
         route_binding=route,
         created_at=datetime(2026, 8, 6, 3, tzinfo=UTC),

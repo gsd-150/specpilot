@@ -540,6 +540,16 @@ class RunWorker:
 
     async def _append_l2_summaries(self, run_id: UUID, outcome: L2Outcome) -> None:
         """Persist only opaque L2 accounting/verdict metadata, never prose."""
+        if outcome.planning is not None:
+            await self._append(
+                run_id,
+                _admitted_egress_event(
+                    EgressStage.PLANNING,
+                    reservation_id=outcome.planning.reservation_id,
+                    replayed=outcome.planning.replayed,
+                    request_size=outcome.planning.request_size,
+                ),
+            )
         for checkpoint in outcome.checkpoints:
             await self._append(
                 run_id,
@@ -595,13 +605,17 @@ class RunWorker:
                 await self._append(
                     run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
                 )
-            if recovery.calls:
+            if (
+                recovery.calls
+                and recovery.kind is not None
+                and recovery.reason_code is not None
+            ):
                 await self._append(
                     run_id,
                     RecoverySummaryEvent(
                         sequence=1,
-                        kind_name=recovery.calls[0].tool.value,
-                        reason="not_disclosed",
+                        kind_name=recovery.kind.value,
+                        reason=recovery.reason_code,
                         remaining_tool_attempts=8 - recovery.attempts_used,
                     ),
                 )

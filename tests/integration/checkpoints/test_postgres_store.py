@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from specpilot.runs.contracts import RunStatus
-from specpilot.runs.postgres import PostgresRunStore
+from specpilot.runs.postgres import PostgresRunStore, RunStoreValidationError
 from tests.integration.runs.test_postgres_store import Clock, _new_run, _seed_bindings
 
 pytestmark = pytest.mark.integration
@@ -40,13 +40,13 @@ async def test_checkpoint_write_is_compare_and_set_and_appends_summary_atomicall
 
     written = await store.write(None, first)
     assert written.checkpoint_version == 1
-    with pytest.raises(ValueError, match="checkpoint"):
+    with pytest.raises(RunStoreValidationError, match="invalid_run_data"):
         await store.write(None, first)
 
     illegal_initial = first.model_copy(
         update={"stage": CheckpointStage.EVIDENCE_COLLECTED}
     )
-    with pytest.raises(ValueError, match="invalid_run_data"):
+    with pytest.raises(RunStoreValidationError, match="invalid_run_data"):
         await store.write(None, illegal_initial)
 
     read = await store.read(created.run_id)
@@ -185,12 +185,12 @@ async def test_failed_resume_delivery_closes_only_the_acquired_attempt(
     clock = Clock()
     runs = PostgresRunStore(clean_ledger, clock=clock)
     created = await runs.create(_l2_run(clock))
-    clock.advance(seconds=31)
-    assert await runs.reconcile_expired(clock()) == 1
     store = PostgresCheckpointStore(clean_ledger, clock=clock)
     await store.write(
         None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
     )
+    clock.advance(seconds=31)
+    assert await runs.reconcile_expired(clock()) == 1
     acquired = await store.begin_resume(
         created.run_id,
         created.session_id,

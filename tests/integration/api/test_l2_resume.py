@@ -269,11 +269,16 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
             original_runner = restarted_worker._l2_runner
             resume_started = asyncio.Event()
             release_resume = asyncio.Event()
+            runner_errors: list[BaseException] = []
 
             async def gated_runner(context: Any) -> Any:
                 resume_started.set()
                 await release_resume.wait()
-                return await original_runner(context)
+                try:
+                    return await original_runner(context)
+                except BaseException as error:
+                    runner_errors.append(error)
+                    raise
 
             monkeypatch.setattr(restarted_worker, "_l2_runner", gated_runner)
             resume_body = {
@@ -328,7 +333,18 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
             await _assert_sentinels_absent(clean_ledger, run_id)
 
             release_resume.set()
-            terminal = await _wait_terminal(runtime, run_id, owner)
+            for _ in range(300):
+                if runner_errors:
+                    raise runner_errors[0]
+                terminal = await runtime.store.read_owned(run_id, owner)
+                if terminal is not None and terminal.status not in {
+                    RunStatus.QUEUED,
+                    RunStatus.RUNNING,
+                }:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("resumed worker did not reach a terminal state")
             assert terminal.status in {RunStatus.ANSWERED, RunStatus.REFUSED}
             keys_after_resume = await _reservation_keys(clean_ledger, run_id)
             assert set(keys_before_resume).issubset(keys_after_resume)
