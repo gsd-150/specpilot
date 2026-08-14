@@ -197,6 +197,12 @@ real provider, credential, or model, and its own output says so.
      会话归属校验」——所以只要该端点存在，ownership 就必须同时存在，否则会先
      形成一个可枚举 `run_id` 的无鉴权接口。本周保留的是**最小 checkpoint 与
      进程恢复**；W3 遇到重启只标 `interrupted`，不恢复、不重跑。
+   - **[工程包已完成并实测｜2026-08-14]** Fixture `FakeProvider`、新建
+     PostgreSQL 数据库和冻结 Qdrant collection 的全套验证为 **1978 passed,
+     0 skipped**。它覆盖 Compliance、确定性/语义闸门、一次定向恢复、owner
+     assisted resume、generation 计费和脱敏 checkpoint/trace；精确命令与边界在
+     `docs/reports/w4-compliance-verifier-recovery.md`。这不是 L2 dev 校准、真实
+     provider 验收或 locked evaluation 的完成声明；这些评测交付物仍开放。
 
 7. **W5 — Demo, trace UI, and evaluation freeze**
    - Complete four deterministic fixture scenarios, SSE, and the minimal React trace page.

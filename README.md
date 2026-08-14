@@ -169,6 +169,51 @@ W3 uses bounded HTTP polling only. SSE, `/chat/{run_id}/events`, reconnect
 semantics, and SSE credential transport remain W5 work; this release contains
 no `EventSource` client or events endpoint.
 
+## W4 L2 gates, checkpointing, and owner-assisted recovery
+
+An L2 run is bounded to at most three Compliance candidates and eight cumulative
+tool attempts (including directed recovery); the L1 cap remains six. Compliance
+first produces structured candidates. The local deterministic gate then checks
+citation identity, manifest/version and scope before a semantic Verifier call is
+admitted. A failed deterministic or semantic gate may consume one run-scoped,
+directed recovery only. Recovery does not reset the tool or egress budget; every
+recovered candidate goes through the complete deterministic and semantic gates
+again. Semantic support remains a model judgement, not a quality metric.
+
+W4 requires migrations 006--012 in filename order, in addition to the earlier
+operator-applied migrations. Startup still never applies migrations:
+
+```bash
+for migration in migrations/006_w4_checkpoint_resume.sql migrations/007_w4_compliance.sql \
+  migrations/008_w4_checkpoint_validator.sql migrations/009_w4_checkpoint_evidence_validator.sql \
+  migrations/010_w4_checkpoint_generation_validator.sql migrations/011_w4_checkpoint_results_validator.sql \
+  migrations/012_w4_checkpoint_verifier_claim_scope.sql; do
+  psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f "$migration"
+done
+```
+
+The durable checkpoint is deliberately reconstruction-only: it holds frozen
+bindings, hashes/opaque evidence IDs, budgets, reservation IDs, stage and
+generation metadata. It never holds a question, design/claim/rationale,
+retrieval query, excerpt, or provider response. `compact(run_id)` may erase the
+completed checkpoint's evidence, reservations and generation state; an operator
+must arrange retention by calling `delete_expired(now - 7 days)` for noncompleted
+checkpoints. Neither operation is an automatic background cleanup job.
+
+After a lease-expired L2 run, its owner may call `POST /runs/{run_id}/resume`
+with the same question and an idempotency `resume_key`. Resume verifies owner,
+question hash, frozen root/bindings, checkpoint, reservation terminal states and
+the new lease before queue delivery. It preserves the original root and budgets;
+locally reconstructible work is not repeated. A provider result lost across a
+process boundary is sent under the next explicit reconstruction generation and
+is charged as another transmitted attempt under the unchanged caps. The resume
+request prose is used only to calculate the hash and build the ephemeral job.
+
+For service evidence, use a new database name every time and an isolated Qdrant
+endpoint. The suite uses only the fixture `FakeProvider`; do not supply a live
+provider route for this check. The complete command record is in
+[`docs/reports/w4-compliance-verifier-recovery.md`](docs/reports/w4-compliance-verifier-recovery.md).
+
 The deterministic browser gate uses only a synthetic RFC fixture, the local
 fake provider, a dedicated fresh database named `specpilot_w3_browser_test`,
 and loopback HTTP. Run it with:

@@ -946,7 +946,8 @@ Dify 总投入限制为 1–2 天，单独作为发布后扩展记录，不回�
 
 ## 十一、7 周排期（W0–W6）
 
-> **[进度校正｜2026-08-13]** W0 与后续插入的 RFC foundation 已完成；原 3GPP/OOXML 路线保留为 fail-closed 拒绝证据，不是当前主线。W1 的 clause、annotation workflow 与 embedding throughput 已完成；正式数据为 L1 20/40、L2 3/20。W2 的表格/QA、BM25、dense、RRF 与冻结 corpus manifest 已完成，L1 20 条的一次性 pooling audit 已封存；L2 gold/pooling 与主集整体锁定尚未完成。W3 的五个 MCP 工具、有界 Orchestrator/Evidence flow、FastAPI 异步 run、owner-bound 轨迹、PostgreSQL 出站账本与只读 React trace 页已经 PR #1 合并到 `main`。W4–W6 的 L2/Compliance、checkpoint recovery、SSE/reconnect、完整 demo matrix 与 locked evaluation 仍未完成。下方周表保留原始排期基线，执行时以本附注和实际依赖为准。“单人标注”按实际流程披露为“模型起草 + 单人核验、无标注者间一致性”；不可压缩的部分是逐条对照冻结原文的人工核验与判定，不是模型起草本身。
+
+> **[已完成（工程包）并实测｜2026-08-14]** W4 的 L2/Compliance、确定性引文与 manifest/scope 闸门、语义闸门、一次定向 recovery、最小脱敏 checkpoint 与 owner-assisted 进程恢复已在 `FakeProvider` 上完成工程验证；使用一套新建 PostgreSQL 数据库和冻结 Qdrant collection 运行全套测试，结果为 **1978 passed, 0 skipped**。恢复保持同一 evaluation root、绑定与额度；本地可重建阶段不重发，丢失的 provider 结果用下一 reconstruction generation 重传并按既有出站账本累计。此事实只证明实现/服务集成，并不产生 L2 dev 校准数字、真实 provider 验收、SSE/reconnect、完整 demo matrix 或 locked evaluation 结论；这些仍未完成。命令与范围见 `docs/reports/w4-compliance-verifier-recovery.md`。
 
 > **[已失效｜排期模型重写]** 本节的周次排期已与实际执行脱节，且脱节方向与它的设计假设**相反**。实测：2026-08-06 至 08-08 三个日历日内完成 W0、R0、W1 与 W2 的 Task 1–5，共 88 次提交；计划给这些工作的是三周。同期标注完成 3 条。**工程侧不是瓶颈；标注是瓶颈，而且是唯一的。**
 >
