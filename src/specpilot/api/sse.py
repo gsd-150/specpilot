@@ -6,9 +6,15 @@ import asyncio
 import math
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
+
+from starlette.background import BackgroundTask
+from starlette.responses import StreamingResponse
+from starlette.types import Send
 
 from specpilot.api.dependencies import ApiRunStore
 from specpilot.runs.contracts import RunEvent
@@ -48,6 +54,95 @@ class RunEventStreamConfig:
             or not 1 <= self.page_size <= 256
         ):
             raise ValueError("invalid_stream_config")
+
+
+class BoundedStreamingResponse(StreamingResponse):
+    """Streaming response whose deadline includes iterator and ASGI send waits."""
+
+    def __init__(
+        self,
+        content: AsyncIterable[bytes],
+        *,
+        max_connection_seconds: float,
+        status_code: int = 200,
+        headers: Mapping[str, str] | None = None,
+        media_type: str | None = None,
+        background: BackgroundTask | None = None,
+    ) -> None:
+        if (
+            isinstance(max_connection_seconds, bool)
+            or not isinstance(max_connection_seconds, (int, float))
+            or not math.isfinite(max_connection_seconds)
+            or max_connection_seconds <= 0
+        ):
+            raise ValueError("invalid_stream_config")
+        super().__init__(
+            content,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
+            background=background,
+        )
+        self._max_connection_seconds = max_connection_seconds
+
+    async def stream_response(self, send: Send) -> None:
+        """Close normally on expiry, including when client send backpressure stalls."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._max_connection_seconds
+        iterator = self.body_iterator.__aiter__()
+        try:
+            await _await_before(
+                deadline,
+                lambda: send(
+                    {
+                        "type": "http.response.start",
+                        "status": self.status_code,
+                        "headers": self.raw_headers,
+                    }
+                ),
+            )
+            while True:
+                try:
+                    chunk = await _await_before(deadline, lambda: anext(iterator))
+                except StopAsyncIteration:
+                    break
+                if not isinstance(chunk, bytes | memoryview):
+                    chunk = chunk.encode(self.charset)
+                await _await_before(
+                    deadline,
+                    partial(_send_body, send, chunk),
+                )
+            await _await_before(
+                deadline,
+                lambda: send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                ),
+            )
+        except TimeoutError:
+            # The response has already started. Expiry is a sanitized body close,
+            # including when the client cannot accept the current frame.
+            return
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
+
+
+async def _await_before[T](
+    deadline: float, operation: Callable[[], Awaitable[T]]
+) -> T:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError
+    async with asyncio.timeout(remaining):
+        return await operation()
+
+
+async def _send_body(send: Send, chunk: bytes | memoryview) -> None:
+    await send(
+        {"type": "http.response.body", "body": chunk, "more_body": True}
+    )
 
 
 def encode_event(event: RunEvent) -> bytes:
@@ -99,6 +194,8 @@ async def stream_owned_events(
             if page is None:
                 return
             for event in page.events:
+                if _monotonic() >= deadline:
+                    return
                 yield encode_event(event)
                 heartbeat_at = _monotonic() + config.heartbeat_seconds
             cursor = page.last_sequence
@@ -113,6 +210,8 @@ async def stream_owned_events(
             continue
 
         now = _monotonic()
+        if now >= deadline:
+            return
         if now >= heartbeat_at:
             yield _HEARTBEAT
             heartbeat_at = _monotonic() + config.heartbeat_seconds
@@ -127,6 +226,7 @@ async def stream_owned_events(
 
 
 __all__ = [
+    "BoundedStreamingResponse",
     "RunEventStreamConfig",
     "encode_event",
     "parse_last_event_id",

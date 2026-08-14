@@ -10,6 +10,7 @@ import pytest
 
 import specpilot.api.sse as sse
 from specpilot.api.sse import (
+    BoundedStreamingResponse,
     RunEventStreamConfig,
     encode_event,
     parse_last_event_id,
@@ -154,6 +155,40 @@ async def test_stream_replays_resumed_pages_without_prefetching_more_than_one(
         (run_id, "owner-a", 1, 2),
         (run_id, "owner-a", 3, 2),
     ]
+
+
+@pytest.mark.anyio
+async def test_stream_stops_draining_a_page_after_slow_consumer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches later buffered frames escaping after connection expiry."""
+    clock = ControlledClock()
+    monkeypatch.setattr(sse, "_monotonic", clock)
+    monkeypatch.setattr(sse, "_sleep", clock.sleep)
+    store = FakeStore(
+        [
+            RunEventPage(
+                events=(_transition(1), _transition(2)),
+                terminal=False,
+                last_sequence=2,
+            )
+        ]
+    )
+    stream = stream_owned_events(
+        store,
+        uuid4(),
+        "owner-a",
+        after_sequence=0,
+        config=RunEventStreamConfig(max_connection_seconds=60),
+    )
+
+    assert await anext(stream) == encode_event(_transition(1))
+    clock.value = 61
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+    assert len(store.calls) == 1
 
 
 @pytest.mark.anyio
@@ -315,3 +350,63 @@ def test_stream_config_rejects_page_sizes_outside_store_cap(page_size: int) -> N
     """Catches callers bypassing the durable page's 256-event memory bound."""
     with pytest.raises(ValueError, match="^invalid_stream_config$"):
         RunEventStreamConfig(page_size=page_size)
+
+
+@pytest.mark.anyio
+async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> None:
+    """Catches ASGI backpressure retaining a page beyond connection expiry."""
+
+    class ClosingIterator:
+        def __init__(self, source: AsyncIterator[bytes]) -> None:
+            self.source = source
+            self.closed = asyncio.Event()
+
+        def __aiter__(self) -> ClosingIterator:
+            return self
+
+        async def __anext__(self) -> bytes:
+            return await anext(self.source)
+
+        async def aclose(self) -> None:
+            await self.source.aclose()
+            self.closed.set()
+
+    run_id = uuid4()
+    store = FakeStore(
+        [
+            RunEventPage(
+                events=(_transition(1), _transition(2)),
+                terminal=False,
+                last_sequence=2,
+            )
+        ]
+    )
+    source = stream_owned_events(
+        store,
+        run_id,
+        "owner-a",
+        after_sequence=0,
+        config=RunEventStreamConfig(),
+    )
+    iterator = ClosingIterator(source)
+    stalled_send_cancelled = asyncio.Event()
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] != "http.response.body" or not message["more_body"]:
+            return
+        try:
+            await asyncio.Future()
+        finally:
+            stalled_send_cancelled.set()
+
+    response = BoundedStreamingResponse(
+        iterator,
+        max_connection_seconds=0.01,
+        media_type="text/event-stream",
+    )
+
+    await asyncio.wait_for(response.stream_response(send), timeout=0.1)
+
+    assert stalled_send_cancelled.is_set()
+    assert iterator.closed.is_set()
+    assert store.calls == [(run_id, "owner-a", 0, 256)]

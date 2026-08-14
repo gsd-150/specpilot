@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from specpilot.api.contracts import (
     ChatAccepted,
@@ -24,6 +24,7 @@ from specpilot.api.contracts import (
 )
 from specpilot.api.dependencies import ApiRuntime
 from specpilot.api.sse import (
+    BoundedStreamingResponse,
     RunEventStreamConfig,
     parse_last_event_id,
     stream_owned_events,
@@ -317,7 +318,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         run_id: UUID,
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
         session: SessionClaims = Depends(dependency=claims),  # noqa: B008
-    ) -> StreamingResponse:
+    ) -> BoundedStreamingResponse:
         try:
             cursor = parse_last_event_id(last_event_id)
         except ValueError:
@@ -339,7 +340,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             raise _service_unavailable() from None
         if page is None:
             raise HTTPException(status_code=404, detail="run_not_found")
-        return StreamingResponse(
+        return BoundedStreamingResponse(
             stream_owned_events(
                 runtime.store,
                 run_id,
@@ -347,6 +348,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 after_sequence=cursor,
                 config=stream_config,
             ),
+            max_connection_seconds=stream_config.max_connection_seconds,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
