@@ -51,6 +51,23 @@ function harness(serverRun: RunView | null, connectionState: ReturnType<PollingH
   return { api, polling, create };
 }
 
+const DEMO_SCENARIOS = [
+  {
+    scenario_id: "l1_answered" as const,
+    label: "L1 answered",
+    description: "Runs the L1 engineering path.",
+    task_level: "L1" as const,
+    engineering_limitation: "Synthetic output demonstrates engineering only.",
+  },
+  {
+    scenario_id: "l2_answered" as const,
+    label: "L2 answered",
+    description: "Runs the L2 engineering path.",
+    task_level: "L2" as const,
+    engineering_limitation: "Synthetic output demonstrates engineering only.",
+  },
+];
+
 async function submit(h: ReturnType<typeof harness>, question = "What does the RFC require?") {
   render(<App api={h.api} usePolling={h.polling} sourceManifestId={HASH} corpusManifestId={HASH} />);
   const input = screen.getByLabelText("L1 question");
@@ -69,6 +86,52 @@ afterEach(() => {
 });
 
 describe("run form", () => {
+  it("submits only a public fixture scenario ID with the registered task level", async () => {
+    const h = harness(view("queued"));
+    render(
+      <App
+        api={h.api}
+        usePolling={h.polling}
+        sourceManifestId={HASH}
+        corpusManifestId={HASH}
+        profile="fixture"
+        demoScenarios={DEMO_SCENARIOS}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Offline demo scenario"), {
+      target: { value: "l2_answered" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run selected scenario" }));
+
+    await waitFor(() => expect(h.create).toHaveBeenCalledOnce());
+    expect(h.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scenario_id: "l2_answered",
+        task_level: "L2",
+      }),
+      {},
+    );
+    expect(screen.getByText("Synthetic output demonstrates engineering only.")).toBeVisible();
+  });
+
+  it("keeps registered fixture controls out of the real profile", () => {
+    const h = harness(null);
+    render(
+      <App
+        api={h.api}
+        usePolling={h.polling}
+        sourceManifestId={HASH}
+        corpusManifestId={HASH}
+        profile="real"
+        demoScenarios={DEMO_SCENARIOS}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Offline demo scenario")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("L1 question")).toBeVisible();
+  });
+
   it("clears the bounded question immediately after an accepted run without retaining it", async () => {
     const h = harness(view("queued"));
     const input = await submit(h, "private question marker");
@@ -207,12 +270,15 @@ describe("sanitized timeline", () => {
       { kind: "egress_summary", sequence: 2, stage: "planning", reservation_id: UUID, ledger_id: UUID, admitted: true, replayed: false, request_tokens: 12, request_bytes: 88, cost_microunits: null, error_code: null },
       { kind: "evidence_summary", sequence: 3, evidence: [{ evidence_id: HASH, content_hash: "b".repeat(64) }] },
       { kind: "verifier_summary", sequence: 4, checks: [{ evidence_id: HASH, passed: false, fault_code: "unverifiable_citation" }], duration_ms: 5 },
+      { kind: "compliance_summary", sequence: 5, candidate_count: 1, claim_ids: [HASH] },
+      { kind: "semantic_summary", sequence: 6, claim_id: HASH, supports: false, reason: "exception_missing" },
+      { kind: "recovery_summary", sequence: 7, kind_name: "expand_references", reason: "exception_missing", remaining_tool_attempts: 1 },
     ];
     const h = harness(view("refused", "unverifiable_citation", events));
     await submit(h);
     const timeline = await screen.findByRole("list", { name: "Run trace" });
     const items = within(timeline).getAllByRole("listitem");
-    expect(items.map((item) => item.getAttribute("data-sequence"))).toEqual(["1", "2", "3", "4"]);
+    expect(items.map((item) => item.getAttribute("data-sequence"))).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
     expect(timeline).toHaveTextContent("search_clauses");
     expect(timeline).toHaveTextContent("limit, query");
     expect(timeline).toHaveTextContent("3 results");
@@ -222,6 +288,9 @@ describe("sanitized timeline", () => {
     expect(timeline).toHaveTextContent(UUID);
     expect(timeline).toHaveTextContent(HASH);
     expect(timeline).toHaveTextContent("unverifiable_citation");
+    expect(timeline).toHaveTextContent("Compliance review");
+    expect(timeline).toHaveTextContent("Semantic verdict");
+    expect(timeline).toHaveTextContent("Directed recovery");
   });
 
   it("drops unknown keys and hostile nested plaintext even when malformed data bypasses TypeScript", async () => {

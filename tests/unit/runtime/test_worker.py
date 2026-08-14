@@ -288,6 +288,30 @@ async def test_delivery_permit_is_one_shot_and_delivers_exactly_once() -> None:
     assert planner.calls == 1
 
 
+async def test_unsupported_fixture_job_terminates_without_pipeline_calls() -> None:
+    made, store, planner, evidence, answerer = worker()
+    ordinary = job()
+    submitted = RunJob(
+        run_id=ordinary.run_id,
+        question=ordinary.question,
+        planner_context=ordinary.planner_context,
+        corpus_manifest_id=ordinary.corpus_manifest_id,
+        answer_context=ordinary.answer_context,
+        terminal_reason="unsupported_demo_case",
+    )
+
+    await made.start()
+    await made.submit(submitted)
+    terminal = await wait_terminal(store)
+    await made.aclose()
+
+    assert terminal.status is RunStatus.REFUSED
+    assert terminal.reason == "unsupported_demo_case"
+    assert planner.calls == 0
+    assert evidence.calls == 0
+    assert answerer.calls == 0
+
+
 async def test_cancelled_reserve_caller_does_not_leak_capacity() -> None:
     made, *_ = worker(queue_capacity=1)
     await made.start()

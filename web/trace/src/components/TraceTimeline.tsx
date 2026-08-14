@@ -52,6 +52,8 @@ const ERROR_CODES = new Set([
   "source_manifest_untrusted", "stage_payload_mismatch", "stage_route_mismatch",
   "task_level_mismatch", "toc_call_exceeded", "toc_run_exceeded",
   "token_accounting_unavailable", "token_counter_incompatible", "lease_expired",
+  // closed semantic decisions and their directed-recovery trigger
+  "supported", "unsupported", "condition_mismatch", "exception_missing", "polarity_mismatch",
 ]);
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -127,6 +129,11 @@ function project(event: unknown): SafeEvent | null {
     case "answer_outcome":
       return { sequence: seq, title: "Answer outcome", rows: [...row("Verdict", choice(safe.verdict, new Set(["answered", "refused"]))), ...row("Refusal reason", stableError(safe.refusal_reason)), ...row("Provider error", stableError(safe.provider_error)), ...row("Reservation ID", matched(safe.reservation_id, UUID)), ...row("Replayed", yesNo(safe.replayed)), ...row("Parse fault", stableError(safe.parse_fault_code))] };
     case "verifier_summary": { const duration = integer(safe.duration_ms); const rows: Array<[string, string]> = []; if (Array.isArray(safe.checks)) for (const check of safe.checks.slice(0, 20)) { const c = record(check); if (c === null) continue; rows.push(...row("Evidence ID", matched(c.evidence_id, HASH)), ...row("Check passed", yesNo(c.passed)), ...row("Fault", stableError(c.fault_code))); } rows.push(...row("Duration", duration === null ? null : `${duration} ms`)); return { sequence: seq, title: "Verifier checks", rows }; }
+    case "compliance_summary": { const count = integer(safe.candidate_count); const claimIds = Array.isArray(safe.claim_ids) ? safe.claim_ids.map((item) => matched(item, HASH)).filter((item): item is string => item !== null).slice(0, 3) : []; return { sequence: seq, title: "Compliance review", rows: [...row("Candidate count", count), ...claimIds.map((claimId) => ["Claim ID", claimId] as [string, string])] }; }
+    case "semantic_summary":
+      return { sequence: seq, title: "Semantic verdict", rows: [...row("Claim ID", matched(safe.claim_id, HASH)), ...row("Supported", yesNo(safe.supports)), ...row("Reason", stableError(safe.reason))] };
+    case "recovery_summary":
+      return { sequence: seq, title: "Directed recovery", rows: [...row("Action", choice(safe.kind_name, new Set(["scoped_search", "get_clause", "expand_references"]))), ...row("Reason", stableError(safe.reason)), ...row("Remaining tool attempts", integer(safe.remaining_tool_attempts))] };
     case "terminal":
       return { sequence: seq, title: "Terminal state", rows: [...row("Status", choice(safe.status, STATUSES)), ...row("Reason", matched(safe.reason, STABLE_CODE))] };
     default:

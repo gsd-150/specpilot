@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from specpilot.api.contracts import ChatRequest
@@ -76,13 +76,13 @@ class ApiLifecycleHook(Protocol):
 
 HealthProbe = Callable[[], Awaitable[bool]]
 JobFactory = Callable[
-    [UUID, str, ChatRequest, RunCheckpoint | None], RunJob | Awaitable[RunJob]
+    [UUID, str, ChatRequest, RunCheckpoint | None, str], RunJob | Awaitable[RunJob]
 ]
 
 
 @dataclass(frozen=True, slots=True)
 class ApiRunBinding:
-    profile: str
+    profile: Literal["fixture", "real"]
     source_manifest_id: str
     corpus_manifest_id: str
     policy_hash: str

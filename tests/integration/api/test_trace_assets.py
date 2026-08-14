@@ -8,9 +8,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from specpilot.api.app import create_app
-from specpilot.api.static import PackageTraceAssets
+from specpilot.api.static import PackageTraceAssets, install_trace_routes
+from specpilot.demo.scenarios import fixture_question_for, public_demo_scenarios
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -55,3 +57,28 @@ async def test_package_loader_reads_trace_bundle_from_zip_import(
 
     assert bundle.index == index.encode()
     assert bundle.assets == {"app-a1.js": b"export {}", "app-b2.css": b"body{}"}
+
+
+async def test_fixture_trace_bootstrap_has_only_profile_and_public_scenarios() -> None:
+    app = FastAPI()
+    public = public_demo_scenarios()
+    install_trace_routes(
+        app,
+        source_manifest_id="a" * 64,
+        corpus_manifest_id="b" * 64,
+        profile="fixture",
+        demo_scenarios=public,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://installed"
+    ) as client:
+        page = await client.get("/trace")
+
+    assert page.status_code == 200
+    assert 'data-profile="fixture"' in page.text
+    assert 'data-demo-scenarios="' in page.text
+    assert all(item.scenario_id in page.text for item in public)
+    assert all(
+        fixture_question_for(item.scenario_id) not in page.text for item in public
+    )

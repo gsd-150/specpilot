@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import { createRun, type ChatAccepted, type CreateRunRequest } from "./api";
+import { createRun, type ChatAccepted, type CreateRunRequest, type PublicDemoScenario } from "./api";
+import { ScenarioPicker } from "./components/ScenarioPicker";
 import { StatusPanel } from "./components/StatusPanel";
 import { TraceTimeline } from "./components/TraceTimeline";
 import type { RunPollingOptions, RunPollingResult } from "./useRunPolling";
@@ -20,6 +21,8 @@ export interface AppProps {
   token?: string;
   sourceManifestId: string;
   corpusManifestId: string;
+  profile?: "fixture" | "real";
+  demoScenarios?: readonly PublicDemoScenario[];
 }
 
 function createError(error: unknown): string {
@@ -48,8 +51,9 @@ function ActiveRun({ runId, token, polling }: { runId: string; token?: string; p
   );
 }
 
-export function App({ api = { createRun }, usePolling: polling = useRunStream, token, sourceManifestId, corpusManifestId }: AppProps) {
+export function App({ api = { createRun }, usePolling: polling = useRunStream, token, sourceManifestId, corpusManifestId, profile = "real", demoScenarios = [] }: AppProps) {
   const [question, setQuestion] = useState("");
+  const [scenarioId, setScenarioId] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,16 +66,20 @@ export function App({ api = { createRun }, usePolling: polling = useRunStream, t
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const bounded = question.trim();
-    if (submitting || bounded.length === 0) return;
+    const scenario = profile === "fixture" ? demoScenarios.find((item) => item.scenario_id === scenarioId) : undefined;
+    if (submitting || (bounded.length === 0 && scenario === undefined)) return;
     setSubmitting(true);
     setError(null);
     const request: CreateRunRequest = {
-      question: bounded,
+      // The server replaces this non-source placeholder with the registered
+      // private fixture question. The browser only selects a public scenario ID.
+      question: scenario === undefined ? bounded : "offline demonstration request",
       request_id: crypto.randomUUID(),
       evaluation_root_id: crypto.randomUUID(),
-      task_level: "L1",
+      task_level: scenario?.task_level ?? "L1",
       source_manifest_id: sourceManifestId,
       corpus_manifest_id: corpusManifestId,
+      ...(scenario === undefined ? {} : { scenario_id: scenario.scenario_id }),
     };
     try {
       const accepted = await api.createRun(request, token === undefined ? {} : { token });
@@ -91,9 +99,10 @@ export function App({ api = { createRun }, usePolling: polling = useRunStream, t
       <section className="question-card" aria-labelledby="question-title">
         <div><p className="eyebrow">New run</p><h2 id="question-title">Ask a specification question</h2></div>
         <form onSubmit={(event) => void submit(event)}>
+          {profile !== "fixture" ? null : <ScenarioPicker scenarios={demoScenarios} value={scenarioId} onChange={setScenarioId} />}
           <label htmlFor="question">L1 question</label>
           <textarea id="question" maxLength={QUESTION_LIMIT} rows={4} value={question} onChange={(event) => setQuestion(event.target.value.slice(0, QUESTION_LIMIT))} autoComplete="off" spellCheck="false" placeholder="Ask about a requirement or protocol behavior…" />
-          <div className="form-footer"><span>{question.length.toLocaleString()} / {QUESTION_LIMIT.toLocaleString()}</span><button className="button button--primary" type="submit" disabled={submitting || question.trim().length === 0}>{submitting ? "Starting…" : "Run L1"}</button></div>
+          <div className="form-footer"><span>{question.length.toLocaleString()} / {QUESTION_LIMIT.toLocaleString()}</span><button className="button button--primary" type="submit" disabled={submitting || (question.trim().length === 0 && scenarioId === "")}>{submitting ? "Starting…" : scenarioId === "" ? "Run L1" : "Run selected scenario"}</button></div>
           {error === null ? null : <p className="form-error" role="alert">{error}</p>}
         </form>
       </section>

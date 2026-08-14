@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from specpilot.contracts.manifests import Sha256
+from specpilot.demo.scenarios import DemoScenarioId
 
 Question = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8_192)
@@ -32,6 +33,7 @@ class ChatRequest(_ClosedModel):
     task_level: Literal["L1", "L2"] = "L1"
     source_manifest_id: Sha256
     corpus_manifest_id: Sha256
+    scenario_id: DemoScenarioId | None = None
 
 
 class ChatAccepted(_ClosedModel):

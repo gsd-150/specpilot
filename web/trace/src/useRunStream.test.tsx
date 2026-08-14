@@ -142,6 +142,20 @@ describe("useRunStream", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("replays an already-terminal initial snapshot through SSE", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(view("answered", [transition(1), terminal(2)]))));
+    mockedStream.mockImplementation(() => (async function* () {
+      yield transition(1);
+      yield terminal(2);
+    })());
+    const hook = renderHook(() => useRunStream({ runId: RUN_ID, intervalMs: 1_000, deadlineMs: 60_000 }));
+    await flush();
+
+    expect(mockedStream).toHaveBeenCalledWith(RUN_ID, expect.objectContaining({ afterSequence: 0 }));
+    expect(hook.result.current.serverRun?.events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(hook.result.current.connectionState).toBe("connected");
+  });
+
   it("retains a terminal-status transition and waits for the durable terminal event", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(view())));
     mockedStream.mockImplementation(() => (async function* () {

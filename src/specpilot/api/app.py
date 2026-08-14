@@ -7,6 +7,7 @@ import hashlib
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -31,6 +32,11 @@ from specpilot.api.sse import (
 )
 from specpilot.api.static import install_trace_routes
 from specpilot.checkpoints.contracts import RunCheckpoint
+from specpilot.demo.scenarios import (
+    fixture_question_for,
+    public_demo_scenarios,
+    scenario_for,
+)
 from specpilot.runs.contracts import (
     ResumeDisposition,
     RunRecord,
@@ -143,6 +149,10 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         app,
         source_manifest_id=runtime.binding.source_manifest_id,
         corpus_manifest_id=runtime.binding.corpus_manifest_id,
+        profile=runtime.binding.profile,
+        demo_scenarios=(
+            public_demo_scenarios() if runtime.binding.profile == "fixture" else ()
+        ),
     )
 
     @app.exception_handler(RequestValidationError)
@@ -170,6 +180,11 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     async def chat(
         request: ChatRequest, session: SessionClaims = Depends(dependency=claims)  # noqa: B008
     ) -> ChatAccepted:
+        # A registered scenario replaces the runtime-only question, but the
+        # resume binding remains the caller's original request identity. This
+        # keeps the private fixture question out of public request flows.
+        query_hash = hashlib.sha256(request.question.encode("utf-8")).hexdigest()
+        request = _resolve_chat_request(request, runtime)
         _require_binding(request, runtime)
         try:
             permit = await runtime.worker.reserve()
@@ -184,7 +199,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         original_error: BaseException | None = None
         cleanup_error: BaseException | None = None
         try:
-            run = _new_run(run_id, request, session, runtime)
+            run = _new_run(run_id, request, session, runtime, query_hash=query_hash)
             create_task = asyncio.create_task(runtime.store.create(run))
             try:
                 await asyncio.shield(create_task)
@@ -195,7 +210,9 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 created = True
                 raise
             created = True
-            job = await _build_job(runtime, run_id, request.question, request, None)
+            job = await _build_job(
+                runtime, run_id, request.question, request, None, query_hash
+            )
             await permit.deliver(job)
             delivered = True
         except BaseException as error:
@@ -280,7 +297,12 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 raise ValueError("resume_checkpoint_unavailable")
             reconstructed = _resume_chat_request(request, checkpoint)
             job = await _build_job(
-                runtime, run_id, request.question, reconstructed, checkpoint
+                runtime,
+                run_id,
+                request.question,
+                reconstructed,
+                checkpoint,
+                query_hash,
             )
             permit = await runtime.worker.reserve()
             await permit.deliver(job)
@@ -432,6 +454,8 @@ def _new_run(
     request: ChatRequest,
     session: SessionClaims,
     runtime: ApiRuntime,
+    *,
+    query_hash: str,
 ) -> RunRecord:
     binding = runtime.binding
     now = datetime.now(tz=UTC)
@@ -458,7 +482,7 @@ def _new_run(
         ),
         provider_id=binding.provider_id,
         model_id=binding.model_id,
-        query_hash=hashlib.sha256(request.question.encode("utf-8")).hexdigest(),
+        query_hash=query_hash,
         status=RunStatus.QUEUED,
         terminal_reason=None,
         created_at=now,
@@ -514,11 +538,34 @@ async def _build_job(
     question: str,
     request: ChatRequest,
     checkpoint: RunCheckpoint | None,
+    query_hash: str,
 ) -> RunJob:
-    job = runtime.binding.build_job(run_id, question, request, checkpoint)
+    job = runtime.binding.build_job(
+        run_id, question, request, checkpoint, query_hash
+    )
     if inspect.isawaitable(job):
-        return await job
+        job = await job
+    if (
+        checkpoint is None
+        and runtime.binding.profile == "fixture"
+        and request.scenario_id is None
+    ):
+        return replace(job, terminal_reason="unsupported_demo_case")
     return job
+
+
+def _resolve_chat_request(request: ChatRequest, runtime: ApiRuntime) -> ChatRequest:
+    if request.scenario_id is None:
+        return request
+    if runtime.binding.profile != "fixture":
+        raise HTTPException(status_code=422, detail="invalid_demo_scenario")
+    scenario = scenario_for(request.scenario_id)
+    return request.model_copy(
+        update={
+            "question": fixture_question_for(scenario.scenario_id),
+            "task_level": scenario.task_level,
+        }
+    )
 
 
 def _resume_chat_request(

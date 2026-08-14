@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextvars import ContextVar
 
 from specpilot.contracts.egress import (
     EgressPayload,
@@ -15,6 +16,10 @@ from specpilot.providers.base import (
     ProviderError,
     ProviderResponse,
     ResponseMetadata,
+)
+
+_ACTIVE_DEMO_RUN: ContextVar[str | None] = ContextVar(
+    "specpilot_active_demo_run", default=None
 )
 
 
@@ -50,6 +55,8 @@ class FakeProvider:
         self._fail_with = fail_with
         self.reply = reply
         self.calls: list[EgressPayload] = []
+        self._demo_scripts: dict[str, str] = {}
+        self._demo_script_calls: dict[tuple[str, str], int] = {}
 
     @property
     def token_counter(self) -> _WhitespaceTokenCounter:
@@ -63,11 +70,12 @@ class FakeProvider:
         self.calls.append(projected_payload)
         if self._fail_with is not None:
             raise ProviderError(self._fail_with)
-        content = (
-            self.reply
-            if self.reply is not None
-            else _deterministic_content(projected_payload)
-        )
+        run_id = _ACTIVE_DEMO_RUN.get()
+        script_version = self._demo_scripts.get(run_id) if run_id is not None else None
+        script_call = self._next_script_call(run_id, projected_payload, script_version)
+        content = self.reply
+        if content is None:
+            content = _scripted_content(projected_payload, script_version, script_call)
         return ProviderResponse(
             provider_id=self.provider_id,
             model_id=self.model_id,
@@ -88,6 +96,36 @@ class FakeProvider:
                 ),
             ),
         )
+
+    def register_demo_script(self, run_id: str, script_version: str) -> None:
+        """Bind a server-selected private fixture script to one ephemeral run."""
+        if not run_id or not script_version.startswith("fixture-demo/"):
+            raise ValueError("invalid_demo_script")
+        existing = self._demo_scripts.setdefault(run_id, script_version)
+        if existing != script_version:
+            raise ValueError("demo_script_conflict")
+
+    def _next_script_call(
+        self,
+        run_id: str | None,
+        payload: EgressPayload,
+        script_version: str | None,
+    ) -> int:
+        if run_id is None or script_version is None:
+            return 0
+        key = (run_id, payload.kind)
+        call = self._demo_script_calls.get(key, 0) + 1
+        self._demo_script_calls[key] = call
+        return call
+
+    async def send_for_run(
+        self, projected_payload: EgressPayload, *, run_id: str
+    ) -> ProviderResponse:
+        token = _ACTIVE_DEMO_RUN.set(run_id)
+        try:
+            return await self.send(projected_payload)
+        finally:
+            _ACTIVE_DEMO_RUN.reset(token)
 
 
 def _deterministic_content(payload: EgressPayload) -> str:
@@ -185,6 +223,57 @@ def _deterministic_content(payload: EgressPayload) -> str:
     material = "|".join([payload.kind, *(item.quote_hash for item in excerpts)])
     seed = hashlib.sha256(material.encode("utf-8")).hexdigest()
     return f"fixture answer for {payload.kind} [{seed[:16]}]"
+
+
+def _scripted_content(
+    payload: EgressPayload, script_version: str | None, script_call: int
+) -> str:
+    if (
+        script_version == "fixture-demo/evidence-refused/v1"
+        and isinstance(payload, L1OnlinePayload)
+    ):
+        return json.dumps(
+            {"sufficient": False, "answer": None, "citations": []},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if (
+        script_version == "fixture-demo/verifier-recovered/v1"
+        and isinstance(payload, L2DesignPayload)
+    ):
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "claim": "The fixture claim is checked after recovery.",
+                        "proposed_verdict": "compliant",
+                        "evidence_ids": [payload.evidence_excerpts[0].content_hash],
+                        "rationale": "Synthetic output remains private.",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if (
+        script_version == "fixture-demo/verifier-recovered/v1"
+        and isinstance(payload, L2AtomicClaimPayload)
+        and script_call == 1
+    ):
+        return json.dumps(
+            {
+                "supports_verdict": False,
+                "evidence": [
+                    {"evidence_id": item.content_hash, "supports": False}
+                    for item in payload.evidence_excerpts
+                ],
+                "reason": "exception_missing",
+                "rationale": "Synthetic recovery trigger remains private.",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    return _deterministic_content(payload)
 
 
 __all__ = ["FakeProvider"]

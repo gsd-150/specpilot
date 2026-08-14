@@ -36,14 +36,76 @@ async def _wait_terminal(runtime: Any, run_id: UUID, owner: str) -> Any:
     raise AssertionError("L2 fixture worker did not reach a terminal state")
 
 
-def _l2_request(runtime: Any, *, root: str) -> dict[str, str]:
-    return {
+def _l2_request(
+    runtime: Any, *, root: str, scenario_id: str | None = "l2_answered"
+) -> dict[str, str]:
+    request = {
         "question": "Which retry requirement applies?",
         "request_id": str(uuid4()),
         "evaluation_root_id": root,
         "task_level": "L2",
         "source_manifest_id": runtime.binding.source_manifest_id,
         "corpus_manifest_id": runtime.binding.corpus_manifest_id,
+    }
+    if scenario_id is not None:
+        request["scenario_id"] = scenario_id
+    return request
+
+
+async def test_registered_verifier_recovery_fails_once_then_answers(
+    clean_ledger: str,
+    qdrant_url: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qdrant_url
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
+        runtime,
+        issuer,
+    ):
+        owner = "registered-recovery-owner"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        app = create_app(runtime=runtime)
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post(
+                "/chat",
+                headers=headers,
+                json=_l2_request(
+                    runtime,
+                    root="registered-recovery-root",
+                    scenario_id="verifier_recovered",
+                ),
+            )
+            assert accepted.status_code == 202
+            run_id = UUID(accepted.json()["run_id"])
+            terminal = await _wait_terminal(runtime, run_id, owner)
+            trace = await client.get(f"/runs/{run_id}", headers=headers)
+
+    assert terminal.status is RunStatus.ANSWERED
+    body = trace.json()
+    recovery = [
+        event for event in body["events"] if event["kind"] == "recovery_summary"
+    ]
+    semantic = [
+        event for event in body["events"] if event["kind"] == "semantic_summary"
+    ]
+    assert len(recovery) == 1
+    assert [event["supports"] for event in semantic] == [False, True]
+    expected_kinds = {
+        "compliance_summary",
+        "semantic_summary",
+        "recovery_summary",
+        "terminal",
+    }
+    assert expected_kinds <= {
+        event["kind"] for event in body["events"]
     }
 
 

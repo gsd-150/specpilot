@@ -19,6 +19,7 @@ from specpilot.providers.base import (
     ProviderResponse,
     _ProviderAdapter,
 )
+from specpilot.providers.fake import FakeProvider
 
 
 class NoAdapterForRoute(LedgerError):
@@ -145,7 +146,13 @@ class PolicyBoundTransport:
         response: ProviderResponse | None = None
         failure_code: str | None = None
         try:
-            response = await adapter.send(reservation_request.projected_payload)
+            if isinstance(adapter, FakeProvider):
+                response = await adapter.send_for_run(
+                    reservation_request.projected_payload,
+                    run_id=request.run_id,
+                )
+            else:
+                response = await adapter.send(reservation_request.projected_payload)
         except ProviderError as error:
             failure_code = error.public_error_code
         except asyncio.CancelledError:

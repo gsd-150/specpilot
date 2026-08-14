@@ -292,6 +292,7 @@ async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
                 "request_id": str(uuid4()),
                 "evaluation_root_id": "e2e-root",
                 "task_level": "L1",
+                "scenario_id": "l1_answered",
                 "source_manifest_id": runtime.binding.source_manifest_id,
                 "corpus_manifest_id": runtime.binding.corpus_manifest_id,
             }
@@ -335,3 +336,64 @@ async def test_l1_api_runs_real_planner_mcp_ledger_and_verifier(
     assert {row[0] for row in reservations} == {"planning", "evidence"}
     assert len(reservations) == 2
     assert attempts == (2,)
+
+
+async def test_registered_evidence_refusal_is_terminal_and_sanitized_over_sse(
+    clean_ledger: str,
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qdrant_url
+    async with _runtime(clean_ledger, tmp_path, monkeypatch) as (runtime, issuer):
+        owner = "evidence-refused-owner"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        app = create_app(runtime=runtime)
+        private_marker = "client-must-not-select-fixture-script"
+        request = {
+            "question": private_marker,
+            "request_id": str(uuid4()),
+            "evaluation_root_id": "evidence-refused-root",
+            "task_level": "L2",
+            "scenario_id": "evidence_refused",
+            "source_manifest_id": runtime.binding.source_manifest_id,
+            "corpus_manifest_id": runtime.binding.corpus_manifest_id,
+        }
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post("/chat", headers=headers, json=request)
+            assert accepted.status_code == 202
+            run_id = accepted.json()["run_id"]
+            snapshot = None
+            for _ in range(200):
+                snapshot = await client.get(f"/runs/{run_id}", headers=headers)
+                if snapshot.json()["status"] not in {"queued", "running"}:
+                    break
+                await asyncio.sleep(0.01)
+            stream = await client.get(f"/runs/{run_id}/events", headers=headers)
+
+    assert snapshot is not None
+    body = snapshot.json()
+    assert body["task_level"] == "L1"
+    assert body["status"] == "refused"
+    assert body["reason"] == "evidence_insufficient"
+    expected_kinds = {
+        "tool_finished",
+        "egress_summary",
+        "verifier_summary",
+        "answer_outcome",
+        "terminal",
+    }
+    assert expected_kinds <= {
+        event["kind"] for event in body["events"]
+    }
+    assert stream.status_code == 200
+    assert stream.headers["content-type"].startswith("text/event-stream")
+    assert private_marker not in snapshot.text
+    assert private_marker not in stream.text

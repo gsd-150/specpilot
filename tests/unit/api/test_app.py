@@ -228,7 +228,7 @@ def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
         corpus_manifest_id=HASHES["corpus"], policy_hash=HASHES["policy"],
         configuration_hash=HASHES["configuration"], prompt_id="l1-answer-v1",
         prompt_hash=HASHES["prompt"], provider_id="provider-a", model_id="model-a",
-        build_job=lambda run_id, question, request, checkpoint: RunJob(
+        build_job=lambda run_id, question, request, checkpoint, query_hash: RunJob(
             run_id=run_id, question=question, planner_context=object(),
             corpus_manifest_id=request.corpus_manifest_id, answer_context={}
         ),
@@ -338,6 +338,66 @@ async def test_chat_accepts_l2_and_persists_the_requested_task_level() -> None:
     assert response.status_code == 202
     run_id = UUID(response.json()["run_id"])
     assert made.store.runs[run_id][1].task_level == "L2"
+
+
+async def test_fixture_registered_scenario_controls_private_question_and_task_level(
+) -> None:
+    made = runtime()
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    request = {**payload(), "scenario_id": "l2_answered", "task_level": "L1"}
+
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=request
+        )
+
+    assert response.status_code == 202
+    run_id = UUID(response.json()["run_id"])
+    assert made.store.runs[run_id][1].task_level == "L2"
+    assert made.worker.jobs[0].question != request["question"]
+    assert "l2_answered" not in made.worker.jobs[0].question
+
+
+async def test_real_profile_rejects_every_demo_scenario_before_delivery() -> None:
+    made = runtime(profile="real", host="0.0.0.0")
+    app, client = await client_for(made)
+    secret = b"s" * 32
+    issuer = SessionIssuer(
+        secret=secret, audience="specpilot-api", clock=lambda: NOW
+    )
+    token = issuer.issue(session_id="owner-a", profile="real", ttl_seconds=300)
+
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={**payload(), "scenario_id": "l1_answered"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_demo_scenario"}
+    assert made.worker.jobs == []
+
+
+async def test_fixture_custom_input_is_delivered_as_unsupported_demo_case() -> None:
+    made = runtime()
+    app, client = await client_for(made)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+
+    async with app.router.lifespan_context(app), client:
+        response = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+        )
+
+    assert response.status_code == 202
+    assert made.worker.jobs[0].terminal_reason == "unsupported_demo_case"
 
 
 @pytest.mark.parametrize(
@@ -626,7 +686,11 @@ async def test_generic_api_exception_is_stable_marker_free_and_terminalizes(
         binding = made.binding
 
         def hostile_build(
-            run_id: UUID, question: str, request: object, checkpoint: object
+            run_id: UUID,
+            question: str,
+            request: object,
+            checkpoint: object,
+            query_hash: str,
         ) -> RunJob:
             raise RuntimeError(marker)
 

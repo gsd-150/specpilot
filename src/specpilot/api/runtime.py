@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
@@ -29,6 +28,7 @@ from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
 from specpilot.api.static import install_trace_routes
 from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.checkpoints.postgres import PostgresCheckpointStore
+from specpilot.demo.scenarios import scenario_for
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
@@ -480,7 +480,9 @@ def _assemble_runtime(
         question: str,
         request: ChatRequest,
         checkpoint: RunCheckpoint | None,
+        query_hash: str,
     ) -> RunJob:
+        _register_demo_script(adapter, str(run_id), request)
         if request.task_level == "L1":
             return RunJob(
                 run_id=run_id,
@@ -504,7 +506,14 @@ def _assemble_runtime(
                 },
             )
         run = _ephemeral_delivery_run(
-            run_id, request, config, source, policy, adapter, checkpoint
+            run_id,
+            request,
+            config,
+            source,
+            policy,
+            adapter,
+            checkpoint,
+            query_hash=query_hash,
         )
         return await delivery.build(
             run,
@@ -540,6 +549,18 @@ def _assemble_runtime(
     )
 
 
+def _register_demo_script(
+    adapter: _ProviderAdapter, run_id: str, request: ChatRequest
+) -> None:
+    """Select a fixture script from the private registry, never client content."""
+    if request.scenario_id is None:
+        return
+    if not isinstance(adapter, FakeProvider):
+        raise ValueError("invalid_demo_scenario")
+    script_version = scenario_for(request.scenario_id).script_version
+    adapter.register_demo_script(run_id, script_version)
+
+
 def _provider(
     profile: Literal["fixture", "real"], provider_id: str
 ) -> tuple[_ProviderAdapter, _ProviderHook | None]:
@@ -563,6 +584,8 @@ def _ephemeral_delivery_run(
     policy: EgressPolicy,
     adapter: _ProviderAdapter,
     checkpoint: RunCheckpoint | None,
+    *,
+    query_hash: str,
 ) -> RunRecord:
     """Provide the job builder only immutable run bindings, never client state.
 
@@ -597,7 +620,7 @@ def _ephemeral_delivery_run(
         else None,
         provider_id=adapter.provider_id,
         model_id=adapter.model_id,
-        query_hash=hashlib.sha256(request.question.encode("utf-8")).hexdigest(),
+        query_hash=query_hash,
         status=RunStatus.QUEUED,
         terminal_reason=None,
         created_at=now,

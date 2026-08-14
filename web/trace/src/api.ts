@@ -47,9 +47,19 @@ export interface CreateRunRequest {
   question: string;
   request_id: string;
   evaluation_root_id: string;
-  task_level: "L1";
+  task_level: "L1" | "L2";
   source_manifest_id: string;
   corpus_manifest_id: string;
+  scenario_id?: DemoScenarioId;
+}
+
+export type DemoScenarioId = "l1_answered" | "l2_answered" | "evidence_refused" | "verifier_recovered";
+export interface PublicDemoScenario {
+  scenario_id: DemoScenarioId;
+  label: string;
+  description: string;
+  task_level: "L1" | "L2";
+  engineering_limitation: string;
 }
 
 export interface ChatAccepted { run_id: string; status: "queued" }

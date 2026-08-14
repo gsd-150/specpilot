@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
+from uuid import uuid4
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from specpilot.api.contracts import ChatRequest
 from specpilot.api.runtime import (
     ApiRuntimeConfig,
     _McpClientHook,
+    _register_demo_script,
     _require_real_route,
     create_runtime_app,
     load_runtime_config,
 )
+from specpilot.providers.fake import FakeProvider
+from tests.unit.egress.test_policy_projection import l1_payload
 
 API_ENV = {
     "SPECPILOT_API_PROFILE": "fixture",
@@ -41,6 +47,27 @@ def _clear_api_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _set_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in API_ENV.items():
         monkeypatch.setenv(name, value)
+
+
+@pytest.mark.anyio
+async def test_runtime_binds_only_the_server_registered_script_to_the_run() -> None:
+    provider = FakeProvider()
+    request = ChatRequest(
+        question="client placeholder",
+        request_id=uuid4(),
+        evaluation_root_id="root-1",
+        task_level="L1",
+        source_manifest_id="a" * 64,
+        corpus_manifest_id="b" * 64,
+        scenario_id="evidence_refused",
+    )
+
+    _register_demo_script(provider, "run-1", request)
+    selected = await provider.send_for_run(l1_payload(), run_id="run-1")
+    unselected = await provider.send_for_run(l1_payload(), run_id="run-2")
+
+    assert json.loads(selected.content)["sufficient"] is False
+    assert json.loads(unselected.content)["sufficient"] is True
 
 
 def test_runtime_config_requires_every_explicit_value(

@@ -1,8 +1,8 @@
 :root { color: #17201f; background: #f3f1eb; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-synthesis: none; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: radial-gradient(circle at 12% 0%, #dceae4 0, transparent 32rem), #f3f1eb; }
-button, textarea { font: inherit; }
-button:focus-visible, textarea:focus-visible { outline: 3px solid #da7b41; outline-offset: 3px; }
+button, textarea, select { font: inherit; }
+button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid #da7b41; outline-offset: 3px; }
 main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 80px; }
 .hero { display: grid; grid-template-columns: 56px 1fr; gap: 20px; align-items: start; margin-bottom: 36px; }
 .brand-mark { display: grid; place-items: center; width: 56px; aspect-ratio: 1; border-radius: 18px; color: #fff; background: #143f39; font-weight: 800; letter-spacing: -.04em; box-shadow: 0 12px 30px #143f3924; }
@@ -16,6 +16,12 @@ h3 { margin-bottom: 14px; font-size: 1rem; }
 .question-card { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(300px, 1.6fr); gap: 40px; padding: 30px; }
 form label { display: block; margin-bottom: 10px; font-weight: 700; }
 textarea { width: 100%; resize: vertical; min-height: 112px; padding: 15px 16px; border: 1px solid #bfc8c4; border-radius: 14px; color: #17201f; background: #fff; line-height: 1.5; }
+.scenario-picker { margin: 0 0 20px; padding: 0; border: 0; }
+.scenario-picker legend { margin-bottom: 12px; color: #537169; font-size: .72rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid #bfc8c4; border-radius: 12px; background: #fff; color: #17201f; }
+.scenario-picker__details { margin-top: 10px; padding: 12px 14px; border-radius: 12px; background: #f0f6f3; color: #35564e; font-size: .9rem; line-height: 1.45; }
+.scenario-picker__details p { margin: 0; }
+.scenario-picker__limitation { margin-top: 8px !important; color: #63716d; font-size: .8rem; }
 .form-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; color: #6c7774; font-size: .8rem; }
 .button { min-height: 42px; padding: 0 17px; border: 0; border-radius: 12px; cursor: pointer; font-weight: 750; }
 .button:disabled { cursor: wait; opacity: .55; }

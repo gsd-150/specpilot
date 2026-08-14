@@ -156,6 +156,7 @@ class RunJob:
     l2_context: L2RunContext | None = field(default=None, repr=False)
     lease_acquired: bool = False
     attempt: int = 1
+    terminal_reason: str | None = None
 
 
 class RunWorker:
@@ -301,10 +302,33 @@ class RunWorker:
             return
 
     async def _run(self, job: RunJob) -> None:
+        if job.terminal_reason is not None:
+            await self._run_predeclared_refusal(job)
+            return
         if job.task_level == "L2":
             await self._run_l2(job)
             return
         await self._run_l1(job)
+
+    async def _run_predeclared_refusal(self, job: RunJob) -> None:
+        """Persist a fixture-only unsupported case without entering the pipeline."""
+        if not job.lease_acquired:
+            claimed = await self._store.claim(
+                job.run_id,
+                self._worker_id,
+                lease_seconds=self._lease_seconds,
+            )
+            if not claimed:
+                return
+        await self._store.complete(
+            job.run_id,
+            self._worker_id,
+            TerminalEvent(
+                sequence=1,
+                status=RunStatus.REFUSED,
+                reason=job.terminal_reason,
+            ),
+        )
 
     async def _run_l1(self, job: RunJob) -> None:
         if not job.lease_acquired:

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+
+from specpilot.demo.scenarios import PublicDemoScenario
 
 _ASSET_REFERENCE = re.compile(
     rb'(?:src|href)="(/trace/assets/([A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.(?:js|css)))"'
@@ -74,12 +78,22 @@ def install_trace_routes(
     *,
     source_manifest_id: str = "",
     corpus_manifest_id: str = "",
+    profile: Literal["fixture", "real"] = "real",
+    demo_scenarios: Sequence[PublicDemoScenario] = (),
     assets: TraceAssets | None = None,
 ) -> None:
     """Install only the exact trace entrypoints, with a sanitized failure surface."""
 
     source = _binding_hash(source_manifest_id)
     corpus = _binding_hash(corpus_manifest_id)
+    public_scenarios = html.escape(
+        json.dumps(
+            [item.model_dump(mode="json") for item in demo_scenarios],
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        quote=True,
+    )
     loader = assets or PackageTraceAssets()
 
     def load() -> TraceBundle | None:
@@ -94,7 +108,8 @@ def install_trace_routes(
             return _unavailable()
         binding = (
             f'<div id="root" data-source-manifest-id="{source}" '
-            f'data-corpus-manifest-id="{corpus}"></div>'
+            f'data-corpus-manifest-id="{corpus}" data-profile="{profile}" '
+            f'data-demo-scenarios="{public_scenarios}"></div>'
         ).encode()
         body = bundle.index.replace(_ROOT, binding)
         return HTMLResponse(

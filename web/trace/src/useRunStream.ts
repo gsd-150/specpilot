@@ -187,11 +187,20 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
     const initialRequest = getRun(runId, { token, signal: initialController.signal })
       .then((run) => {
         if (!active || initialController.signal.aborted) return;
+        if (TERMINAL.has(run.status as TerminalStatus)) {
+          // A fast terminal worker can complete before this first snapshot.
+          // Replay from zero so the trace remains an SSE path rather than a
+          // snapshot-only exception (notably for safe offline refusals).
+          currentRun = { ...run, events: [] };
+          cursor = 0;
+          publish(currentRun, "connected");
+          void connect();
+          return;
+        }
         currentRun = run;
         cursor = run.events.at(-1)?.sequence ?? 0;
         publish(run, "connected");
-        if (TERMINAL.has(run.status as TerminalStatus)) finishTerminal();
-        else void connect();
+        void connect();
       })
       .catch((error: unknown) => {
         if (!active || initialController.signal.aborted) return;
