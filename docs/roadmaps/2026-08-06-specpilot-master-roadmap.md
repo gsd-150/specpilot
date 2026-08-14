@@ -220,6 +220,12 @@ real provider, credential, or model, and its own output says so.
 
 ## Non-negotiable global constraints
 
+- **[新增｜2026-08-14] 同家族自生成评测偏差必须在报告正文写明，不能只靠字段披露。**
+  `label_origin: mixed` 记录了这个事实，但读者不该被要求自己从字段推断结论。W6
+  报告须原样表述：20 条 L2 中有 17 条的场景、Gold/标签候选由与被评测系统同模型
+  家族的模型提出，之后经人工逐条对照冻结 RFC 源文评审；因此这些结果存在同家族
+  自生成评测偏差，不作为无偏性能估计。L1 的 40 条同样由模型提出后经人工评审，
+  同一表述按其实际条数一并适用。
 - Real source text, full indexes, complete clauses, and quotations are never
   committed, whatever the corpus. The terms behind this rule changed with route
   `C` — 3GPP reserves rights by default while the IETF Trust pre-grants a public
