@@ -34,6 +34,7 @@ def _checkpoint(**changes: object):  # type: ignore[no-untyped-def]
         "reconstruction_generations": (),
         "recovery_attempted": False,
         "recovery_reason": None,
+        "recovery_claim_id": None,
         "candidate_count": 0,
         "completed_claim_ids": (),
         "completed_results": (),
@@ -99,6 +100,7 @@ def test_legal_checkpoint_transitions(stage: str, next_stage: str) -> None:
     previous = _checkpoint(
         stage=stage,
         recovery_attempted=stage in {"recovery_reserved", "recovery_completed"},
+        recovery_claim_id="a" * 64 if stage == "recovery_reserved" else None,
     )
     current = _checkpoint(
         run_id=previous.run_id,
@@ -108,6 +110,7 @@ def test_legal_checkpoint_transitions(stage: str, next_stage: str) -> None:
             stage in {"recovery_reserved", "recovery_completed"}
             or next_stage in {"recovery_reserved", "recovery_completed"}
         ),
+        recovery_claim_id="a" * 64 if next_stage == "recovery_reserved" else None,
     )
     assert validate_transition(previous, current) is None
 
@@ -129,6 +132,14 @@ def test_recovery_completed_requires_monotonic_single_recovery() -> None:
     # reservation update after a process loss; the run-scoped boolean itself
     # remains monotonic and cannot create a second recovery action.
     assert validate_transition(previous, current) is None
+
+
+def test_recovery_reservation_requires_one_opaque_claim_id_only_while_reserved(
+) -> None:
+    with pytest.raises(ValidationError, match="recovery claim"):
+        _checkpoint(stage="recovery_reserved", recovery_attempted=True)
+    with pytest.raises(ValidationError, match="only exists"):
+        _checkpoint(recovery_claim_id="a" * 64)
 
 
 def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:

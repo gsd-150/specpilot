@@ -285,6 +285,7 @@ def checkpoint(run_id: UUID, *, attempt: int = 2) -> RunCheckpoint:
         reconstruction_generations=(),
         recovery_attempted=True,
         recovery_reason="not_disclosed",
+        recovery_claim_id=None,
         candidate_count=0,
         completed_claim_ids=(),
         completed_results=(),

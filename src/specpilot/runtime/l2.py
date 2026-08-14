@@ -493,6 +493,16 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 recovered,
                 written,
             )
+        if not _recovery_reservation_is_consistent(
+            checkpoint, compliance.candidates
+        ):
+            return _fault(
+                "checkpoint_recovery_claim_integrity",
+                attempts,
+                reservations,
+                recovered,
+                written,
+            )
         elif checkpoint is not None:
             # Later-stage resume loses candidate prose, so it must resend
             # Compliance. Keep its receipt via a legal same-stage mutation;
@@ -510,7 +520,8 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         completed_ids = set(
             () if checkpoint is None else checkpoint.completed_claim_ids
         )
-        for candidate in compliance.candidates:
+        candidates = _recovery_candidate_first(checkpoint, compliance.candidates)
+        for candidate in candidates:
             if candidate.claim_id in completed_ids:
                 continue
             (
@@ -730,6 +741,8 @@ async def _one_claim(
 ]:
     resumed_from_recovery = recovered
     if checkpoint is not None and checkpoint.stage is CheckpointStage.RECOVERY_RESERVED:
+        if checkpoint.recovery_claim_id != candidate.claim_id:
+            raise ValueError("checkpoint_recovery_claim_integrity")
         return (
             _insufficient(
                 candidate.claim_id,
@@ -783,6 +796,7 @@ async def _one_claim(
                     attempts=reserved_attempts,
                     recovered=True,
                     recovery_reason=_reason(deterministic),
+                    recovery_claim_id=candidate.claim_id,
                 )
                 if checkpoint is not None:
                     written.append(checkpoint)
@@ -995,6 +1009,7 @@ async def _one_claim(
                 attempts=reserved_attempts,
                 recovered=True,
                 recovery_reason=semantic.decision.reason.value,
+                recovery_claim_id=active.claim_id,
             )
             if checkpoint is not None:
                 written.append(checkpoint)
@@ -1268,6 +1283,7 @@ async def _advance(
     attempts: int = 0,
     recovered: bool = False,
     recovery_reason: str | None = None,
+    recovery_claim_id: str | None = None,
     plan_id: str | None = None,
     plan_hash: str | None = None,
     generation: StageGeneration | None = None,
@@ -1299,6 +1315,14 @@ async def _advance(
                 previous.recovery_reason
                 if recovery_reason is None
                 else recovery_reason
+            ),
+            "recovery_claim_id": (
+                previous.recovery_claim_id
+                if (
+                    stage is CheckpointStage.RECOVERY_RESERVED
+                    and recovery_claim_id is None
+                )
+                else recovery_claim_id
             ),
             "completed_claim_ids": tuple(item.claim_id for item in completed_results)
             or previous.completed_claim_ids,
@@ -1409,6 +1433,34 @@ def _candidate_batch_is_consistent(
     if checkpoint.candidate_count and len(ids) != checkpoint.candidate_count:
         return False
     return set(checkpoint.completed_claim_ids).issubset(ids)
+
+
+def _recovery_reservation_is_consistent(
+    checkpoint: RunCheckpoint | None, candidates: tuple[IdentifiedCandidate, ...]
+) -> bool:
+    """Bind a reserved MCP action to exactly one reconstructed candidate."""
+    if checkpoint is None or checkpoint.stage is not CheckpointStage.RECOVERY_RESERVED:
+        return True
+    claim_id = checkpoint.recovery_claim_id
+    return claim_id is not None and sum(
+        candidate.claim_id == claim_id for candidate in candidates
+    ) == 1 and claim_id not in checkpoint.completed_claim_ids
+
+
+def _recovery_candidate_first(
+    checkpoint: RunCheckpoint | None, candidates: tuple[IdentifiedCandidate, ...]
+) -> tuple[IdentifiedCandidate, ...]:
+    """Close a lost reserved action for its owner, never the first pending claim."""
+    if checkpoint is None or checkpoint.stage is not CheckpointStage.RECOVERY_RESERVED:
+        return candidates
+    claim_id = checkpoint.recovery_claim_id
+    assert claim_id is not None
+    bound = tuple(
+        candidate for candidate in candidates if candidate.claim_id == claim_id
+    )
+    return bound + tuple(
+        candidate for candidate in candidates if candidate.claim_id != claim_id
+    )
 
 
 def _rebuilt(

@@ -157,6 +157,10 @@ class RunCheckpoint(_FrozenModel):
     ]
     recovery_attempted: bool
     recovery_reason: TerminalReason | None
+    # The sole candidate identity retained across the crash window after the
+    # recovery allowance has been reserved but before the MCP result exists.
+    # It is opaque, and deliberately disappears once that transition closes.
+    recovery_claim_id: Sha256 | None
     # This is a cursor bound, not candidate content.  It lets a semantic
     # checkpoint distinguish "one claim completed" from "all claims done"
     # without retaining claim prose or a second outbound prompt.
@@ -186,6 +190,16 @@ class RunCheckpoint(_FrozenModel):
             raise ValueError("recovery_completed requires recovery_attempted")
         if not self.recovery_attempted and self.recovery_reason is not None:
             raise ValueError("recovery reason requires recovery_attempted")
+        if (
+            self.stage is CheckpointStage.RECOVERY_RESERVED
+            and self.recovery_claim_id is None
+        ):
+            raise ValueError("recovery_reserved requires recovery claim ID")
+        if (
+            self.stage is not CheckpointStage.RECOVERY_RESERVED
+            and self.recovery_claim_id is not None
+        ):
+            raise ValueError("recovery claim ID only exists while reserved")
         if len(set(self.completed_claim_ids)) != len(self.completed_claim_ids):
             raise ValueError("completed claim IDs must be unique")
         result_ids = tuple(result.claim_id for result in self.completed_results)

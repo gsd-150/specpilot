@@ -53,9 +53,11 @@ def evidence() -> Evidence:
     return build_evidence_from_unit(unit, corpus_manifest_id="c" * 64)
 
 
-def candidate(item: Evidence) -> IdentifiedCandidate:
+def candidate(
+    item: Evidence, claim: str = "The design preserves the fixture."
+) -> IdentifiedCandidate:
     proposed = ComplianceCandidate(
-        claim="The design preserves the fixture.",
+        claim=claim,
         proposed_verdict=ComplianceVerdict.COMPLIANT,
         evidence_ids=(item.excerpt.content_hash,),
         rationale="fixture rationale",
@@ -139,9 +141,33 @@ class Compliance:
 
 
 @dataclass
+class BatchCompliance:
+    candidates: tuple[IdentifiedCandidate, ...]
+    calls: int = 0
+
+    async def evaluate(
+        self, description: str, evidence: tuple[Evidence, ...], context: object
+    ) -> ComplianceOutcome:
+        self.calls += 1
+        return ComplianceOutcome(
+            batch=ComplianceBatch(
+                candidates=tuple(item.candidate for item in self.candidates)
+            ),
+            candidates=self.candidates,
+            reservation_id="00000000-0000-0000-0000-000000000002",
+            replayed=False,
+            request_size=RequestSize(request_tokens=1, request_bytes=1),
+        )
+
+
+@dataclass
 class Semantic:
     replies: list[bool]
     calls: int = 0
+    claim_ids: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.claim_ids = []
 
     async def verify(
         self,
@@ -151,6 +177,7 @@ class Semantic:
         context: object,
     ) -> SemanticOutcome:
         self.calls += 1
+        self.claim_ids.append(candidate.claim_id)
         supports = self.replies.pop(0)
         return SemanticOutcome(
             decision=SemanticDecision(
@@ -259,6 +286,11 @@ def checkpoint(stage: str = "planned", *, items: tuple[Evidence, ...] = ()):
         reconstruction_generations=(),
         recovery_attempted=stage in {"recovery_reserved", "recovery_completed"},
         recovery_reason=None,
+        recovery_claim_id=(
+            candidate(items[0] if items else evidence()).claim_id
+            if stage == "recovery_reserved"
+            else None
+        ),
         candidate_count=0,
         completed_claim_ids=(),
         completed_results=(),
@@ -563,6 +595,7 @@ async def test_reserved_recovery_resume_does_not_repeat_tool_call() -> None:
             "tool_attempts_used": 8,
             "recovery_attempted": True,
             "recovery_reason": "exception_missing",
+            "recovery_claim_id": candidate(item).claim_id,
         }
     )
     recovery_calls = 0
@@ -588,6 +621,105 @@ async def test_reserved_recovery_resume_does_not_repeat_tool_call() -> None:
     assert outcome.recovery_attempted is True
     assert outcome.results[0].verification_status.value == "insufficient"
     assert outcome.results[0].reason_code == "recovery_result_lost"
+
+
+async def test_recovery_reserved_resume_closes_bound_claim_before_reordered_peers(
+) -> None:
+    item = evidence()
+    claim_a = candidate(item, "Claim A")
+    claim_b = candidate(item, "Claim B")
+    claim_c = candidate(item, "Claim C")
+    completed_a = ComplianceResult(
+        claim_id=claim_a.claim_id,
+        verdict="compliant",
+        verification_status="verified",
+        citations=passed(item).citations,
+    )
+    seed = checkpoint("recovery_reserved", items=(item,)).model_copy(
+        update={
+            "tool_attempts_used": 2,
+            "recovery_attempted": True,
+            "recovery_reason": "exception_missing",
+            "recovery_claim_id": claim_b.claim_id,
+            "candidate_count": 3,
+            "completed_claim_ids": (claim_a.claim_id,),
+            "completed_results": (completed_a,),
+        }
+    )
+    semantic = Semantic([True])
+    recovery_calls = 0
+
+    async def forbidden_recovery(*args: object) -> RecoveryOutcome:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return RecoveryOutcome((item,), (), 2)
+
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=semantic),
+        checkpoint=seed,
+        checkpoint_writer=StatefulWriter(current=seed, writes=1),
+        evidence_restorer=lambda refs: (item,),
+        compliance_agent=BatchCompliance((claim_a, claim_c, claim_b)),
+        recovery_runner=forbidden_recovery,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert recovery_calls == 0
+    assert outcome.results[0] == completed_a
+    assert outcome.results[1].claim_id == claim_b.claim_id
+    assert outcome.results[1].reason_code == "recovery_result_lost"
+    assert semantic.claim_ids == [claim_c.claim_id]
+
+
+async def test_recovery_reserved_resume_rejects_missing_bound_claim_before_more_sends(
+) -> None:
+    item = evidence()
+    claim_a = candidate(item, "Claim A")
+    claim_b = candidate(item, "Claim B")
+    claim_c = candidate(item, "Claim C")
+    claim_d = candidate(item, "Claim D")
+    completed_a = ComplianceResult(
+        claim_id=claim_a.claim_id,
+        verdict="compliant",
+        verification_status="verified",
+        citations=passed(item).citations,
+    )
+    seed = checkpoint("recovery_reserved", items=(item,)).model_copy(
+        update={
+            "tool_attempts_used": 2,
+            "recovery_attempted": True,
+            "recovery_reason": "exception_missing",
+            "recovery_claim_id": claim_b.claim_id,
+            "candidate_count": 3,
+            "completed_claim_ids": (claim_a.claim_id,),
+            "completed_results": (completed_a,),
+        }
+    )
+    semantic = Semantic([True])
+    recovery_calls = 0
+
+    async def forbidden_recovery(*args: object) -> RecoveryOutcome:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return RecoveryOutcome((item,), (), 2)
+
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=semantic),
+        checkpoint=seed,
+        checkpoint_writer=StatefulWriter(current=seed, writes=1),
+        evidence_restorer=lambda refs: (item,),
+        compliance_agent=BatchCompliance((claim_a, claim_c, claim_d)),
+        recovery_runner=forbidden_recovery,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault == "checkpoint_recovery_claim_integrity"
+    assert semantic.calls == 0
+    assert recovery_calls == 0
 
 
 async def test_completed_checkpoint_fast_path_needs_no_restorer_or_provider() -> None:
