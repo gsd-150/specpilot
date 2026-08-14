@@ -24,6 +24,10 @@ class ApiRunStore(Protocol):
         self, run_id: UUID, session_id: str
     ) -> str | None: ...
 
+    async def read_demo_recovery_phase_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str: ...
+
     async def read_events_owned(
         self,
         run_id: UUID,
@@ -80,7 +84,7 @@ class ApiLifecycleHook(Protocol):
 
 HealthProbe = Callable[[], Awaitable[bool]]
 JobFactory = Callable[
-    [UUID, str, ChatRequest, RunCheckpoint | None, str], RunJob | Awaitable[RunJob]
+    [UUID, str, ChatRequest, RunCheckpoint | None, str, str], RunJob | Awaitable[RunJob]
 ]
 
 

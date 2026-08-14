@@ -125,6 +125,9 @@ class L2RunContext:
     checkpoint_writer: CheckpointWriter | None = None
     evidence_restorer: EvidenceRestorer | None = None
     plan_restorer: PlanRestorer | None = None
+    # Set only when a durable, closed semantic audit survived a crash before
+    # its recovery checkpoint.  The recovery itself is still executed here.
+    pending_semantic_recovery: bool = False
     lease_is_live: LeaseIsLive = lambda: True
     audit_sink: L2AuditSink | None = None
 
@@ -901,6 +904,99 @@ async def _one_claim(
                 (),
                 recovery,
             )
+    if context.pending_semantic_recovery and not recovered:
+        pending_reason = "exception_missing"
+        reserved_attempts = _reserve_recovery_attempts(attempts, (pending_reason,))
+        if checkpoint is not None and reserved_attempts > attempts:
+            checkpoint = await _advance(
+                context,
+                checkpoint,
+                CheckpointStage.RECOVERY_RESERVED,
+                evidence=evidence,
+                attempts=reserved_attempts,
+                recovered=True,
+                recovery_reason=pending_reason,
+                recovery_claim_id=active.claim_id,
+            )
+            if checkpoint is not None:
+                written.append(checkpoint)
+        replacement = await _recover(
+            context,
+            active,
+            evidence,
+            deterministic,
+            attempts,
+            False,
+            semantic_reason=pending_reason,
+        )
+        if replacement is None:
+            return (
+                _insufficient(
+                    active.claim_id,
+                    VerificationStatus.SEMANTIC_FAILED,
+                    pending_reason,
+                ),
+                evidence,
+                reserved_attempts,
+                True,
+                (),
+                recovery,
+            )
+        evidence, attempts, recovery = replacement
+        attempts = max(attempts, reserved_attempts)
+        recovery = replace(recovery, attempts_used=attempts)
+        recovery_audit = L2RecoveryAudit(
+            f"recovery/{active.claim_id}/semantic/"
+            f"a{1 if checkpoint is None else checkpoint.attempt}",
+            recovery,
+        )
+        audit_events.append(recovery_audit)
+        await _emit_audit(context, recovery_audit)
+        recovered = True
+        if checkpoint is not None:
+            checkpoint = await _advance(
+                context,
+                checkpoint,
+                CheckpointStage.RECOVERY_COMPLETED,
+                evidence=evidence,
+                attempts=attempts,
+                recovered=True,
+            )
+            if checkpoint is not None:
+                written.append(checkpoint)
+        active = _rebuilt(active, evidence)
+        deterministic = await _verify_and_record(
+            context,
+            active,
+            evidence,
+            deterministic_outcomes,
+            audit_events,
+            phase="post_resumed_semantic_recovery",
+        )
+        if not deterministic.passed:
+            return (
+                _insufficient(
+                    active.claim_id,
+                    VerificationStatus.DETERMINISTIC_FAILED,
+                    _reason(deterministic),
+                ),
+                evidence,
+                attempts,
+                recovered,
+                (),
+                recovery,
+            )
+        if checkpoint is not None:
+            checkpoint = await _advance(
+                context,
+                checkpoint,
+                CheckpointStage.DETERMINISTIC_VERIFIED,
+                evidence=evidence,
+                attempts=attempts,
+                recovered=True,
+            )
+            if checkpoint is not None:
+                written.append(checkpoint)
     checkpoint = await _prepare_generation(
         context, checkpoint, "verifier", active.claim_id, recovered, written
     )

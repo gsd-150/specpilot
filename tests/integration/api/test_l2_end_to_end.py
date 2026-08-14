@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,11 +19,26 @@ from specpilot.api.runtime import _assemble_runtime, load_runtime_config
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.contracts.egress import L2AtomicClaimPayload, L2DesignPayload
 from specpilot.providers.base import ProviderResponse
-from specpilot.runs.contracts import EgressSummaryEvent, RunStatus
+from specpilot.runs.contracts import (
+    EgressSummaryEvent,
+    RunStatus,
+    SemanticSummaryEvent,
+)
 from specpilot.runtime import RunWorker
 from tests.integration.api import test_l1_end_to_end as l1_fixture
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+def _hard_timeout(test: Any) -> Any:
+    """Bound crash-window tests even when a lifespan teardown regresses."""
+
+    @wraps(test)
+    async def bounded(*args: Any, **kwargs: Any) -> None:
+        async with asyncio.timeout(10):
+            await test(*args, **kwargs)
+
+    return bounded
 
 
 async def _wait_terminal(runtime: Any, run_id: UUID, owner: str) -> Any:
@@ -166,6 +182,7 @@ def _restart_runtime_process(runtime: Any) -> Any:
     return _assemble_runtime(load_runtime_config(), mcp_http_client=mcp_http)
 
 
+@_hard_timeout
 async def test_registered_recovery_script_rebuilds_after_process_restart(
     clean_ledger: str,
     qdrant_url: str,
@@ -248,6 +265,140 @@ async def test_registered_recovery_script_rebuilds_after_process_restart(
     ]
     assert [event["supports"] for event in semantic] == [False, True]
     assert len(recovery) == 1
+    assert question not in trace.text
+
+
+@_hard_timeout
+async def test_registered_recovery_rebuilds_from_durable_false_audit(
+    clean_ledger: str,
+    qdrant_url: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after the first false audit resumes the second semantic phase."""
+    del qdrant_url
+    question = "Which retry requirement applies?"
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
+        runtime,
+        issuer,
+    ):
+        assert runtime.checkpoint_store is not None
+        checkpoint_store = runtime.checkpoint_store
+        original_append = runtime.store.append_many_once
+        original_write = checkpoint_store.write
+        false_audit_persisted = asyncio.Event()
+
+        async def persist_false_audit_then_lose(
+            run_id: UUID,
+            lease_owner: str,
+            events: Any,
+            *,
+            anchor: Any,
+        ) -> Any:
+            saved = await original_append(
+                run_id, lease_owner, events, anchor=anchor
+            )
+            if any(
+                isinstance(event, SemanticSummaryEvent) and not event.supports
+                for event in events
+            ):
+                false_audit_persisted.set()
+            return saved
+
+        async def lose_before_recovery_checkpoint(
+            previous_version: int | None, checkpoint: RunCheckpoint
+        ) -> RunCheckpoint:
+            if false_audit_persisted.is_set():
+                raise _ProcessLostAfterRecovery("false_audit_before_recovery")
+            return await original_write(previous_version, checkpoint)
+
+        monkeypatch.setattr(
+            runtime.store, "append_many_once", persist_false_audit_then_lose
+        )
+        monkeypatch.setattr(
+            checkpoint_store, "write", lose_before_recovery_checkpoint
+        )
+        owner = "registered-false-audit-restart-owner"
+        token = issuer.issue(session_id=owner, profile="fixture", ttl_seconds=300)
+        headers = {"Authorization": f"Bearer {token}"}
+        app = create_app(runtime=runtime)
+        request = _l2_request(
+            runtime,
+            root="registered-false-audit-restart-root",
+            scenario_id="verifier_recovered",
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1",
+            ) as client,
+        ):
+            accepted = await client.post("/chat", headers=headers, json=request)
+            assert accepted.status_code == 202
+            run_id = UUID(accepted.json()["run_id"])
+            await asyncio.wait_for(false_audit_persisted.wait(), timeout=3)
+            checkpoint = await checkpoint_store.read(run_id)
+            assert checkpoint is not None
+            assert checkpoint.recovery_attempted is False
+            await runtime.worker.aclose()
+            restarted = _restart_runtime_process(runtime)
+            assert _adapter(restarted) is not _adapter(runtime)
+            assert restarted.checkpoint_store is not None
+            resumed_stages: list[CheckpointStage] = []
+            restarted_write = restarted.checkpoint_store.write
+
+            async def record_resumed_checkpoint(
+                previous_version: int | None, checkpoint: RunCheckpoint
+            ) -> RunCheckpoint:
+                saved = await restarted_write(previous_version, checkpoint)
+                resumed_stages.append(saved.stage)
+                return saved
+
+            monkeypatch.setattr(
+                restarted.checkpoint_store, "write", record_resumed_checkpoint
+            )
+            restarted_app = create_app(runtime=restarted)
+            async with (
+                restarted_app.router.lifespan_context(restarted_app),
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=restarted_app),
+                    base_url="http://127.0.0.1",
+                ) as restarted_client,
+            ):
+                future = datetime.now(tz=UTC) + timedelta(seconds=60)
+                assert await restarted.store.reconcile_expired(future) == 1
+                resumed = await restarted_client.post(
+                    f"/runs/{run_id}/resume",
+                    headers=headers,
+                    json={"question": question, "resume_key": "false-audit-restart"},
+                )
+                assert resumed.status_code == 202
+                terminal = await _wait_terminal(restarted, run_id, owner)
+                trace = await restarted_client.get(f"/runs/{run_id}", headers=headers)
+
+    assert terminal.status is RunStatus.ANSWERED
+    body = trace.json()
+    semantic = [
+        event for event in body["events"] if event["kind"] == "semantic_summary"
+    ]
+    recovery = [
+        event for event in body["events"] if event["kind"] == "recovery_summary"
+    ]
+    assert [event["supports"] for event in semantic] == [False, True]
+    assert len(recovery) == 1
+    assert [
+        stage
+        for stage in resumed_stages
+        if stage
+        in {
+            CheckpointStage.RECOVERY_RESERVED,
+            CheckpointStage.RECOVERY_COMPLETED,
+        }
+    ] == [
+        CheckpointStage.RECOVERY_RESERVED,
+        CheckpointStage.RECOVERY_COMPLETED,
+    ]
     assert question not in trace.text
 
 

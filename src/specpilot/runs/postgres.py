@@ -197,6 +197,44 @@ class PostgresRunStore:
             raise RunStoreIntegrityError()
         return cast(str, value)
 
+    async def read_demo_recovery_phase_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str:
+        """Read closed recovery phase facts without reading any prose."""
+        validated_run_id = _validated_uuid(run_id)
+        validated_session_id = _validated_identifier(session_id)
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                row = await (
+                    await connection.execute(
+                        "SELECT COALESCE(bool_or("
+                        "event.kind = 'semantic_summary' "
+                        "AND event.payload ->> 'supports' = 'false'"
+                        "), false) AS semantic_failed, "
+                        "COALESCE(bool_or(event.kind = 'recovery_summary'), false) "
+                        "AS recovery_emitted "
+                        "FROM specpilot_run_event AS event "
+                        "JOIN specpilot_run AS run ON run.run_id = event.run_id "
+                        "WHERE run.run_id = %s AND run.session_id = %s "
+                        ,
+                        (validated_run_id, validated_session_id),
+                    )
+                ).fetchone()
+        except psycopg.Error:
+            raise RunStoreUnavailable() from None
+        if (
+            row is None
+            or not isinstance(row["semantic_failed"], bool)
+            or not isinstance(row["recovery_emitted"], bool)
+        ):
+            raise RunStoreIntegrityError()
+        if row["recovery_emitted"]:
+            return "recovery_emitted"
+        if row["semantic_failed"]:
+            return "semantic_failed"
+        return "none"
+
     async def read_events_owned(
         self,
         run_id: UUID,

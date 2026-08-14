@@ -6,7 +6,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -481,8 +481,15 @@ def _assemble_runtime(
         request: ChatRequest,
         checkpoint: RunCheckpoint | None,
         query_hash: str,
+        recovery_phase: str,
     ) -> RunJob:
-        _register_demo_script(adapter, str(run_id), request, checkpoint)
+        _register_demo_script(
+            adapter,
+            str(run_id),
+            request,
+            checkpoint,
+            recovery_phase=recovery_phase,
+        )
         if request.task_level == "L1":
             return RunJob(
                 run_id=run_id,
@@ -515,11 +522,24 @@ def _assemble_runtime(
             checkpoint,
             query_hash=query_hash,
         )
-        return await delivery.build(
+        job = await delivery.build(
             run,
             question,
             acquired_attempt=None if checkpoint is None else checkpoint.attempt,
         )
+        if (
+            recovery_phase == "semantic_failed"
+            and checkpoint is not None
+            and not checkpoint.recovery_attempted
+            and job.l2_context is not None
+        ):
+            return replace(
+                job,
+                l2_context=replace(
+                    job.l2_context, pending_semantic_recovery=True
+                ),
+            )
+        return job
 
     hooks: tuple[Any, ...] = (
         (mcp_hook,) if provider_hook is None else (mcp_hook, provider_hook)
@@ -554,6 +574,8 @@ def _register_demo_script(
     run_id: str,
     request: ChatRequest,
     checkpoint: RunCheckpoint | None,
+    *,
+    recovery_phase: str = "none",
 ) -> None:
     """Select a fixture script from the private registry, never client content."""
     if request.scenario_id is None:
@@ -565,7 +587,8 @@ def _register_demo_script(
         run_id,
         script_version,
         recovery_consumed=(
-            checkpoint is not None and checkpoint.recovery_attempted
+            recovery_phase != "none"
+            or (checkpoint is not None and checkpoint.recovery_attempted)
         ),
     )
 

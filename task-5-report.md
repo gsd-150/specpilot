@@ -22,13 +22,26 @@
 - Review fix: the closed scenario ID is stored server-side only and omitted
   from `RunView`.  Resume reconstructs the registered script after a runtime
   restart; the recovery checkpoint prevents a second synthetic first-failure.
+- Review fix: resume now derives a closed, owner-scoped recovery phase from
+  durable sanitized events.  If the first semantic `false` survives a crash
+  before `recovery_reserved`, a fresh runtime skips replaying that false,
+  persists exactly one `recovery_reserved`/`recovery_completed` pair, emits one
+  recovery, and reaches the registered terminal state with semantic outcomes
+  exactly `[false, true]`.
+- Migration coverage now checks the exact nullable scenario column and closed
+  constraint after both a fresh `001` through `015` migration and a legacy
+  `014` to `015` upgrade with a pre-existing row whose identity remains NULL.
 
 ## Verification
 
-- Fresh-schema focused Python unit and integration suite: 167 passed.
-- The new process-restart recovery integration passed with a new FakeProvider
-  instance and one recovery only.
-- Migration upgrade `001` through `014`, followed by `015`, passed.
+- Fresh-template0 focused Python unit and integration suite: 225 passed.
+- Hard-bounded process-restart recovery integrations: 2 passed with new
+  `FakeProvider` instances, semantic outcomes exactly `[false, true]`, one
+  recovery only, and terminal completion.  The pre-reservation case also
+  observed the exact resumed checkpoint subsequence `recovery_reserved`,
+  `recovery_completed`.
+- Focused fresh `001` through `015` and legacy `014` to `015` migration checks:
+  4 passed.
 - Frontend unit suite: 148 passed.
 - Frontend production build: passed.
 - Playwright fixture paths over SSE: 5 passed.

@@ -304,6 +304,11 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 if stored_scenario is None
                 else DemoScenarioId(stored_scenario)
             )
+            recovery_phase = "none"
+            if scenario_id is DemoScenarioId.VERIFIER_RECOVERED:
+                recovery_phase = await runtime.store.read_demo_recovery_phase_owned(
+                    run_id, session.session_id
+                )
             reconstructed = _resume_chat_request(
                 request, checkpoint, scenario_id
             )
@@ -314,6 +319,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 reconstructed,
                 checkpoint,
                 query_hash,
+                recovery_phase,
             )
             permit = await runtime.worker.reserve()
             await permit.deliver(job)
@@ -553,9 +559,10 @@ async def _build_job(
     request: ChatRequest,
     checkpoint: RunCheckpoint | None,
     query_hash: str,
+    recovery_phase: str = "none",
 ) -> RunJob:
     job = runtime.binding.build_job(
-        run_id, question, request, checkpoint, query_hash
+        run_id, question, request, checkpoint, query_hash, recovery_phase
     )
     if inspect.isawaitable(job):
         job = await job

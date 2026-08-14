@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from specpilot.api.app import create_app
+from specpilot.api.contracts import ChatRequest
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.checkpoints.postgres import CheckpointResumeResult
@@ -133,6 +134,12 @@ class FakeStore:
             return None
         return self.scenario_ids[run_id]
 
+    async def read_demo_recovery_phase_owned(
+        self, run_id: UUID, session_id: str
+    ) -> str:
+        del run_id, session_id
+        return "none"
+
     async def reconcile_expired(self) -> int:
         self.reconciles += 1
         if self.reconcile_error is not None:
@@ -233,15 +240,29 @@ def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
     verifier = SessionVerifier(
         secret=secret, audience="specpilot-api", profile=profile, clock=lambda: NOW
     )
+    def build_job(
+        run_id: UUID,
+        question: str,
+        request: ChatRequest,
+        checkpoint: RunCheckpoint | None,
+        query_hash: str,
+        recovery_phase: str,
+    ) -> RunJob:
+        del checkpoint, query_hash, recovery_phase
+        return RunJob(
+            run_id=run_id,
+            question=question,
+            planner_context=object(),
+            corpus_manifest_id=request.corpus_manifest_id,
+            answer_context={},
+        )
+
     binding = ApiRunBinding(
         profile=profile, source_manifest_id=HASHES["source"],
         corpus_manifest_id=HASHES["corpus"], policy_hash=HASHES["policy"],
         configuration_hash=HASHES["configuration"], prompt_id="l1-answer-v1",
         prompt_hash=HASHES["prompt"], provider_id="provider-a", model_id="model-a",
-        build_job=lambda run_id, question, request, checkpoint, query_hash: RunJob(
-            run_id=run_id, question=question, planner_context=object(),
-            corpus_manifest_id=request.corpus_manifest_id, answer_context={}
-        ),
+        build_job=build_job,
     )
     return ApiRuntime(
         store=store, worker=worker, verifier=verifier, binding=binding,
@@ -701,6 +722,7 @@ async def test_generic_api_exception_is_stable_marker_free_and_terminalizes(
             request: object,
             checkpoint: object,
             query_hash: str,
+            recovery_phase: str,
         ) -> RunJob:
             raise RuntimeError(marker)
 

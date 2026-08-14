@@ -273,6 +273,7 @@ def test_migration_creates_exact_keys_foreign_keys_and_safe_columns(
             "provider_id": ("text", "NO"),
             "model_id": ("text", "NO"),
             "query_hash": ("text", "NO"),
+            "demo_scenario_id": ("text", "YES"),
             "status": ("text", "NO"),
             "terminal_reason": ("text", "YES"),
             "created_at": ("timestamp with time zone", "NO"),
@@ -305,8 +306,38 @@ def test_migration_has_exact_status_and_event_kind_checks(migrated_dsn: str) -> 
         event_kind = _constraint_definition(
             connection, "specpilot_run_event", "specpilot_run_event_kind_check"
         )
+        demo_scenario = _constraint_definition(
+            connection,
+            "specpilot_run",
+            "specpilot_run_demo_scenario_id_check",
+        )
         assert set(re.findall(r"'([^']+)'", status)) == _STATUSES
         assert set(re.findall(r"'([^']+)'", event_kind)) == _EVENT_KINDS
+        assert set(re.findall(r"'([^']+)'", demo_scenario)) == {
+            "l1_answered",
+            "l2_answered",
+            "evidence_refused",
+            "verifier_recovered",
+        }
+
+
+def test_migration_demo_scenario_check_is_closed(clean_ledger: str) -> None:
+    import psycopg
+    from psycopg.errors import CheckViolation
+
+    with psycopg.connect(clean_ledger) as connection:
+        run_id = _insert_run(connection)
+        connection.execute(
+            "UPDATE specpilot_run SET demo_scenario_id = 'verifier_recovered' "
+            "WHERE run_id = %s",
+            (run_id,),
+        )
+        with pytest.raises(CheckViolation):
+            connection.execute(
+                "UPDATE specpilot_run SET demo_scenario_id = 'unregistered' "
+                "WHERE run_id = %s",
+                (run_id,),
+            )
 
 
 def test_event_payload_check_rejects_plaintext_extra_and_mismatched_metadata(
@@ -927,6 +958,56 @@ def test_migration_014_refuses_legacy_reserved_checkpoint_without_mutation(
                 "FROM specpilot_run_checkpoint WHERE run_id = %s",
                 (run_id,),
             ).fetchone() == (True,)
+        finally:
+            connection.execute("RESET search_path")
+            connection.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+
+def test_migration_015_keeps_preexisting_rows_without_demo_identity(
+    ledger_dsn: str,
+) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.errors import CheckViolation
+
+    from tests.conftest import MIGRATIONS_DIR
+
+    schema = f"test_w5_015_existing_rows_{uuid.uuid4().hex}"
+    with psycopg.connect(ledger_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        try:
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+            )
+            _apply_migrations_through_013(connection)
+            run_id, _ = _insert_legacy_l2_checkpoint(connection, stage="planned")
+            connection.execute(
+                (MIGRATIONS_DIR / "014_w4_recovery_claim_binding.sql").read_text(
+                    encoding="utf-8"
+                )
+            )
+            connection.execute(
+                (MIGRATIONS_DIR / "015_w5_demo_scenario_identity.sql").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert connection.execute(
+                "SELECT demo_scenario_id FROM specpilot_run WHERE run_id = %s",
+                (run_id,),
+            ).fetchone() == (None,)
+            connection.execute(
+                "UPDATE specpilot_run "
+                "SET demo_scenario_id = 'verifier_recovered' WHERE run_id = %s",
+                (run_id,),
+            )
+            with pytest.raises(CheckViolation):
+                connection.execute(
+                    "UPDATE specpilot_run "
+                    "SET demo_scenario_id = 'unregistered' WHERE run_id = %s",
+                    (run_id,),
+                )
         finally:
             connection.execute("RESET search_path")
             connection.execute(
