@@ -50,6 +50,17 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The integration directories are deliberately not packages, so under pytest's
+# default prepend import mode a test module's name is just its basename. Two
+# distinct files named `test_postgres_store.py` — one for the run store, one for
+# the W4 checkpoint store — then claim the same module name, and pytest aborts
+# the whole selection during collection rather than skipping the second file.
+# That turns a naming coincidence into a suite that cannot run at all, which is
+# exactly the failure `integration-db` exists to prevent. importlib mode derives
+# the module name from the full path, so same-named files in sibling directories
+# stay distinct. It lives here rather than in the Makefile because CI, the make
+# targets, and any ad-hoc `pytest` invocation all need it equally.
+addopts = "--import-mode=importlib"
 filterwarnings = [
     "ignore:^Field 'lifespan' has an incomplete definition.*:pydantic_settings.sources.utils.IncompleteFieldDefinitionWarning:pydantic_settings\\.sources\\.utils$",
     "ignore::starlette.exceptions.StarletteDeprecationWarning",
