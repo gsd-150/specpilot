@@ -39,6 +39,7 @@ class L2CheckpointStore:
 type ContextBuilder = Callable[
     [RunRecord, str, RunCheckpoint | None, Callable[[], RunCheckpoint]], L2RunContext
 ]
+type L1JobBuilder = Callable[[RunRecord, str], RunJob]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +52,12 @@ class L2JobFactory:
     async def new_job(self, run: RunRecord, question: str) -> RunJob:
         """Build a queued L2 job. The first checkpoint is persisted by L2."""
         _require_l2(run)
+
         def first() -> RunCheckpoint:
             return self.checkpoint_store.new_checkpoint(
                 run, stage=CheckpointStage.PLANNED
             )
+
         context = self.context_builder(run, question, None, first)
         context = replace(
             context,
@@ -63,6 +66,14 @@ class L2JobFactory:
             checkpoint_writer=self.checkpoint_store.write,
         )
         return _job(run, question, context, lease_acquired=False, attempt=1)
+
+    async def job_for_delivery(
+        self, run: RunRecord, question: str, *, acquired_attempt: int | None = None
+    ) -> RunJob:
+        """The runtime service entry point used before any HTTP route exists."""
+        if acquired_attempt is None:
+            return await self.new_job(run, question)
+        return await self.resumed_job(run, question, attempt=acquired_attempt)
 
     async def resumed_job(
         self, run: RunRecord, question: str, *, attempt: int
@@ -75,10 +86,12 @@ class L2JobFactory:
         if checkpoint is None or checkpoint.attempt != attempt:
             raise ValueError("resume_checkpoint_unavailable")
         _require_bindings(run, checkpoint)
+
         def first() -> RunCheckpoint:
             return self.checkpoint_store.new_checkpoint(
                 run, stage=CheckpointStage.PLANNED
             )
+
         context = self.context_builder(run, question, checkpoint, first)
         context = replace(
             context,
@@ -87,6 +100,30 @@ class L2JobFactory:
             checkpoint_writer=self.checkpoint_store.write,
         )
         return _job(run, question, context, lease_acquired=True, attempt=attempt)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeJobBuilder:
+    """Production delivery seam selecting the durable task-level executor.
+
+    Queue/HTTP code can remain unaware of checkpoint mechanics: a newly
+    queued L2 run and a ``begin_resume``-acquired L2 run both pass here, while
+    legacy L1 construction stays injected and deliberately separate.
+    """
+
+    l1_builder: L1JobBuilder
+    l2_factory: L2JobFactory
+
+    async def build(
+        self, run: RunRecord, question: str, *, acquired_attempt: int | None = None
+    ) -> RunJob:
+        if run.task_level == "L2":
+            return await self.l2_factory.job_for_delivery(
+                run, question, acquired_attempt=acquired_attempt
+            )
+        if acquired_attempt is not None:
+            raise ValueError("l1_resume_delivery_not_supported")
+        return self.l1_builder(run, question)
 
 
 def _job(
@@ -138,4 +175,4 @@ def _require_bindings(run: RunRecord, checkpoint: RunCheckpoint) -> None:
         raise ValueError("resume_checkpoint_binding_mismatch")
 
 
-__all__ = ["L2CheckpointStore", "L2JobFactory"]
+__all__ = ["L2CheckpointStore", "L2JobFactory", "RuntimeJobBuilder"]

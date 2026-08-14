@@ -34,6 +34,7 @@ def _checkpoint(**changes: object):  # type: ignore[no-untyped-def]
         "reconstruction_generations": (),
         "recovery_attempted": False,
         "recovery_reason": None,
+        "candidate_count": 0,
         "completed_claim_ids": (),
         "completed_results": (),
         "last_accessed_at": datetime(2026, 8, 14, tzinfo=UTC),
@@ -127,6 +128,8 @@ def test_attempt_count_and_completed_ids_are_bounded_and_opaque() -> None:
         _checkpoint(tool_attempts_used=9)
     with pytest.raises(ValidationError, match="completed_claim_ids"):
         _checkpoint(completed_claim_ids=("not-an-opaque-hash",))
+    with pytest.raises(ValidationError, match="candidate_count"):
+        _checkpoint(candidate_count=4)
 
 
 def test_l2_run_requires_real_root_and_distinct_stage_prompt_hashes() -> None:

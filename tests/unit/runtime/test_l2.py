@@ -17,6 +17,7 @@ from specpilot.contracts.answer import Citation
 from specpilot.contracts.verdict import (
     ComplianceBatch,
     ComplianceCandidate,
+    ComplianceResult,
     ComplianceVerdict,
     IdentifiedCandidate,
     SemanticDecision,
@@ -24,6 +25,7 @@ from specpilot.contracts.verdict import (
 )
 from specpilot.corpus.indexable import IndexUnit
 from specpilot.egress.ledger import RequestSize
+from specpilot.providers.transport import ProviderAttemptError
 from specpilot.verifier.deterministic import (
     DeterministicCheck,
     DeterministicFault,
@@ -252,6 +254,7 @@ def checkpoint(stage: str = "planned", *, items: tuple[Evidence, ...] = ()):
         reconstruction_generations=(),
         recovery_attempted=stage == "recovery_completed",
         recovery_reason=None,
+        candidate_count=0,
         completed_claim_ids=(),
         completed_results=(),
         last_accessed_at=datetime(2026, 8, 14, tzinfo=UTC),
@@ -524,6 +527,170 @@ async def test_resume_each_legal_stage_uses_only_validated_local_restorers(
         "checkpoint_evidence_unavailable",
     }
     assert made.planner.calls == 0
+
+
+async def test_completed_checkpoint_fast_path_needs_no_restorer_or_provider() -> None:
+    item = evidence()
+    result = ComplianceResult(
+        claim_id=candidate(item).claim_id,
+        verdict="compliant",
+        verification_status="verified",
+        citations=passed(item).citations,
+    )
+    seed = checkpoint("completed").model_copy(
+        update={
+            "candidate_count": 1,
+            "completed_claim_ids": (result.claim_id,),
+            "completed_results": (result,),
+        }
+    )
+    made = context(deterministic=lambda *_: passed(item), semantic=Semantic([True]))
+    made = dataclass_replace(made, checkpoint=seed)
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.results == (result,)
+    assert made.planner.calls == 0
+    assert made.evidence_agent.calls == 0
+    assert made.compliance_agent.calls == 0
+
+
+async def test_mismatched_restored_evidence_fails_closed_before_compliance() -> None:
+    item = evidence()
+    seed = checkpoint("candidate_built", items=(item,))
+    wrong = build_evidence_from_unit(
+        IndexUnit(
+            unit_id="b" * 64, kind="clause", document_id="RFC9110",
+            document_version="RFC9110-2022", section_number="1", section_path="x",
+            ordinal=2, text="Different local clause.", indexed="Different",
+        ), corpus_manifest_id="c" * 64,
+    )
+    made = context(deterministic=lambda *_: passed(item), semantic=Semantic([True]))
+    made = dataclass_replace(
+        made,
+        checkpoint=seed,
+        plan_restorer=lambda *_: FakePlan(),
+        evidence_restorer=lambda refs: (wrong,),
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault == "checkpoint_evidence_unavailable"
+    assert made.compliance_agent.calls == 0
+
+
+@pytest.mark.parametrize("restored", [(), (evidence(), evidence())])
+async def test_evidence_restorer_rejects_missing_or_extra_refs_before_send(
+    restored: tuple[Evidence, ...],
+) -> None:
+    item = evidence()
+    seed = checkpoint("candidate_built", items=(item,))
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True])),
+        checkpoint=seed,
+        plan_restorer=lambda *_: FakePlan(),
+        evidence_restorer=lambda _: restored,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.parse_fault == "checkpoint_evidence_unavailable"
+    assert made.compliance_agent.calls == 0
+
+
+async def test_semantic_cursor_survives_crash_between_three_claims() -> None:
+    item = evidence()
+    candidates = tuple(
+        IdentifiedCandidate(
+            claim_id=hashlib.sha256(f"cursor {index}".encode()).hexdigest(),
+            candidate=ComplianceCandidate(
+                claim=f"cursor {index}", proposed_verdict="compliant",
+                evidence_ids=(item.excerpt.content_hash,), rationale="fixture",
+            ),
+        )
+        for index in range(3)
+    )
+
+    class BatchCompliance(Compliance):
+        async def evaluate(self, *args: object) -> ComplianceOutcome:
+            base = await super().evaluate(*args)
+            return ComplianceOutcome(
+                batch=ComplianceBatch(
+                    candidates=tuple(value.candidate for value in candidates)
+                ),
+                candidates=candidates, reservation_id=base.reservation_id,
+                replayed=False, request_size=base.request_size,
+            )
+
+    writer = StatefulWriter()
+    live = True
+
+    async def stop_after_cursor(previous_version: int | None, current: object):
+        nonlocal live
+        saved = await writer(previous_version, current)
+        if (
+            saved.stage.value == "semantic_verified"
+            and len(saved.completed_results) == 1
+        ):
+            live = False
+        return saved
+
+    first = dataclass_replace(
+        context(
+            deterministic=lambda *_: passed(item), semantic=Semantic([True, True, True])
+        ),
+        compliance_agent=BatchCompliance(candidates[0]), checkpoint_factory=checkpoint,
+        checkpoint_writer=stop_after_cursor, lease_is_live=lambda: live,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    interrupted = await run_l2_attempt(first)
+
+    assert interrupted.parse_fault == "lease_lost"
+    assert writer.current is not None
+    assert writer.current.completed_claim_ids == (candidates[0].claim_id,)
+    resumed = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True, True])),
+        checkpoint=writer.current, checkpoint_writer=writer,
+        compliance_agent=BatchCompliance(candidates[0]),
+        plan_restorer=lambda *_: FakePlan(), evidence_restorer=lambda _: (item,),
+    )
+    outcome = await run_l2_attempt(resumed)
+
+    assert tuple(value.claim_id for value in outcome.results) == tuple(
+        value.claim_id for value in candidates
+    )
+    assert resumed.semantic_verifier.calls == 2
+    assert writer.current.completed_claim_ids == tuple(
+        value.claim_id for value in candidates
+    )
+
+
+async def test_provider_failure_reservation_is_durable_before_return() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+
+    class FailingCompliance:
+        async def evaluate(self, *args: object) -> ComplianceOutcome:
+            raise ProviderAttemptError("provider_timeout", str(uuid4()), False, None)
+
+    seed = checkpoint("evidence_collected", items=(item,))
+    writer.current = seed
+    made = dataclass_replace(
+        context(deterministic=lambda *_: passed(item), semantic=Semantic([True])),
+        checkpoint=seed, checkpoint_writer=writer, compliance_agent=FailingCompliance(),
+        plan_restorer=lambda *_: FakePlan(), evidence_restorer=lambda _: (item,),
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.provider_error == "provider_timeout"
+    assert writer.current is not None
+    assert len(writer.current.reservation_ids) == 1
 
 
 def dataclass_replace(value: object, **changes: object):

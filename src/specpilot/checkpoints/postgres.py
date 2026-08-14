@@ -81,6 +81,7 @@ class PostgresCheckpointStore:
             reconstruction_generations=(),
             recovery_attempted=False,
             recovery_reason=None,
+            candidate_count=0,
             completed_claim_ids=(),
             completed_results=(),
             last_accessed_at=self._now(),

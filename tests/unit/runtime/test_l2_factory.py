@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from specpilot.checkpoints.contracts import RunCheckpoint
-from specpilot.runtime.l2_factory import L2JobFactory
+from specpilot.runtime.l2_factory import L2JobFactory, RuntimeJobBuilder
 from tests.unit.checkpoints.test_contracts import _checkpoint
 from tests.unit.runtime.test_l2 import Semantic, context, passed
 from tests.unit.runtime.test_l2 import evidence as fixture_evidence
@@ -112,3 +112,31 @@ async def test_resumed_l2_job_requires_current_attempt_checkpoint_and_skips_clai
     assert job.attempt == 2
     assert job.l2_context is not None
     assert job.l2_context.checkpoint is saved
+
+
+@pytest.mark.anyio
+async def test_runtime_delivery_builder_calls_l2_factory_for_new_and_resume() -> None:
+    run = fixture_run()
+    store = Store()
+    factory = L2JobFactory(store, builder)
+    delivery = RuntimeJobBuilder(
+        lambda *_: (_ for _ in ()).throw(AssertionError()), factory
+    )
+
+    fresh = await delivery.build(run, "private")
+    assert fresh.task_level == "L2"
+    assert fresh.lease_acquired is False
+
+    saved = _checkpoint(
+        run_id=run.run_id, attempt=2, stage="planned", plan_id="plan-1",
+        plan_hash="1" * 64, query_hash=run.query_hash,
+        evaluation_root_id=run.evaluation_root_id,
+        corpus_manifest_id=run.corpus_manifest_id,
+        policy_hash=run.policy_hash, configuration_hash=run.configuration_hash,
+        provider_id=run.provider_id, model_id=run.model_id,
+    )
+    store.checkpoint = saved
+    resumed = await delivery.build(run, "private", acquired_attempt=2)
+
+    assert resumed.lease_acquired is True
+    assert resumed.attempt == 2

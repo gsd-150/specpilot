@@ -56,7 +56,11 @@ LEGAL_TRANSITIONS: dict[CheckpointStage, frozenset[CheckpointStage]] = {
         {CheckpointStage.RECOVERY_COMPLETED, CheckpointStage.DETERMINISTIC_VERIFIED}
     ),
     CheckpointStage.SEMANTIC_VERIFIED: frozenset(
-        {CheckpointStage.SEMANTIC_VERIFIED, CheckpointStage.COMPLETED}
+        {
+            CheckpointStage.SEMANTIC_VERIFIED,
+            CheckpointStage.DETERMINISTIC_VERIFIED,
+            CheckpointStage.COMPLETED,
+        }
     ),
     CheckpointStage.COMPLETED: frozenset(),
 }
@@ -126,10 +130,14 @@ class RunCheckpoint(_FrozenModel):
     tool_attempts_used: Annotated[int, Field(ge=0, le=8)]
     reservation_ids: Annotated[tuple[UUID, ...], Field(max_length=16)]
     reconstruction_generations: Annotated[
-        tuple[StageGeneration, ...], Field(max_length=8)
+        tuple[StageGeneration, ...], Field(max_length=64)
     ]
     recovery_attempted: bool
     recovery_reason: TerminalReason | None
+    # This is a cursor bound, not candidate content.  It lets a semantic
+    # checkpoint distinguish "one claim completed" from "all claims done"
+    # without retaining claim prose or a second outbound prompt.
+    candidate_count: Annotated[int, Field(ge=0, le=3)]
     completed_claim_ids: Annotated[tuple[Sha256, ...], Field(max_length=3)]
     completed_results: Annotated[tuple[ComplianceResult, ...], Field(max_length=3)]
     last_accessed_at: datetime
@@ -159,6 +167,8 @@ class RunCheckpoint(_FrozenModel):
         result_ids = tuple(result.claim_id for result in self.completed_results)
         if self.completed_claim_ids != result_ids:
             raise ValueError("completed result IDs match completed claim IDs")
+        if len(self.completed_results) > self.candidate_count:
+            raise ValueError("completed results cannot exceed candidate cursor")
         if len(set(self.reservation_ids)) != len(self.reservation_ids):
             raise ValueError("reservation IDs must be unique")
         evidence_ids = tuple(reference.evidence_id for reference in self.evidence)
@@ -206,6 +216,10 @@ def validate_transition(previous: RunCheckpoint, current: RunCheckpoint) -> None
         raise ValueError("reconstruction generations are monotonic")
     if previous.recovery_attempted and not current.recovery_attempted:
         raise ValueError("recovery attempt is monotonic")
+    if current.candidate_count < previous.candidate_count:
+        raise ValueError("candidate cursor is monotonic")
+    if not set(previous.completed_claim_ids).issubset(current.completed_claim_ids):
+        raise ValueError("completed claim IDs are monotonic")
     if (
         current.stage is CheckpointStage.RECOVERY_COMPLETED
         and not current.recovery_attempted
