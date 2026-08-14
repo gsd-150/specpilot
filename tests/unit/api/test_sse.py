@@ -353,6 +353,55 @@ def test_stream_config_rejects_page_sizes_outside_store_cap(page_size: int) -> N
 
 
 @pytest.mark.anyio
+async def test_bounded_response_sends_final_empty_body_after_idle_expiry() -> None:
+    """Catches ordinary lifetime expiry leaving an incomplete ASGI response."""
+
+    class IdleIterator:
+        def __init__(self) -> None:
+            self.first = True
+            self.closed = asyncio.Event()
+
+        def __aiter__(self) -> IdleIterator:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if self.first:
+                self.first = False
+                return b": keep-alive\n\n"
+            await asyncio.Future()
+
+        async def aclose(self) -> None:
+            self.closed.set()
+
+    iterator = IdleIterator()
+    messages: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    response = BoundedStreamingResponse(
+        iterator,
+        max_connection_seconds=0.01,
+        media_type="text/event-stream",
+    )
+
+    await asyncio.wait_for(response.stream_response(send), timeout=0.1)
+
+    assert [message["type"] for message in messages] == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+    ]
+    assert messages[1]["more_body"] is True
+    assert messages[2] == {
+        "type": "http.response.body",
+        "body": b"",
+        "more_body": False,
+    }
+    assert iterator.closed.is_set()
+
+
+@pytest.mark.anyio
 async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> None:
     """Catches ASGI backpressure retaining a page beyond connection expiry."""
 
@@ -389,15 +438,18 @@ async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> No
         config=RunEventStreamConfig(),
     )
     iterator = ClosingIterator(source)
-    stalled_send_cancelled = asyncio.Event()
+    body_attempts = 0
+    body_cancellations = 0
 
     async def send(message: dict[str, Any]) -> None:
-        if message["type"] != "http.response.body" or not message["more_body"]:
+        nonlocal body_attempts, body_cancellations
+        if message["type"] != "http.response.body":
             return
+        body_attempts += 1
         try:
             await asyncio.Future()
         finally:
-            stalled_send_cancelled.set()
+            body_cancellations += 1
 
     response = BoundedStreamingResponse(
         iterator,
@@ -407,6 +459,6 @@ async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> No
 
     await asyncio.wait_for(response.stream_response(send), timeout=0.1)
 
-    assert stalled_send_cancelled.is_set()
+    assert body_attempts == body_cancellations == 2
     assert iterator.closed.is_set()
     assert store.calls == [(run_id, "owner-a", 0, 256)]

@@ -22,6 +22,7 @@ from specpilot.runs.contracts import RunEvent
 _CANONICAL_CURSOR = re.compile(r"(?:0|[1-9][0-9]{0,4})\Z")
 _MAX_SEQUENCE = 10_000
 _HEARTBEAT = b": keep-alive\n\n"
+_FINALIZE_MAX_SECONDS = 0.25
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
 
@@ -84,12 +85,18 @@ class BoundedStreamingResponse(StreamingResponse):
             background=background,
         )
         self._max_connection_seconds = max_connection_seconds
+        self._finalize_seconds = min(
+            max_connection_seconds, _FINALIZE_MAX_SECONDS
+        )
 
     async def stream_response(self, send: Send) -> None:
         """Close normally on expiry, including when client send backpressure stalls."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._max_connection_seconds
         iterator = self.body_iterator.__aiter__()
+        started = False
+        completed = False
+        expired = False
         try:
             await _await_before(
                 deadline,
@@ -101,6 +108,7 @@ class BoundedStreamingResponse(StreamingResponse):
                     }
                 ),
             )
+            started = True
             while True:
                 try:
                     chunk = await _await_before(deadline, lambda: anext(iterator))
@@ -114,19 +122,24 @@ class BoundedStreamingResponse(StreamingResponse):
                 )
             await _await_before(
                 deadline,
-                lambda: send(
-                    {"type": "http.response.body", "body": b"", "more_body": False}
-                ),
+                partial(_send_final_body, send),
             )
+            completed = True
         except TimeoutError:
             # The response has already started. Expiry is a sanitized body close,
             # including when the client cannot accept the current frame.
-            return
+            expired = True
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 with suppress(Exception):
                     await close()
+        if expired and started and not completed:
+            cleanup_deadline = loop.time() + self._finalize_seconds
+            with suppress(TimeoutError, OSError):
+                await _await_before(
+                    cleanup_deadline, partial(_send_final_body, send)
+                )
 
 
 async def _await_before[T](
@@ -142,6 +155,12 @@ async def _await_before[T](
 async def _send_body(send: Send, chunk: bytes | memoryview) -> None:
     await send(
         {"type": "http.response.body", "body": chunk, "more_body": True}
+    )
+
+
+async def _send_final_body(send: Send) -> None:
+    await send(
+        {"type": "http.response.body", "body": b"", "more_body": False}
     )
 
 
