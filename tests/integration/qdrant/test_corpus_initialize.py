@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,6 +21,7 @@ from specpilot.deployment.ready import ReadyMarker, ReadyMarkerStore
 from specpilot.manifests.corpus_store import CollectionFrozenError, CorpusManifestStore
 from specpilot.retrieval.dense import DenseIndexWriter
 from tests.integration.qdrant.test_corpus_freeze import (
+    SyntheticCorpus,
     _real_freeze_context,
     _synthetic_corpus,
 )
@@ -191,6 +193,86 @@ def test_fixture_refuses_wrong_existing_schema_without_recreating(
         admin.close()
 
 
+def test_fixture_runtime_fault_removes_created_mutable_collection(
+    fixture_request: FixtureInitializationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = json.loads(
+        (fixture_request.fixture_dir / "fixture-manifest.json").read_text()
+    )
+    collection = fixture["collection_name"]
+
+    def fail_after_create(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("injected observation fault")
+
+    monkeypatch.setattr(
+        "specpilot.deployment.initialize._observe_fixture",
+        fail_after_create,
+    )
+    admin = QdrantClient(url=fixture_request.qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(RuntimeError, match="injected observation fault"):
+            initialize_fixture(fixture_request)
+
+        assert not admin.collection_exists(collection)
+    finally:
+        if admin.collection_exists(collection):
+            admin.delete_collection(collection)
+        admin.close()
+
+
+def test_fixture_cancellation_keeps_primary_error_and_uses_bounded_cleanup(
+    fixture_request: FixtureInitializationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = json.loads(
+        (fixture_request.fixture_dir / "fixture-manifest.json").read_text()
+    )
+    collection = fixture["collection_name"]
+
+    class PrimaryCancellation(BaseException):
+        pass
+
+    def cancel_after_create(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise PrimaryCancellation
+
+    original_delete = QdrantClient.delete_collection
+    cleanup_timeouts: list[int | None] = []
+
+    def observed_delete(
+        client: QdrantClient,
+        collection_name: str,
+        timeout: int | None = None,
+        **kwargs: object,
+    ) -> bool:
+        cleanup_timeouts.append(timeout)
+        return original_delete(
+            client,
+            collection_name,
+            timeout=timeout,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        "specpilot.deployment.initialize._observe_fixture",
+        cancel_after_create,
+    )
+    monkeypatch.setattr(QdrantClient, "delete_collection", observed_delete)
+    admin = QdrantClient(url=fixture_request.qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(PrimaryCancellation):
+            initialize_fixture(fixture_request)
+
+        assert cleanup_timeouts == [10]
+        assert not admin.collection_exists(collection)
+    finally:
+        if admin.collection_exists(collection):
+            original_delete(admin, collection)
+        admin.close()
+
+
 def test_real_initialization_verifies_existing_freeze_and_writes_real_marker(
     tmp_path: Path,
     qdrant_url: str,
@@ -210,8 +292,11 @@ def test_real_initialization_verifies_existing_freeze_and_writes_real_marker(
         source_path = sources / f"{frozen.manifest.source_manifest_ids[0]}.xml"
         shutil.copyfile(frozen.verify_request.sources[0].xml_path, source_path)
         source_path.chmod(0o600)
+        corpus_output = tmp_path / "existing-corpus-manifests"
+        shutil.copytree(root / "corpus-manifests", corpus_output)
         request = RealInitializationRequest(
             corpus_dir=root,
+            corpus_manifest_dir=corpus_output,
             ready_dir=tmp_path / "ready-real",
             qdrant_url=qdrant_url,
         )
@@ -224,14 +309,65 @@ def test_real_initialization_verifies_existing_freeze_and_writes_real_marker(
         assert first.corpus_manifest_id == frozen.manifest.manifest_id
 
 
-def test_real_initialization_builds_only_the_derived_absent_collection(
+@pytest.mark.parametrize("unsafe_shape", ["world_readable", "hardlink"])
+def test_existing_real_freeze_refuses_insecure_source_before_verify(
     tmp_path: Path,
     qdrant_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    unsafe_shape: str,
 ) -> None:
-    root = tmp_path / "real-new"
-    synthetic = _synthetic_corpus(root, "990002")
-    (root / "corpus-manifests").mkdir(mode=0o700)
+    freeze_root = tmp_path / f"freeze-{unsafe_shape}"
+    with _real_freeze_context(
+        freeze_root,
+        qdrant_url,
+        monkeypatch,
+        number="990003" if unsafe_shape == "world_readable" else "990004",
+    ) as frozen:
+        real_input = tmp_path / f"input-{unsafe_shape}"
+        real_input.mkdir(mode=0o700)
+        shutil.copytree(
+            freeze_root / "source-manifests",
+            real_input / "source-manifests",
+        )
+        (real_input / "sources").mkdir(mode=0o700)
+        (real_input / "model").mkdir(mode=0o700)
+        source_path = (
+            real_input
+            / "sources"
+            / f"{frozen.manifest.source_manifest_ids[0]}.xml"
+        )
+        shutil.copyfile(frozen.verify_request.sources[0].xml_path, source_path)
+        source_path.chmod(0o600)
+        if unsafe_shape == "world_readable":
+            source_path.chmod(0o644)
+        else:
+            os.link(source_path, tmp_path / "source-hardlink.xml")
+        corpus_output = tmp_path / f"output-{unsafe_shape}"
+        shutil.copytree(freeze_root / "corpus-manifests", corpus_output)
+        request = RealInitializationRequest(
+            corpus_dir=real_input,
+            corpus_manifest_dir=corpus_output,
+            ready_dir=tmp_path / f"ready-{unsafe_shape}",
+            qdrant_url=qdrant_url,
+        )
+
+        with pytest.raises(InitializationRefusal) as raised:
+            initialize_real(request)
+
+        assert raised.value.code == "real_corpus_unavailable"
+
+
+def _new_real_request(
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    number: str,
+) -> tuple[RealInitializationRequest, SyntheticCorpus]:
+    root = tmp_path / f"real-new-{number}"
+    synthetic = _synthetic_corpus(root, number)
+    corpus_output = tmp_path / f"corpus-output-{number}"
+    corpus_output.mkdir(mode=0o700)
     sources = root / "sources"
     model = root / "model"
     sources.mkdir(mode=0o700)
@@ -266,10 +402,27 @@ def test_real_initialization_builds_only_the_derived_absent_collection(
         "specpilot.corpus.freezing.weights_sha256",
         lambda path: "a" * 64,
     )
-    request = RealInitializationRequest(
-        corpus_dir=root,
-        ready_dir=tmp_path / "ready-new-real",
-        qdrant_url=qdrant_url,
+    return (
+        RealInitializationRequest(
+            corpus_dir=root,
+            corpus_manifest_dir=corpus_output,
+            ready_dir=tmp_path / f"ready-new-{number}",
+            qdrant_url=qdrant_url,
+        ),
+        synthetic,
+    )
+
+
+def test_real_initialization_builds_only_the_derived_absent_collection(
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, synthetic = _new_real_request(
+        tmp_path,
+        qdrant_url,
+        monkeypatch,
+        number="990002",
     )
     admin = QdrantClient(url=qdrant_url, trust_env=False)
     try:
@@ -289,5 +442,38 @@ def test_real_initialization_builds_only_the_derived_absent_collection(
                     snapshot_name=snapshot.name,
                     wait=True,
                 )
+            admin.delete_collection(synthetic.collection)
+        admin.close()
+
+
+def test_real_runtime_fault_removes_created_mutable_collection(
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, synthetic = _new_real_request(
+        tmp_path,
+        qdrant_url,
+        monkeypatch,
+        number="990005",
+    )
+
+    def fail_after_create(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("injected real observation fault")
+
+    monkeypatch.setattr(
+        "specpilot.deployment.initialize._observe_real_collection",
+        fail_after_create,
+    )
+    admin = QdrantClient(url=qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(InitializationRefusal) as raised:
+            initialize_real(request)
+
+        assert raised.value.code == "real_corpus_unavailable"
+        assert not admin.collection_exists(synthetic.collection)
+    finally:
+        if admin.collection_exists(synthetic.collection):
             admin.delete_collection(synthetic.collection)
         admin.close()

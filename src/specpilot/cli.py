@@ -305,6 +305,7 @@ def _corpus_init_real(arguments: argparse.Namespace) -> int:
         marker = initialize_real(
             RealInitializationRequest(
                 corpus_dir=arguments.corpus_dir,
+                corpus_manifest_dir=arguments.corpus_manifest_dir,
                 ready_dir=arguments.ready_dir,
                 qdrant_url=arguments.qdrant_url,
             )
@@ -3360,6 +3361,7 @@ def _parser() -> argparse.ArgumentParser:
 
     init_real = corpus.add_parser("init-real")
     init_real.add_argument("--corpus-dir", type=Path, required=True)
+    init_real.add_argument("--corpus-manifest-dir", type=Path, required=True)
     init_real.add_argument("--ready-dir", type=Path, required=True)
     init_real.add_argument("--qdrant-url", required=True)
     init_real.set_defaults(handler=_corpus_init_real)

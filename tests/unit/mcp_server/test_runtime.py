@@ -16,12 +16,17 @@ from specpilot.contracts.manifests import RfcSourceManifestDraft
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import EXCLUDED_SECTIONS, ClauseLimits
 from specpilot.corpus.dense_inventory import derived_corpus_sha256
+from specpilot.deployment.ready import ReadyMarker, ReadyMarkerStore
 from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
 from specpilot.mcp_server.app import create_runtime_app
 from specpilot.mcp_server.client import StreamableMcpClient
-from specpilot.mcp_server.runtime import _RuntimeBm25SearchBackend, load_runtime_config
+from specpilot.mcp_server.runtime import (
+    RuntimeConfig,
+    _RuntimeBm25SearchBackend,
+    load_runtime_config,
+)
 from specpilot.retrieval.bm25 import Bm25Index
 from specpilot.retrieval.local import LocalCorpus
 from tests.helpers import rfc_factory
@@ -36,6 +41,9 @@ _RUNTIME_ENV = (
     "SPECPILOT_MCP_SOURCES_JSON",
     "SPECPILOT_MCP_ALLOWED_HOSTS_JSON",
     "SPECPILOT_MCP_ALLOWED_ORIGINS_JSON",
+    "SPECPILOT_MCP_READY_DIR",
+    "SPECPILOT_MCP_READY_ID",
+    "SPECPILOT_MCP_MODE",
 )
 
 
@@ -73,6 +81,51 @@ def test_mcp_container_invokes_the_zero_argument_runtime_factory() -> None:
 
     assert "specpilot.mcp_server.app:create_runtime_app" in dockerfile
     assert "specpilot.mcp_server.app:create_app" not in dockerfile
+
+
+def test_runtime_factory_is_unhealthy_when_ready_mode_mismatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus_store = CorpusManifestStore(tmp_path / "corpus-manifests")
+    draft = corpus_draft()
+    with corpus_store.acquire_freeze_lease(draft.collection_name) as lease:
+        corpus = corpus_store.create(draft, lease=lease)
+    marker = ReadyMarker.create(
+        source_manifest_ids=corpus.source_manifest_ids,
+        corpus_manifest_id=corpus.manifest_id,
+        collection_name=corpus.collection_name,
+        point_count=corpus.point_count,
+        inventory_root_sha256=corpus.inventory_root_sha256,
+        mode="fixture",
+    )
+    ready_dir = tmp_path / "ready"
+    ReadyMarkerStore(ready_dir).publish(marker)
+    config = RuntimeConfig(
+        corpus_manifest_dir=tmp_path / "corpus-manifests",
+        corpus_manifest_id=corpus.manifest_id,
+        source_manifest_dir=tmp_path / "source-manifests",
+        ready_dir=ready_dir,
+        ready_id=marker.ready_id,
+        mode="real",
+        sources=(
+            {
+                "manifest_id": corpus.source_manifest_ids[0],
+                "xml_path": tmp_path / "source.xml",
+            },
+        ),
+    )
+    monkeypatch.setattr("specpilot.mcp_server.app.load_runtime_config", lambda: config)
+
+    app = create_runtime_app()
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        health = client.get("/health")
+
+    assert health.status_code == 503
+    assert health.json() == {
+        "status": "unavailable",
+        "code": "mcp_runtime_config_invalid",
+    }
 
 
 def test_runtime_transport_configuration_rejects_normalized_host_input(

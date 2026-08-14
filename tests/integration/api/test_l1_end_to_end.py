@@ -257,6 +257,7 @@ async def _runtime(
         "SPECPILOT_MCP_SOURCE_MANIFEST_DIR": str(source_dir),
         "SPECPILOT_MCP_READY_DIR": str(ready_dir),
         "SPECPILOT_MCP_READY_ID": ready.ready_id,
+        "SPECPILOT_MCP_MODE": "fixture",
         "SPECPILOT_MCP_SOURCES_JSON": json.dumps(
             [{"manifest_id": source.manifest_id, "xml_path": str(xml_path)}]
         ),

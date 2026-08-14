@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Annotated, Literal, Never
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints
@@ -42,7 +45,7 @@ from specpilot.corpus.freezing import (
 from specpilot.corpus.indexable import IndexTextPolicy
 from specpilot.corpus.walk import document_identity
 from specpilot.embedding.throughput import PIPELINE_VERSION
-from specpilot.ingestion.rfc import load_verified_rfc
+from specpilot.ingestion.rfc import RfcByteSnapshot, VerifiedRfc, verify_rfc_snapshot
 from specpilot.manifests._secure_records import SecureRecordDirectory
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
@@ -62,6 +65,7 @@ from .ready import ReadyMarker, ReadyMarkerStore
 
 _MAX_FIXTURE_MANIFEST_BYTES = 64 * 1024
 _MAX_DENSE_POINTS_BYTES = 32 * 1024 * 1024
+_QDRANT_OPERATION_TIMEOUT_SECONDS = 10
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -89,6 +93,7 @@ class FixtureInitializationRequest:
 @dataclass(frozen=True, slots=True)
 class RealInitializationRequest:
     corpus_dir: Path
+    corpus_manifest_dir: Path
     ready_dir: Path
     qdrant_url: str
 
@@ -137,7 +142,6 @@ class _FixtureManifest(BaseModel):
 class _FixtureBundle:
     manifest: _FixtureManifest
     source_manifest: RfcSourceManifest
-    source_path: Path
     corpus: LocalCorpus
     bm25: Bm25Index
     points: tuple[DensePoint, ...]
@@ -186,19 +190,80 @@ def _decode_dense_points(
     return tuple(points), inventory.inventory_root_sha256
 
 
-def _read_bounded(path: Path, *, max_bytes: int, code: str) -> bytes:
+def _read_bounded(
+    path: Path,
+    *,
+    max_bytes: int,
+    code: str,
+    private: bool = False,
+) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        _refuse(code)
     try:
-        status = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
+        descriptor = os.open(path, os.O_RDONLY | no_follow)
+    except OSError:
+        _refuse(code)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size > max_bytes
+            or (
+                private
+                and (
+                    stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_nlink != 1
+                )
+            )
+        ):
             _refuse(code)
-        data = path.read_bytes()
-        if len(data) != status.st_size:
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(descriptor)
+        stable = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if len(data) > max_bytes or len(data) != before.st_size or not stable:
             _refuse(code)
         return data
     except InitializationRefusal:
         raise
     except OSError:
         _refuse(code)
+    finally:
+        os.close(descriptor)
+
+
+def _verified_rfc_bytes(data: bytes) -> VerifiedRfc:
+    return verify_rfc_snapshot(
+        RfcByteSnapshot(
+            document_sha256=hashlib.sha256(data).hexdigest(),
+            document_bytes=len(data),
+            data=data,
+        )
+    )
 
 
 def _canonical_json_line(value: object) -> bytes:
@@ -261,7 +326,7 @@ def _load_fixture_bundle(directory: Path) -> _FixtureBundle:
     if source_manifest.manifest_id != manifest.source.manifest_id:
         _refuse("fixture_source_manifest_mismatch")
     try:
-        document = load_verified_rfc(source_path, RfcLimits())
+        document = _verified_rfc_bytes(source_bytes)
         corpus = LocalCorpus.load(
             ((document, ClauseLimits(excluded_sections=EXCLUDED_SECTIONS)),),
             RfcLimits(),
@@ -295,7 +360,6 @@ def _load_fixture_bundle(directory: Path) -> _FixtureBundle:
     return _FixtureBundle(
         manifest,
         source_manifest,
-        source_path,
         corpus,
         bm25,
         points,
@@ -442,8 +506,13 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
         return _verify_fixture_marker(request, bundle, existing_marker)
 
     corpus_store = CorpusManifestStore(request.corpus_manifest_dir)
-    admin = QdrantClient(url=request.qdrant_url, trust_env=False)
+    admin = QdrantClient(
+        url=request.qdrant_url,
+        timeout=_QDRANT_OPERATION_TIMEOUT_SECONDS,
+        trust_env=False,
+    )
     created = False
+    frozen = False
     try:
         exists = bool(admin.collection_exists(bundle.manifest.collection_name))
         if not exists:
@@ -500,15 +569,16 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
                 )
             else:
                 manifest = existing
+        frozen = True
         marker = _marker_for(manifest, "fixture")
-        return ready_store.publish(marker)
-    except InitializationRefusal:
-        if created:
-            with suppress(Exception):
-                admin.delete_collection(bundle.manifest.collection_name)
+        result = ready_store.publish(marker)
+    except BaseException:
+        if created and not frozen:
+            _cleanup_collection(admin, bundle.manifest.collection_name)
+        _close_qdrant(admin)
         raise
-    finally:
-        admin.close()
+    admin.close()
+    return result
 
 
 def _private_directory(path: Path, *, code: str) -> None:
@@ -521,14 +591,64 @@ def _private_directory(path: Path, *, code: str) -> None:
 
 
 def _read_private_file(path: Path, *, max_bytes: int, code: str) -> bytes:
-    data = _read_bounded(path, max_bytes=max_bytes, code=code)
+    return _read_bounded(
+        path,
+        max_bytes=max_bytes,
+        code=code,
+        private=True,
+    )
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        count = os.write(descriptor, view[written:])
+        if count <= 0:
+            raise OSError("short write")
+        written += count
+
+
+@contextmanager
+def _staged_source_bindings(
+    sources: tuple[tuple[str, bytes], ...],
+) -> Iterator[tuple[CorpusSourceInput, ...]]:
+    """Expose captured source bytes to freeze/verify without reopening input."""
+    with TemporaryDirectory(prefix="specpilot-real-sources-") as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        bindings: list[CorpusSourceInput] = []
+        for manifest_id, data in sources:
+            path = root / f"{manifest_id}.xml"
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                _write_all(descriptor, data)
+            finally:
+                os.close(descriptor)
+            bindings.append(CorpusSourceInput(manifest_id, path))
+        yield tuple(bindings)
+
+
+def _cleanup_collection(admin: QdrantClient, collection: str) -> None:
+    """Best-effort bounded cleanup that never replaces the primary failure."""
     try:
-        status = path.stat(follow_symlinks=False)
-    except OSError:
-        _refuse(code)
-    if stat.S_IMODE(status.st_mode) != 0o600 or status.st_nlink != 1:
-        _refuse(code)
-    return data
+        admin.delete_collection(
+            collection,
+            timeout=_QDRANT_OPERATION_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        return
+
+
+def _close_qdrant(admin: QdrantClient) -> None:
+    try:
+        admin.close()
+    except BaseException:
+        return
 
 
 def _observe_real_collection(
@@ -585,7 +705,7 @@ def _initialize_new_real(
         != len(source_manifests)
     ):
         _refuse("real_corpus_unavailable")
-    sources: list[CorpusSourceInput] = []
+    source_snapshots: list[tuple[str, bytes]] = []
     documents = []
     created_at: datetime | None = None
     for source_manifest in source_manifests:
@@ -600,13 +720,13 @@ def _initialize_new_real(
         )
         if hashlib.sha256(source_bytes).hexdigest() != source_manifest.xml_sha256:
             _refuse("corpus_source_mismatch")
-        document = load_verified_rfc(source_path, RfcLimits())
+        document = _verified_rfc_bytes(source_bytes)
         if document_identity(document.root) != (
             source_manifest.document_id,
             source_manifest.document_version,
         ):
             _refuse("corpus_source_mismatch")
-        sources.append(CorpusSourceInput(source_id, source_path))
+        source_snapshots.append((source_id, source_bytes))
         documents.append((document, ClauseLimits(excluded_sections=EXCLUDED_SECTIONS)))
         created_at = (
             source_manifest.created_at
@@ -635,7 +755,11 @@ def _initialize_new_real(
         IndexTextPolicy().version,
     )
     corpus_store = CorpusManifestStore(corpus_dir)
-    admin = QdrantClient(url=request.qdrant_url, trust_env=False)
+    admin = QdrantClient(
+        url=request.qdrant_url,
+        timeout=_QDRANT_OPERATION_TIMEOUT_SECONDS,
+        trust_env=False,
+    )
     created = False
     frozen = False
     try:
@@ -659,45 +783,58 @@ def _initialize_new_real(
             inventory_root=inventory_root,
         )
         assert created_at is not None
-        result = freeze_corpus(
-            FreezeCorpusRequest(
-                sources=tuple(sources),
-                model_dir=model_dir,
-                qdrant_url=request.qdrant_url,
-                collection_name=derived_collection,
-                predecessor_manifest_id=None,
-                created_at=created_at,
-            ),
-            source_store=source_store,
-            corpus_store=corpus_store,
-        )
+        with _staged_source_bindings(tuple(source_snapshots)) as sources:
+            result = freeze_corpus(
+                FreezeCorpusRequest(
+                    sources=sources,
+                    model_dir=model_dir,
+                    qdrant_url=request.qdrant_url,
+                    collection_name=derived_collection,
+                    predecessor_manifest_id=None,
+                    created_at=created_at,
+                ),
+                source_store=source_store,
+                corpus_store=corpus_store,
+            )
         frozen = True
-        return result.manifest
+        manifest = result.manifest
     except BaseException:
         if created and not frozen:
-            with suppress(Exception):
-                admin.delete_collection(derived_collection)
+            _cleanup_collection(admin, derived_collection)
+        _close_qdrant(admin)
         raise
-    finally:
-        admin.close()
+    admin.close()
+    return manifest
 
 
 def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
     """Build-and-freeze once or verify an exact already-frozen real corpus.
 
-    The secure tree contains one corpus manifest, its source manifests, source
-    XML files named by manifest ID, and the local model. A write lease is used
-    only for a missing derived collection; an existing collection is verified
-    byte-for-byte and never updated in place.
+    The read-only secure input tree contains source manifests, source XML files
+    named by manifest ID, vectors, and the local model. Corpus manifests are
+    published only in the separate controlled output store. A write lease is
+    used only for a missing derived collection; an existing collection is
+    verified byte-for-byte and never updated in place.
     """
     if not request.corpus_dir.is_absolute():
         _refuse("real_corpus_dir_not_absolute")
+    if not request.corpus_manifest_dir.is_absolute():
+        _refuse("real_corpus_manifest_dir_not_absolute")
     _private_directory(request.corpus_dir, code="real_corpus_unavailable")
+    _private_directory(
+        request.corpus_manifest_dir,
+        code="real_corpus_unavailable",
+    )
+    input_root = request.corpus_dir.resolve(strict=True)
+    output_root = request.corpus_manifest_dir.resolve(strict=True)
+    ready_root = request.ready_dir.resolve(strict=False)
+    if output_root.is_relative_to(input_root) or ready_root.is_relative_to(input_root):
+        _refuse("real_corpus_output_overlaps_input")
     source_dir = request.corpus_dir / "source-manifests"
-    corpus_dir = request.corpus_dir / "corpus-manifests"
+    corpus_dir = request.corpus_manifest_dir
     sources_dir = request.corpus_dir / "sources"
     model_dir = request.corpus_dir / "model"
-    for directory in (source_dir, corpus_dir, sources_dir, model_dir):
+    for directory in (source_dir, sources_dir, model_dir):
         _private_directory(directory, code="real_corpus_unavailable")
     try:
         with SecureRecordDirectory.open(corpus_dir, create=False) as records:
@@ -724,24 +861,29 @@ def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
             if len(heads) != 1:
                 _refuse("real_corpus_not_frozen")
             manifest = heads[0]
-        bindings = tuple(
-            CorpusSourceInput(
+        source_snapshots = tuple(
+            (
                 manifest_id,
-                sources_dir / f"{manifest_id}.xml",
+                _read_private_file(
+                    sources_dir / f"{manifest_id}.xml",
+                    max_bytes=RfcLimits().max_bytes,
+                    code="real_corpus_unavailable",
+                ),
             )
             for manifest_id in manifest.source_manifest_ids
         )
-        verified = verify_corpus(
-            VerifyCorpusRequest(
-                manifest_id=manifest.manifest_id,
-                sources=bindings,
-                model_dir=model_dir,
-                qdrant_url=request.qdrant_url,
-            ),
-            source_store=ManifestStore(source_dir),
-            corpus_store=CorpusManifestStore(corpus_dir),
-        )
-        verified.close()
+        with _staged_source_bindings(source_snapshots) as bindings:
+            verified = verify_corpus(
+                VerifyCorpusRequest(
+                    manifest_id=manifest.manifest_id,
+                    sources=bindings,
+                    model_dir=model_dir,
+                    qdrant_url=request.qdrant_url,
+                ),
+                source_store=ManifestStore(source_dir),
+                corpus_store=CorpusManifestStore(corpus_dir),
+            )
+            verified.close()
     except InitializationRefusal:
         raise
     except CorpusManifestRefusal as error:

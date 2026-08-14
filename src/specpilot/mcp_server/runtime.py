@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -66,6 +66,7 @@ class RuntimeConfig(BaseModel):
     source_manifest_dir: Path
     ready_dir: Path | None = None
     ready_id: Sha256 | None = None
+    mode: Literal["fixture", "real"] | None = None
     sources: Annotated[tuple[_RuntimeSource, ...], Field(min_length=1, max_length=12)]
     allowed_hosts: Annotated[tuple[_ExactIdentity, ...], Field(min_length=1)] = (
         LOOPBACK_HOSTS
@@ -104,6 +105,8 @@ class RuntimeConfig(BaseModel):
             raise ValueError(
                 "ready marker path and identity must be configured together"
             )
+        if self.ready_id is not None and self.mode is None:
+            raise ValueError("ready marker requires an exact runtime mode")
         if deployed and (
             self.ready_dir != Path("/run/specpilot/ready") or self.ready_id is None
         ):
@@ -160,6 +163,7 @@ def load_runtime_config() -> RuntimeConfig:
         ),
         "ready_dir": os.environ.get("SPECPILOT_MCP_READY_DIR"),
         "ready_id": os.environ.get("SPECPILOT_MCP_READY_ID"),
+        "mode": os.environ.get("SPECPILOT_MCP_MODE"),
         "sources": json.loads(os.environ.get("SPECPILOT_MCP_SOURCES_JSON", "[]")),
     }
     allowed_hosts = os.environ.get("SPECPILOT_MCP_ALLOWED_HOSTS_JSON")
@@ -177,11 +181,14 @@ def load_runtime_services(config: RuntimeConfig) -> McpToolServices:
     )
     source_ids = tuple(source.manifest_id for source in config.sources)
     if config.ready_dir is not None and config.ready_id is not None:
+        if config.mode is None:
+            raise ValueError("ready marker requires an exact runtime mode")
         require_ready_corpus(
             ready_dir=config.ready_dir,
             ready_id=config.ready_id,
             corpus=corpus_manifest,
             source_manifest_ids=source_ids,
+            mode=config.mode,
         )
     source_store = ManifestStore(config.source_manifest_dir)
     resolved: list[tuple[RfcSourceManifest, VerifiedRfc]] = []

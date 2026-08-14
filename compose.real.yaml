@@ -1,5 +1,6 @@
 # Real initialization override. It publishes no host ports and never mounts or
-# invokes the synthetic fixture. The operator supplies one absolute secure tree.
+# invokes the synthetic fixture. Private source/vector input stays read-only;
+# only the dedicated corpus-manifest and ready stores are writable.
 
 services:
   mcp:
@@ -18,14 +19,17 @@ services:
         condition: service_healthy
     restart: "no"
     volumes:
-      - ${CORPUS_DIR}:/run/specpilot/real-corpus:ro
+      - ${CORPUS_DIR}:/run/specpilot/real-input:ro
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus-manifests
       - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready
     entrypoint: ["python", "-m", "specpilot.cli"]
     command:
       - "corpus"
       - "init-real"
       - "--corpus-dir"
-      - "/run/specpilot/real-corpus"
+      - "/run/specpilot/real-input"
+      - "--corpus-manifest-dir"
+      - "/run/specpilot/corpus-manifests"
       - "--ready-dir"
       - "/run/specpilot/ready"
       - "--qdrant-url"

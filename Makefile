@@ -64,5 +64,6 @@ ingest-real:
 	@test "$$(printf '%s' "$(CORPUS_DIR)" | cut -c1)" = / || { echo "CORPUS_DIR must be absolute"; exit 1; }
 	$(SPECPILOT_PYTHON) -m specpilot.cli corpus init-real \
 		--corpus-dir "$(CORPUS_DIR)" \
+		--corpus-manifest-dir "$${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST:?set SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}" \
 		--ready-dir "$${SPECPILOT_READY_DIR:?set SPECPILOT_READY_DIR}" \
 		--qdrant-url "$${SPECPILOT_QDRANT_URL:?set SPECPILOT_QDRANT_URL}"

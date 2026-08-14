@@ -97,6 +97,7 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
         "SPECPILOT_MCP_SOURCES_JSON",
         "SPECPILOT_MCP_READY_ID",
+        "SPECPILOT_MCP_MODE",
         "SPECPILOT_MAIN_API_KEY",
     }
     declarations = dict(
@@ -104,7 +105,10 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
     )
 
     assert set(declarations) == expected
-    assert declarations == {name: name for name in expected}
+    assert declarations == {
+        name: ("SPECPILOT_API_PROFILE" if name == "SPECPILOT_MCP_MODE" else name)
+        for name in expected
+    }
     assert ":-" not in block
 
 
@@ -164,6 +168,26 @@ def test_real_override_has_no_ports_and_never_invokes_fixture_initialization() -
     assert "fixtures/demo" not in text
     assert "real-init:" in text
     assert "condition: service_completed_successfully" in text
+
+
+def test_real_initializer_separates_private_input_from_writable_outputs() -> None:
+    text = REAL_OVERRIDE.read_text(encoding="utf-8")
+    block = text[text.index("  real-init:") :]
+
+    assert "${CORPUS_DIR}:/run/specpilot/real-input:ro" in block
+    assert (
+        "${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:"
+        "/run/specpilot/corpus-manifests"
+    ) in block
+    assert (
+        "${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:"
+        "/run/specpilot/corpus-manifests:ro"
+    ) not in block
+    assert '"--corpus-dir"\n      - "/run/specpilot/real-input"' in block
+    assert (
+        '"--corpus-manifest-dir"\n      - "/run/specpilot/corpus-manifests"'
+        in block
+    )
 
 
 def _compose_config(*files: Path) -> dict[str, object]:

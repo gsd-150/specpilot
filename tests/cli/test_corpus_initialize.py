@@ -55,6 +55,8 @@ def test_init_real_requires_an_absolute_corpus_directory(
             "init-real",
             "--corpus-dir",
             "relative/corpus",
+            "--corpus-manifest-dir",
+            str(tmp_path / "corpus-manifests"),
             "--ready-dir",
             str(tmp_path / "ready"),
             "--qdrant-url",
@@ -66,6 +68,35 @@ def test_init_real_requires_an_absolute_corpus_directory(
     assert code == 2
     assert captured.out == ""
     assert captured.err == "real_corpus_dir_not_absolute\n"
+
+
+def test_init_real_refuses_manifest_output_inside_read_only_input(
+    tmp_path: Path, capsys
+) -> None:
+    corpus = tmp_path / "real-input"
+    corpus.mkdir(mode=0o700)
+    output = corpus / "corpus-manifests"
+    output.mkdir(mode=0o700)
+
+    code = main(
+        [
+            "corpus",
+            "init-real",
+            "--corpus-dir",
+            str(corpus),
+            "--corpus-manifest-dir",
+            str(output),
+            "--ready-dir",
+            str(tmp_path / "ready"),
+            "--qdrant-url",
+            "http://127.0.0.1:1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "real_corpus_output_overlaps_input\n"
 
 
 def test_fixture_manifest_is_canonical_and_binds_1024d_points() -> None:
