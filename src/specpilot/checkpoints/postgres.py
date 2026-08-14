@@ -119,10 +119,26 @@ class PostgresCheckpointStore:
                     raise RunStoreValidationError()
                 if checkpoint.checkpoint_version != (previous_version or 0) + 1:
                     raise RunStoreValidationError()
-                if current is None and checkpoint.stage is not CheckpointStage.PLANNED:
+                if current is None and (
+                    checkpoint.stage is not CheckpointStage.PLANNED
+                    or checkpoint.attempt != 1
+                ):
                     raise RunStoreValidationError()
                 allocated = checkpoint.model_copy(update={"last_accessed_at": now})
                 if current is None:
+                    first_attempt_started_at = (
+                        run["started_at"] or run["completed_at"] or now
+                    )
+                    first_attempt_ended_at = (
+                        run["completed_at"]
+                        if run["status"] == RunStatus.INTERRUPTED.value
+                        else None
+                    )
+                    first_attempt_reason = (
+                        run["terminal_reason"]
+                        if first_attempt_ended_at is not None
+                        else None
+                    )
                     await connection.execute(
                         "INSERT INTO specpilot_run_checkpoint "
                         "(run_id, checkpoint_version, stage, payload, "
@@ -138,9 +154,15 @@ class PostgresCheckpointStore:
                     )
                     await connection.execute(
                         "INSERT INTO specpilot_run_attempt "
-                        "(run_id, attempt, resume_key_hash, started_at) "
-                        "VALUES (%s, 1, NULL, %s) ON CONFLICT DO NOTHING",
-                        (allocated.run_id, now),
+                        "(run_id, attempt, resume_key_hash, started_at, ended_at, "
+                        "end_reason) VALUES (%s, 1, NULL, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (
+                            allocated.run_id,
+                            first_attempt_started_at,
+                            first_attempt_ended_at,
+                            first_attempt_reason,
+                        ),
                     )
                 else:
                     old_payload = await (
@@ -257,19 +279,16 @@ class PostgresCheckpointStore:
                         (run_id, key_hash),
                     )
                 ).fetchone()
-                if replay is not None:
-                    return CheckpointResumeResult(
-                        ResumeDisposition.REPLAY, replay["attempt"]
-                    )
-                if run["status"] in {
+                resumable = (
+                    run["status"] == RunStatus.INTERRUPTED.value
+                    and run["terminal_reason"] == "lease_expired"
+                )
+                if replay is None and run["status"] in {
                     RunStatus.QUEUED.value,
                     RunStatus.RUNNING.value,
                 }:
                     return CheckpointResumeResult(ResumeDisposition.LEASED)
-                if (
-                    run["status"] != RunStatus.INTERRUPTED.value
-                    or run["terminal_reason"] != "lease_expired"
-                ):
+                if replay is None and not resumable:
                     return CheckpointResumeResult(ResumeDisposition.NOT_INTERRUPTED)
                 checkpoint_row = await (
                     await connection.execute(
@@ -291,20 +310,47 @@ class PostgresCheckpointStore:
                     checkpoint, binding
                 ):
                     return CheckpointResumeResult(ResumeDisposition.BINDING_MISMATCH)
+                latest = await (
+                    await connection.execute(
+                        "SELECT attempt, ended_at, end_reason "
+                        "FROM specpilot_run_attempt WHERE run_id = %s "
+                        "ORDER BY attempt DESC LIMIT 1 FOR UPDATE",
+                        (run_id,),
+                    )
+                ).fetchone()
+                if latest is None or int(latest["attempt"]) != checkpoint.attempt:
+                    return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
+                if replay is not None:
+                    if int(replay["attempt"]) != checkpoint.attempt:
+                        return CheckpointResumeResult(
+                            ResumeDisposition.CHECKPOINT_INVALID
+                        )
+                    if run["status"] in {
+                        RunStatus.QUEUED.value,
+                        RunStatus.RUNNING.value,
+                    }:
+                        if latest["ended_at"] is not None:
+                            return CheckpointResumeResult(
+                                ResumeDisposition.CHECKPOINT_INVALID
+                            )
+                    elif latest["ended_at"] is None or (
+                        latest["end_reason"] != run["terminal_reason"]
+                    ):
+                        return CheckpointResumeResult(
+                            ResumeDisposition.CHECKPOINT_INVALID
+                        )
+                    return CheckpointResumeResult(
+                        ResumeDisposition.REPLAY, replay["attempt"]
+                    )
+                if latest["ended_at"] is None or (
+                    latest["end_reason"] != "lease_expired"
+                ):
+                    return CheckpointResumeResult(ResumeDisposition.CHECKPOINT_INVALID)
                 disposition = await self._resume_reservation_disposition(
                     connection, checkpoint
                 )
                 if disposition is not None:
                     return CheckpointResumeResult(disposition)
-                latest = await (
-                    await connection.execute(
-                        "SELECT COALESCE(MAX(attempt), 0) AS attempt "
-                        "FROM specpilot_run_attempt WHERE run_id = %s",
-                        (run_id,),
-                    )
-                ).fetchone()
-                if latest is None:
-                    raise RunStoreIntegrityError()
                 attempt = int(latest["attempt"]) + 1
                 updated = await connection.execute(
                     "UPDATE specpilot_run SET status = 'running', "
@@ -539,7 +585,8 @@ class PostgresCheckpointStore:
                 "source_manifest_id, "
                 "corpus_manifest_id, policy_hash, configuration_hash, provider_id, "
                 "model_id, query_hash, terminal_reason, compliance_prompt_hash, "
-                "verifier_prompt_hash, status, lease_owner, lease_expires_at "
+                "verifier_prompt_hash, status, started_at, completed_at, lease_owner, "
+                "lease_expires_at "
                 "FROM specpilot_run WHERE run_id = %s "
                 "FOR UPDATE",
                 (run_id,),

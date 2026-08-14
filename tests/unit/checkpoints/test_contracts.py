@@ -75,6 +75,9 @@ def test_transition_rejects_binding_rollback_and_attempt_drift() -> None:
     changed_binding = rollback.model_copy(update={"policy_hash": "9" * 64})
     with pytest.raises(ValueError, match="binding"):
         validate_transition(previous, changed_binding)
+    changed_attempt = rollback.model_copy(update={"attempt": 2})
+    with pytest.raises(ValueError, match="attempt"):
+        validate_transition(previous, changed_attempt)
 
 
 @pytest.mark.parametrize(

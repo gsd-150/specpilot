@@ -59,6 +59,52 @@ async def test_checkpoint_write_is_compare_and_set_and_appends_summary_atomicall
 
 
 @pytest.mark.anyio
+async def test_first_checkpoint_write_rejects_forged_attempt_without_mutation(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    from specpilot.checkpoints.contracts import CheckpointStage
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    created = await PostgresRunStore(clean_ledger, clock=clock).create(_l2_run(clock))
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+    forged = store.new_checkpoint(created, stage=CheckpointStage.PLANNED).model_copy(
+        update={"attempt": 99}
+    )
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        before = await (
+            await connection.execute(
+                "SELECT "
+                "(SELECT count(*) FROM specpilot_run_checkpoint WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_attempt WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_event WHERE run_id = %s)",
+                (created.run_id, created.run_id, created.run_id),
+            )
+        ).fetchone()
+
+    with pytest.raises(RunStoreValidationError, match="invalid_run_data"):
+        await store.write(None, forged)
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        after = await (
+            await connection.execute(
+                "SELECT "
+                "(SELECT count(*) FROM specpilot_run_checkpoint WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_attempt WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_event WHERE run_id = %s)",
+                (created.run_id, created.run_id, created.run_id),
+            )
+        ).fetchone()
+
+    assert before == (0, 0, 1)
+    assert after == before
+
+
+@pytest.mark.anyio
 async def test_resume_refuses_non_lease_expired_interruption_without_mutation(
     clean_ledger: str,
 ) -> None:
@@ -91,6 +137,72 @@ async def test_resume_refuses_non_lease_expired_interruption_without_mutation(
         lease_seconds=30,
     )
     assert result.disposition is ResumeDisposition.NOT_INTERRUPTED
+
+
+@pytest.mark.anyio
+async def test_resume_rejects_checkpoint_attempt_mismatching_attempt_ledger(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    from specpilot.checkpoints.contracts import CheckpointStage
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+    from specpilot.runs.contracts import ResumeDisposition
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runs = PostgresRunStore(clean_ledger, clock=clock)
+    created = await runs.create(_l2_run(clock))
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+    await store.write(
+        None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
+    )
+    clock.advance(seconds=31)
+    assert await runs.reconcile_expired(clock()) == 1
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        await connection.execute(
+            "UPDATE specpilot_run_checkpoint SET payload = "
+            "jsonb_set(payload, '{attempt}', '99'::jsonb) WHERE run_id = %s",
+            (created.run_id,),
+        )
+        await connection.commit()
+        before = await (
+            await connection.execute(
+                "SELECT "
+                "(SELECT status FROM specpilot_run WHERE run_id = %s), "
+                "(SELECT payload ->> 'attempt' FROM specpilot_run_checkpoint "
+                "WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_attempt WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_event WHERE run_id = %s)",
+                (created.run_id, created.run_id, created.run_id, created.run_id),
+            )
+        ).fetchone()
+
+    result = await store.begin_resume(
+        created.run_id,
+        created.session_id,
+        created.query_hash,
+        "mismatched-attempt-key",
+        lease_owner="resume-worker",
+        lease_seconds=30,
+    )
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        after = await (
+            await connection.execute(
+                "SELECT "
+                "(SELECT status FROM specpilot_run WHERE run_id = %s), "
+                "(SELECT payload ->> 'attempt' FROM specpilot_run_checkpoint "
+                "WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_attempt WHERE run_id = %s), "
+                "(SELECT count(*) FROM specpilot_run_event WHERE run_id = %s)",
+                (created.run_id, created.run_id, created.run_id, created.run_id),
+            )
+        ).fetchone()
+
+    assert result.disposition is ResumeDisposition.CHECKPOINT_INVALID
+    assert before == ("interrupted", "99", 1, 3)
+    assert after == before
 
 
 @pytest.mark.anyio
