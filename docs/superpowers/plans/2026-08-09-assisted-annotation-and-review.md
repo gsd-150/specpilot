@@ -33,6 +33,23 @@ discipline, the committable-field rule, or provenance v2 changes.
 **Tech Stack:** Python 3.12+, Pydantic 2, argparse, pytest, Hypothesis, Ruff,
 mypy. No new dependency.
 
+## Current state — 2026-08-15
+
+> **[Superseding current-state snapshot]** The plan's dated narrative below is
+> preserved as history. The recomputed restricted stores now report **L1
+> 40/40**, **L2 20/20**, zero awaiting adjudication, **deep review 12/12**, and
+> fully sealed pooling. The current quick gate is **1537 unit, 187 CLI**. The
+> dated 2026-08-14 full-service evidence at `b89339d` recorded **1998 passed, 0
+> skipped** on a fresh PostgreSQL database and frozen Qdrant collection.
+>
+> That full-service result is fixture-only engineering and service-integration
+> evidence, not real-provider acceptance, quality, calibration, latency, L2
+> development metrics, locked evaluation, or release evidence. The historical
+> `invalid_choice` limitation below has been superseded: a mistyped pooling
+> choice re-prompts the reviewer and **does not end the pass**. SSE/reconnect,
+> the four-scenario demo/profile matrix, the evaluation `run_spec`, and first
+> locked evaluation remain W5/W6 work.
+
 ## The problem this design is really solving
 
 Provenance v2 already permits model-drafted gold and already records it:

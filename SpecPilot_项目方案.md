@@ -25,6 +25,20 @@ v4 关闭了实施前审核发现的关键缺口：明确 top-k 最小证据片�
 
 v5 把上述承诺收紧为可执行契约：所有 provider 调用统一经过本地出站闸门，按运行累计限制 Evidence 与片段长度；重构 L2-adv 的正负样本与 dev/test 隔离；拆分 source、corpus 和 evaluation run 三层 manifest；只在锁定测试集保留两组核心对照（512 内的 excerpt 窗口选择、Verifier gate-only），层级检索等其他消融降为开发集诊断；前端收缩为最小 trace 页。
 
+## Current state — 2026-08-15
+
+> **[当前状态校正｜替代旧快照]** 下文保留旧日期的计划与过程记录；当前受限 store
+> 重算结果为 **L1 40/40**、**L2 20/20**、`awaiting_adjudication=0`、**deep
+> review 12/12**，pooling 已完全 sealed。当前 quick gate 为 **1537 unit, 187
+> CLI**；另有 2026-08-14、commit `b89339d` 的 fresh PostgreSQL + frozen Qdrant
+> full-service 证据：**1998 passed, 0 skipped**。
+>
+> 后一项仅是 fixture-only 的工程与服务集成证据，不代表真实 provider 验收、质量、
+> 校准、延迟、L2 开发集指标、locked evaluation 或发布结果。历史上“输错 pooling
+> choice 会结束本轮”的限制已失效：现在会重新提示，**does not end the pass**。SSE/
+> reconnect、四场景 demo/profile matrix、evaluation `run_spec` 与第一次 locked
+> evaluation 仍是 W5/W6 工作。
+
 > **实施校正附注（2026-08-08）**：以下正文保留 v5 的原始计划与决策过程，不作追溯性改写。新增附注只标记当前状态：`[已变更]` 表示原假设已被后续决策替代，`[已完成]` 表示已有代码、测试或正式记录可核验，`[进行中]` 表示已启动但尚未达到原验收规模，`[延期]` 表示仍保留目标但不属于当前已完成范围。
 
 ### 1.2 一句话定义

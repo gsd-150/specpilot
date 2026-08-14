@@ -72,6 +72,23 @@
 >
 > 本块不改变任何 cap、契约或已记录的合规决定。
 
+## Current state — 2026-08-15
+
+> **[Superseding current-state snapshot]** This dated block supersedes the
+> 2026-08-13 status below without rewriting its historical record. The
+> restricted stores now report **L1 40/40**, **L2 20/20**, zero awaiting
+> adjudication, **deep review 12/12**, and fully sealed pooling. The current
+> quick gate is **1537 unit, 187 CLI**. Separately, the dated 2026-08-14
+> full-service evidence at commit `b89339d` recorded **1998 passed, 0 skipped**
+> against a fresh PostgreSQL database and frozen Qdrant collection.
+>
+> That full-service result is fixture-only engineering and service-integration
+> evidence: it establishes neither real-provider acceptance nor quality,
+> calibration, latency, L2 development metrics, locked evaluation, or release
+> results. A mistyped pooling choice now re-prompts the reviewer. **It does not end the pass.**
+> SSE/reconnect, the four-scenario demo/profile matrix, the
+> evaluation `run_spec`, and first locked evaluation remain W5/W6 work.
+
 ## Current state — 2026-08-13
 
 The bounded W3 MCP/API/read-only trace slice was merged into `main` by PR
