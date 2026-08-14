@@ -219,3 +219,75 @@ def test_durations_are_absent_rather_than_zero_when_nothing_was_read() -> None:
     assert stats.deep_review_seconds_median is None
     assert stats.deep_review_seconds_min is None
     assert stats.payload()["deep_review_outcomes"] == {}
+
+
+def test_one_item_read_twice_stays_one_observation() -> None:
+    """The sample size is what the confidence bound is computed from.
+
+    An item that joins the set late is drawn into the sample and can be read
+    again. Counting findings rather than items reported thirteen outcomes over
+    twelve items, and a bound over thirteen reads is tighter than twelve reads
+    earn — an error in the direction that overstates the evidence.
+    """
+    stats = review_statistics(
+        [decision(item) for item in ITEMS],
+        [
+            finding(item_id=SAMPLED[0], elapsed_seconds=300),
+            finding(item_id=SAMPLED[0], elapsed_seconds=21),
+            finding(item_id=SAMPLED[1]),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.deep_review_recorded == 2
+    assert sum(stats.deep_review_outcomes.values()) == 2
+    assert stats.deep_review_outcomes == {"gold_complete": 2}
+    assert stats.deep_review_conflicting_items == 0
+    # The shortest read, so a quick second pass cannot raise the floor that
+    # separates a read from a keystroke.
+    assert stats.deep_review_seconds_min == 21
+
+
+def test_the_same_clause_added_by_two_reads_is_one_clause() -> None:
+    stats = review_statistics(
+        [decision(item) for item in ITEMS],
+        [
+            finding(
+                item_id=SAMPLED[0],
+                outcome="gold_extended",
+                additional_gold_clause_ids=("b" * 64,),
+            ),
+            finding(
+                item_id=SAMPLED[0],
+                outcome="gold_extended",
+                additional_gold_clause_ids=("b" * 64, "c" * 64),
+            ),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.deep_review_additional_gold == 2
+
+
+def test_two_reads_that_disagree_are_reported_rather_than_resolved() -> None:
+    """Findings carry no timestamp, so there is no "latest" to prefer.
+
+    Picking whichever the filesystem yielded last would turn a disagreement
+    about gold into a silent coin flip.
+    """
+    stats = review_statistics(
+        [decision(item) for item in ITEMS],
+        [
+            finding(item_id=SAMPLED[0]),
+            finding(item_id=SAMPLED[0], outcome="gold_wrong"),
+        ],
+        rate=0.25,
+        salt=SALT,
+    )
+
+    assert stats.deep_review_recorded == 1
+    assert stats.deep_review_conflicting_items == 1
+    assert stats.deep_review_outcomes == {}
+    assert stats.payload()["deep_review_conflicting_items"] == 1

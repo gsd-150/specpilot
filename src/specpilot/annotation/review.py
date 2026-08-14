@@ -203,6 +203,7 @@ class ReviewStatistics:
     deep_review_flagged: int
     deep_review_recorded: int
     deep_review_outcomes: dict[str, int]
+    deep_review_conflicting_items: int
     deep_review_additional_gold: int
     deep_review_seconds_median: int | None
     deep_review_seconds_min: int | None
@@ -259,6 +260,7 @@ class ReviewStatistics:
             "deep_review_recorded": self.deep_review_recorded,
             "deep_review_coverage": self.deep_review_coverage,
             "deep_review_outcomes": self.deep_review_outcomes,
+            "deep_review_conflicting_items": self.deep_review_conflicting_items,
             "deep_review_additional_gold": self.deep_review_additional_gold,
             "deep_review_seconds_median": self.deep_review_seconds_median,
             "deep_review_seconds_min": self.deep_review_seconds_min,
@@ -312,15 +314,42 @@ def review_statistics(
         if decision.unanswerable:
             unanswerable += 1
 
-    found: dict[str, DeepReviewFinding] = {}
+    # One item can own more than one finding: an item that joins the set late
+    # is drawn into the sample and can be read again. `deep_review_recorded`
+    # was already per item, but the outcome, gold and duration figures counted
+    # findings, so twelve items reported thirteen outcomes. The sample size is
+    # what the confidence bound is computed from, and a bound over thirteen is
+    # tighter than twelve reads earn — the error was in the direction that
+    # overstates the evidence.
+    by_item: dict[str, list[DeepReviewFinding]] = {}
+    for finding in findings:
+        by_item.setdefault(finding.item_id, []).append(finding)
+
     finding_outcomes: Counter[str] = Counter()
+    conflicting = 0
     added_gold = 0
     durations: list[int] = []
-    for finding in findings:
-        found[finding.item_id] = finding
-        finding_outcomes[finding.outcome.value] += 1
-        added_gold += len(finding.additional_gold_clause_ids)
-        durations.append(finding.elapsed_seconds)
+    for item_findings in by_item.values():
+        seen = {finding.outcome.value for finding in item_findings}
+        if len(seen) == 1:
+            finding_outcomes[seen.pop()] += 1
+        else:
+            # Two reads of one item that disagree are not one observation to be
+            # resolved by whichever the filesystem yielded last. The findings
+            # carry no timestamp, so there is no "latest" to prefer; the
+            # disagreement is reported instead of being averaged away.
+            conflicting += 1
+        added_gold += len(
+            {
+                clause_id
+                for finding in item_findings
+                for clause_id in finding.additional_gold_clause_ids
+            }
+        )
+        # The shortest read, because §8.1's reason for timing at all is telling
+        # a read from a keystroke. A second, quicker pass over an item already
+        # read must not raise the floor this figure reports.
+        durations.append(min(finding.elapsed_seconds for finding in item_findings))
 
     return ReviewStatistics(
         reviewed_items=len(items),
@@ -336,8 +365,9 @@ def review_statistics(
             deep_review_required(item, rate=rate, salt=salt) for item in items
         ),
         deep_review_flagged=len(deeply_reviewed),
-        deep_review_recorded=len(found),
+        deep_review_recorded=len(by_item),
         deep_review_outcomes=dict(sorted(finding_outcomes.items())),
+        deep_review_conflicting_items=conflicting,
         deep_review_additional_gold=added_gold,
         deep_review_seconds_median=(
             int(statistics.median(durations)) if durations else None
