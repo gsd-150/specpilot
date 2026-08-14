@@ -509,8 +509,11 @@ class PostgresCheckpointStore:
         try:
             async with connection, connection.transaction():
                 deleted = await connection.execute(
-                    "DELETE FROM specpilot_run_checkpoint WHERE stage <> 'completed' "
-                    "AND last_accessed_at < %s",
+                    "DELETE FROM specpilot_run_checkpoint AS checkpoint "
+                    "USING specpilot_run AS run WHERE checkpoint.run_id = run.run_id "
+                    "AND checkpoint.stage <> 'completed' "
+                    "AND checkpoint.last_accessed_at < %s "
+                    "AND run.status NOT IN ('queued', 'running')",
                     (before.astimezone(UTC),),
                 )
                 return deleted.rowcount

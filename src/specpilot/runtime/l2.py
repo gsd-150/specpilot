@@ -19,7 +19,7 @@ from specpilot.agents.compliance import (
     ComplianceOutcome,
     InvalidComplianceReply,
 )
-from specpilot.agents.contracts import ToolPlan
+from specpilot.agents.contracts import ToolCallSummary, ToolPlan
 from specpilot.agents.evidence import EvidenceResult
 from specpilot.agents.planner import InvalidToolPlan, PlannerContext, PlannerResult
 from specpilot.answer.evidence import Evidence
@@ -126,6 +126,26 @@ class L2RunContext:
 
 
 @dataclass(frozen=True, slots=True)
+class L2DeterministicAudit:
+    claim_id: str
+    result: DeterministicResult
+
+
+@dataclass(frozen=True, slots=True)
+class L2SemanticAudit:
+    claim_id: str
+    outcome: SemanticOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class L2RecoveryAudit:
+    outcome: RecoveryOutcome
+
+
+type L2AuditEvent = L2DeterministicAudit | L2SemanticAudit | L2RecoveryAudit
+
+
+@dataclass(frozen=True, slots=True)
 class L2Outcome:
     results: tuple[ComplianceResult, ...]
     reservation_ids: tuple[str, ...]
@@ -137,7 +157,9 @@ class L2Outcome:
     compliance: ComplianceOutcome | None = None
     semantic_outcomes: tuple[tuple[str, SemanticOutcome], ...] = ()
     recovery_outcomes: tuple[RecoveryOutcome, ...] = ()
-    evidence_calls: tuple[object, ...] = ()
+    evidence_calls: tuple[ToolCallSummary, ...] = ()
+    deterministic_outcomes: tuple[tuple[str, DeterministicResult], ...] = ()
+    audit_events: tuple[L2AuditEvent, ...] = ()
     checkpoints: tuple[RunCheckpoint, ...] = ()
     planning: PlannerResult | None = None
 
@@ -182,7 +204,9 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
     written: list[RunCheckpoint] = []
     semantic_outcomes: list[tuple[str, SemanticOutcome]] = []
     recovery_outcomes: list[RecoveryOutcome] = []
-    evidence_calls: tuple[object, ...] = ()
+    evidence_calls: tuple[ToolCallSummary, ...] = ()
+    deterministic_outcomes: list[tuple[str, DeterministicResult]] = []
+    audit_events: list[L2AuditEvent] = []
     plan: ToolPlan | None = None
     planning_result: PlannerResult | None = None
     if checkpoint is not None and checkpoint.stage is CheckpointStage.COMPLETED:
@@ -394,7 +418,15 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 semantics,
                 recovery,
             ) = await _one_claim(
-                context, checkpoint, candidate, evidence, attempts, recovered, written
+                context,
+                checkpoint,
+                candidate,
+                evidence,
+                attempts,
+                recovered,
+                written,
+                deterministic_outcomes,
+                audit_events,
             )
             # The per-claim transition is the authoritative checkpoint for the
             # next candidate.  Never reuse the old CAS version in a batch.
@@ -442,6 +474,8 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             semantic_outcomes=tuple(semantic_outcomes),
             recovery_outcomes=tuple(recovery_outcomes),
             evidence_calls=evidence_calls,
+            deterministic_outcomes=tuple(deterministic_outcomes),
+            audit_events=tuple(audit_events),
             checkpoints=tuple(written),
             planning=planning_result,
         )
@@ -536,6 +570,19 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         return _fault("invalid_tool_plan", attempts, reservations, recovered, written)
 
 
+def _verify_and_record(
+    context: L2RunContext,
+    candidate: IdentifiedCandidate,
+    evidence: tuple[Evidence, ...],
+    deterministic_outcomes: list[tuple[str, DeterministicResult]],
+    audit_events: list[L2AuditEvent],
+) -> DeterministicResult:
+    result = context.deterministic_verifier(candidate.candidate, evidence)
+    deterministic_outcomes.append((candidate.claim_id, result))
+    audit_events.append(L2DeterministicAudit(candidate.claim_id, result))
+    return result
+
+
 async def _one_claim(
     context: L2RunContext,
     checkpoint: RunCheckpoint | None,
@@ -544,6 +591,8 @@ async def _one_claim(
     attempts: int,
     recovered: bool,
     written: list[RunCheckpoint],
+    deterministic_outcomes: list[tuple[str, DeterministicResult]],
+    audit_events: list[L2AuditEvent],
 ) -> tuple[
     ComplianceResult,
     tuple[Evidence, ...],
@@ -566,7 +615,9 @@ async def _one_claim(
             (),
             None,
         )
-    deterministic = context.deterministic_verifier(candidate.candidate, evidence)
+    deterministic = _verify_and_record(
+        context, candidate, evidence, deterministic_outcomes, audit_events
+    )
     if not deterministic.passed:
         replacement = await _recover(
             context, candidate, evidence, deterministic, attempts, recovered
@@ -585,6 +636,7 @@ async def _one_claim(
                 None,
             )
         evidence, attempts, recovery = replacement
+        audit_events.append(L2RecoveryAudit(recovery))
         recovered = True
         if checkpoint is not None:
             checkpoint = await _advance(
@@ -597,8 +649,9 @@ async def _one_claim(
             )
             if checkpoint is not None:
                 written.append(checkpoint)
-        deterministic = context.deterministic_verifier(
-            _rebuilt(candidate, evidence).candidate, evidence
+        rebuilt = _rebuilt(candidate, evidence)
+        deterministic = _verify_and_record(
+            context, rebuilt, evidence, deterministic_outcomes, audit_events
         )
         if not deterministic.passed:
             return (
@@ -633,7 +686,9 @@ async def _one_claim(
         # must be recomputed against that same rebuilt set before it can bind
         # the semantic payload; otherwise its citations describe the pre-crash
         # candidate while the semantic gate sees the rebuilt candidate.
-        deterministic = context.deterministic_verifier(active.candidate, evidence)
+        deterministic = _verify_and_record(
+            context, active, evidence, deterministic_outcomes, audit_events
+        )
         if not deterministic.passed:
             return (
                 _insufficient(
@@ -674,6 +729,7 @@ async def _one_claim(
             reconstruction_generation=generation,
         ),
     )
+    audit_events.append(L2SemanticAudit(active.claim_id, semantic))
     first_semantic = semantic
     if checkpoint is not None:
         # A first semantic receipt is itself an egress fact.  Persist it before
@@ -749,6 +805,7 @@ async def _one_claim(
             recovery,
         )
     evidence, attempts, recovery = replacement
+    audit_events.append(L2RecoveryAudit(recovery))
     recovered = True
     if checkpoint is not None:
         checkpoint = await _advance(
@@ -762,7 +819,9 @@ async def _one_claim(
         if checkpoint is not None:
             written.append(checkpoint)
     active = _rebuilt(active, evidence)
-    deterministic = context.deterministic_verifier(active.candidate, evidence)
+    deterministic = _verify_and_record(
+        context, active, evidence, deterministic_outcomes, audit_events
+    )
     if not deterministic.passed:
         return (
             _insufficient(
@@ -819,6 +878,7 @@ async def _one_claim(
             ),
         ),
     )
+    audit_events.append(L2SemanticAudit(active.claim_id, semantic))
     if checkpoint is not None:
         checkpoint = await _advance(
             context,
@@ -1207,4 +1267,13 @@ def _fault(
     )
 
 
-__all__ = ["L2Outcome", "L2RunContext", "logical_stage_key", "run_l2_attempt"]
+__all__ = [
+    "L2AuditEvent",
+    "L2DeterministicAudit",
+    "L2Outcome",
+    "L2RecoveryAudit",
+    "L2RunContext",
+    "L2SemanticAudit",
+    "logical_stage_key",
+    "run_l2_attempt",
+]

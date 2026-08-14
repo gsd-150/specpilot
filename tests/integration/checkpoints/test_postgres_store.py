@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -298,3 +299,142 @@ async def test_failed_resume_delivery_does_not_touch_an_expired_lease(
     assert attempt == (None, None)
     assert run == (RunStatus.RUNNING.value, "resume-worker")
     assert events_after == events_before
+
+
+@pytest.mark.anyio
+async def test_completed_checkpoint_compacts_and_ttl_deletes_only_inactive_eligible(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    from specpilot.checkpoints.contracts import (
+        CheckpointStage,
+        EvidenceCheckpointRef,
+        StageGeneration,
+    )
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+    from specpilot.contracts.verdict import (
+        ComplianceResult,
+        ComplianceVerdict,
+        VerificationStatus,
+    )
+    from specpilot.runs.contracts import TerminalEvent
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runs = PostgresRunStore(clean_ledger, clock=clock)
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+
+    completed_run = await runs.create(_l2_run(clock))
+    checkpoint = await store.write(
+        None, store.new_checkpoint(completed_run, stage=CheckpointStage.PLANNED)
+    )
+    evidence = EvidenceCheckpointRef(
+        evidence_id="3" * 64,
+        content_hash="3" * 64,
+        quote_hash="4" * 64,
+        clause_id="5" * 64,
+        document_id="ietf-rfc-9110",
+        document_version="2022-06",
+        section_number="1.1",
+        paragraph_start=1,
+        paragraph_end=1,
+        token_start=0,
+        token_end=4,
+    )
+    result = ComplianceResult(
+        claim_id="6" * 64,
+        verdict=ComplianceVerdict.INSUFFICIENT_EVIDENCE,
+        verification_status=VerificationStatus.INSUFFICIENT,
+        reason_code="fixture_insufficient",
+    )
+    for stage, updates in (
+        (
+            CheckpointStage.EVIDENCE_COLLECTED,
+            {
+                "plan_id": "fixture-plan",
+                "plan_hash": "7" * 64,
+                "evidence": (evidence,),
+                "tool_attempts_used": 2,
+                "reconstruction_generations": (
+                    StageGeneration(
+                        stage="compliance",
+                        claim_id=None,
+                        recovery=False,
+                        generation=0,
+                    ),
+                ),
+            },
+        ),
+        (CheckpointStage.CANDIDATE_BUILT, {"candidate_count": 1}),
+        (CheckpointStage.DETERMINISTIC_VERIFIED, {}),
+        (
+            CheckpointStage.SEMANTIC_VERIFIED,
+            {
+                "completed_claim_ids": (result.claim_id,),
+                "completed_results": (result,),
+            },
+        ),
+        (CheckpointStage.COMPLETED, {}),
+    ):
+        candidate = checkpoint.model_copy(
+            update={
+                "checkpoint_version": checkpoint.checkpoint_version + 1,
+                "stage": stage,
+                **updates,
+            }
+        )
+        checkpoint = await store.write(checkpoint.checkpoint_version, candidate)
+
+    assert await store.compact(completed_run.run_id)
+    compacted = await store.read(completed_run.run_id)
+    assert compacted is not None
+    assert compacted.stage is CheckpointStage.COMPLETED
+    assert compacted.completed_results == (result,)
+    assert compacted.completed_claim_ids == (result.claim_id,)
+    assert compacted.candidate_count == 1
+    assert compacted.plan_id is None
+    assert compacted.evidence == ()
+    assert compacted.tool_attempts_used == 0
+    assert compacted.reservation_ids == ()
+    assert compacted.reconstruction_generations == ()
+    assert "PRIVATE-CHECKPOINT-SENTINEL" not in compacted.model_dump_json()
+
+    running_run = await runs.create(_l2_run(clock))
+    assert await runs.claim(running_run.run_id, "running-worker", lease_seconds=3600)
+    await store.write(
+        None, store.new_checkpoint(running_run, stage=CheckpointStage.PLANNED)
+    )
+    eligible_run = await runs.create(_l2_run(clock))
+    await store.write(
+        None, store.new_checkpoint(eligible_run, stage=CheckpointStage.PLANNED)
+    )
+    assert await runs.fail_delivery(
+        eligible_run.run_id,
+        TerminalEvent(
+            sequence=1,
+            status=RunStatus.INTERRUPTED,
+            reason="queue_delivery_failed",
+        ),
+    )
+
+    cutoff = clock() - timedelta(days=7)
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        await connection.execute(
+            "UPDATE specpilot_run_checkpoint SET last_accessed_at = %s, "
+            "payload = jsonb_set(payload, '{last_accessed_at}', to_jsonb(%s::text)) "
+            "WHERE run_id IN (%s, %s, %s)",
+            (
+                cutoff - timedelta(seconds=1),
+                (cutoff - timedelta(seconds=1)).isoformat(),
+                completed_run.run_id,
+                running_run.run_id,
+                eligible_run.run_id,
+            ),
+        )
+        await connection.commit()
+
+    assert await store.delete_expired(cutoff) == 1
+    assert await store.read(eligible_run.run_id) is None
+    assert await store.read(running_run.run_id) is not None
+    assert await store.read(completed_run.run_id) is not None

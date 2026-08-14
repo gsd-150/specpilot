@@ -46,7 +46,14 @@ from specpilot.runs.outcomes import (
     project_gate_error,
     project_l2_outcome,
 )
-from specpilot.runtime.l2 import L2Outcome, L2RunContext, run_l2_attempt
+from specpilot.runtime.l2 import (
+    L2DeterministicAudit,
+    L2Outcome,
+    L2RecoveryAudit,
+    L2RunContext,
+    L2SemanticAudit,
+    run_l2_attempt,
+)
 
 
 class RunStore(Protocol):
@@ -550,6 +557,10 @@ class RunWorker:
                     request_size=outcome.planning.request_size,
                 ),
             )
+        for call in outcome.evidence_calls:
+            await self._append(
+                run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
+            )
         for checkpoint in outcome.checkpoints:
             await self._append(
                 run_id,
@@ -581,44 +592,65 @@ class RunWorker:
                     request_size=outcome.compliance.request_size,
                 ),
             )
-        for claim_id, semantic in outcome.semantic_outcomes:
-            await self._append(
-                run_id,
-                SemanticSummaryEvent(
-                    sequence=1,
-                    claim_id=claim_id,
-                    supports=semantic.decision.supports_verdict,
-                    reason=semantic.decision.reason.value,
-                ),
-            )
-            await self._append(
-                run_id,
-                _admitted_egress_event(
-                    EgressStage.VERIFIER,
-                    reservation_id=semantic.reservation_id,
-                    replayed=semantic.replayed,
-                    request_size=semantic.request_size,
-                ),
-            )
-        for recovery in outcome.recovery_outcomes:
-            for call in recovery.calls:
-                await self._append(
-                    run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
-                )
-            if (
-                recovery.calls
-                and recovery.kind is not None
-                and recovery.reason_code is not None
-            ):
+        for audit in outcome.audit_events:
+            if isinstance(audit, L2DeterministicAudit):
                 await self._append(
                     run_id,
-                    RecoverySummaryEvent(
+                    VerifierSummaryEvent(
                         sequence=1,
-                        kind_name=recovery.kind.value,
-                        reason=recovery.reason_code,
-                        remaining_tool_attempts=8 - recovery.attempts_used,
+                        checks=tuple(
+                            VerifierCheckSummary(
+                                evidence_id=check.evidence_id,
+                                passed=check.fault is None,
+                                fault_code=(
+                                    None if check.fault is None else check.fault.value
+                                ),
+                            )
+                            for check in audit.result.checks
+                        ),
+                        duration_ms=0,
                     ),
                 )
+            elif isinstance(audit, L2SemanticAudit):
+                semantic = audit.outcome
+                await self._append(
+                    run_id,
+                    SemanticSummaryEvent(
+                        sequence=1,
+                        claim_id=audit.claim_id,
+                        supports=semantic.decision.supports_verdict,
+                        reason=semantic.decision.reason.value,
+                    ),
+                )
+                await self._append(
+                    run_id,
+                    _admitted_egress_event(
+                        EgressStage.VERIFIER,
+                        reservation_id=semantic.reservation_id,
+                        replayed=semantic.replayed,
+                        request_size=semantic.request_size,
+                    ),
+                )
+            elif isinstance(audit, L2RecoveryAudit):
+                recovery = audit.outcome
+                for call in recovery.calls:
+                    await self._append(
+                        run_id, ToolFinishedEvent(sequence=1, **call.model_dump())
+                    )
+                if (
+                    recovery.calls
+                    and recovery.kind is not None
+                    and recovery.reason_code is not None
+                ):
+                    await self._append(
+                        run_id,
+                        RecoverySummaryEvent(
+                            sequence=1,
+                            kind_name=recovery.kind.value,
+                            reason=recovery.reason_code,
+                            remaining_tool_attempts=8 - recovery.attempts_used,
+                        ),
+                    )
 
     async def _finish_error_stage(
         self,
