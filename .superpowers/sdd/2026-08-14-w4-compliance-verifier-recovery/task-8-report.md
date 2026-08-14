@@ -19,7 +19,7 @@ model/provider.
 - PostgreSQL compaction retains sanitized final metadata while clearing active
   reconstruction detail. TTL deletion excludes completed checkpoints and runs
   that remain queued/running, and removes only inactive eligible state.
-- The README now applies exactly the real migrations 006--012 in repository
+- The README now applies exactly the real migrations 006--013 in repository
   order instead of naming nonexistent 007/008 files, replaying 001--005, or
   silently including future migrations.
 
@@ -58,16 +58,32 @@ Round-2 trace durability remediation:
 - Fresh database `specpilot_w4_r2_aggregate2`: 39 focused L2/checkpoint cases
   passed in 10.95s.
 
+Round-3 crash-window remediation:
+
+- Stable prose-free audit identities distinguish opaque claim/phase facts, so
+  identical verifier checks for two claims both persist while an exact retry is
+  idempotent.
+- Fresh database `specpilot_w4_r3_focused1`: the exact provider-response-before-
+  audit/checkpoint loss window passed; resume rebuilt the missing egress row
+  from all strictly bound settled ledger reservations.
+- Fresh database `specpilot_w4_r3_focused3`: recovery returned from MCP and then
+  lost the process before `recovery_completed`; resume made zero additional MCP
+  calls, preserved the pre-reserved tool count and closed safely with
+  `recovery_result_lost`.
+- Fresh database `specpilot_w4_r3_aggregate2`: 118 focused unit, HTTP,
+  checkpoint and PostgreSQL run-store cases passed in 14.59s.
+
 Every database above was newly created for its test command and deleted after
 the result. The isolated PostgreSQL and Qdrant services and the separate
 diagnostic database remain running for review.
 
 ## Final verification
 
-- `PYTHONPATH=src make check` → ruff/mypy clean, 1,524 unit passed, 181 CLI
+- `PYTHONPATH="$PWD:$PWD/src" SPECPILOT_PYTHON=.venv/bin/python make check` →
+  ruff/mypy clean, 1,530 unit passed, 181 CLI
   passed.
-- Fresh database `specpilot_w4_r2_final_20260814`, isolated Qdrant and
-  `FakeProvider` only: `1981 passed in 31.33s`, 0 skipped, process exit 0. The
+- Fresh database `specpilot_w4_r3_final_20260814`, isolated Qdrant and
+  `FakeProvider` only: `1990 passed in 32.58s`, 0 skipped, process exit 0. The
   database was dropped after the result.
 - `git diff --check` and the committed range check from
   `1017c1668da7e6cb9a83dd6107be6a84b052f566` both completed without output.

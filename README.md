@@ -180,7 +180,7 @@ directed recovery only. Recovery does not reset the tool or egress budget; every
 recovered candidate goes through the complete deterministic and semantic gates
 again. Semantic support remains a model judgement, not a quality metric.
 
-W4 requires migrations 006--012 in filename order, in addition to the earlier
+W4 requires migrations 006--013 in filename order, in addition to the earlier
 operator-applied migrations. The explicit list neither reapplies 001--005 nor
 silently expands to a future migration. Startup still never applies migrations:
 
@@ -192,7 +192,8 @@ for migration in \
   migrations/009_w4_checkpoint_evidence_validator.sql \
   migrations/010_w4_checkpoint_generation_validator.sql \
   migrations/011_w4_checkpoint_results_validator.sql \
-  migrations/012_w4_checkpoint_verifier_claim_scope.sql
+  migrations/012_w4_checkpoint_verifier_claim_scope.sql \
+  migrations/013_w4_recovery_reservation.sql
 do
   psql "$SPECPILOT_LEDGER_DSN" -v ON_ERROR_STOP=1 -f "$migration"
 done

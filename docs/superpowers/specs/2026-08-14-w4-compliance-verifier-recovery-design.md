@@ -194,6 +194,13 @@ W4 phrase "one directed recovery" auditable, prevents three claims from silently
 receiving three fresh search budgets, and leaves the existing root accounting
 meaning intact.
 
+Before the first recovery MCP call, the checkpoint advances to
+`recovery_reserved`, sets `recovery_attempted`, and reserves the bounded maximum
+tool cost for that directed action. If the process loses the returned tool
+result before `recovery_completed`, resume never repeats MCP work: it publishes
+a safe `recovery_result_lost` insufficient result and preserves the reserved
+counter.
+
 The recovery consumes the remaining L2 tool budget. Initial collection plus
 recovery may use at most eight tool calls in total. It uses the same
 `evaluation_root_id`, `run_id`, policy hash, corpus ledger, and provider routes.
@@ -252,12 +259,15 @@ The allowed stages are:
 2. `evidence_collected`
 3. `candidate_built`
 4. `deterministic_verified`
-5. `recovery_completed`
-6. `semantic_verified`
-7. `completed`
+5. `recovery_reserved`
+6. `recovery_completed`
+7. `semantic_verified`
+8. `completed`
 
-Stage transitions form a closed directed graph. `recovery_completed` can be
-reached only once and only from a failed deterministic or semantic stage. A
+Stage transitions form a closed directed graph. `recovery_reserved` can be
+reached only once and only from a failed deterministic or semantic stage; new
+recovery executions pass through that durable reservation. Pre-migration
+`recovery_completed` checkpoints remain resumable. A
 checkpoint with an impossible stage/version/recovery combination is corrupt and
 cannot be resumed.
 
@@ -341,6 +351,13 @@ New sanitized event kinds cover:
 - semantic support pass/fault code;
 - directed recovery type and remaining tool budget;
 - resume request and attempt number.
+
+Real-time audit batches use a stable, prose-free identity derived from opaque
+claim ID, phase, generation and run attempt. An exact retry is idempotent while
+identical verifier/tool facts from distinct claims or phases remain separate.
+On resume, missing egress audit rows are reconciled from every settled ledger
+reservation bound to the same run, evaluation root, policy and frozen runtime
+bindings; checkpoint reservation IDs are not treated as the complete ledger.
 
 Events contain no question, claim, rationale, tool query, excerpt, provider
 response, or stack trace. Existing terminal distinctions remain: an egress gate
