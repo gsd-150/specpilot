@@ -451,14 +451,18 @@ async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> No
         finally:
             body_cancellations += 1
 
+    max_connection_seconds = 0.05
     response = BoundedStreamingResponse(
         iterator,
-        max_connection_seconds=0.01,
+        max_connection_seconds=max_connection_seconds,
         media_type="text/event-stream",
     )
 
-    await asyncio.wait_for(response.stream_response(send), timeout=0.1)
+    started_at = asyncio.get_running_loop().time()
+    await asyncio.wait_for(response.stream_response(send), timeout=0.2)
+    elapsed = asyncio.get_running_loop().time() - started_at
 
     assert body_attempts == body_cancellations == 2
+    assert elapsed < max_connection_seconds + 0.03
     assert iterator.closed.is_set()
     assert store.calls == [(run_id, "owner-a", 0, 256)]
