@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -193,3 +194,52 @@ async def test_l2_planning_admits_eight_calls_and_reconstruction_key() -> None:
     assert result.plan.base_call_cost == 8
     assert ledger.reserved[0].projected_payload.max_tool_calls == 8
     assert ledger.idempotency_keys == ["plan-1-g2"]
+
+
+async def test_planning_generation_replaces_only_canonical_tail_suffix() -> None:
+    request = planning_request(query="When may a sender retry?")
+    provider = FakeProvider()
+    provider.reply = json.dumps(
+        {
+            "plan_id": "plan-1",
+            "calls": [
+                {
+                    "step_id": "search",
+                    "tool": "search_clauses",
+                    "args": {
+                        "query": "retry",
+                        "corpus_manifest_id": request.version.corpus_manifest_id,
+                        "document_ids": [request.version.document_id],
+                        "normative_levels": [],
+                        "limit": 1,
+                    },
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    ledger = KeyLedger()
+    planner = Planner(transport(provider, ledger))
+    base = PlannerContext(
+        source_manifest=request.source_manifest,
+        corpus_manifest_id=request.version.corpus_manifest_id,
+        evaluation_root_id=request.evaluation_root_id,
+        run_id=request.run_id,
+        model_id=request.model_id,
+        idempotency_key="run-g7-planning-initial-g0",
+        task_level=TaskLevel.L2,
+        reconstruction_generation=0,
+    )
+
+    with pytest.raises(InvalidToolPlan):
+        await planner.plan("When may a sender retry?", base)
+    with pytest.raises(InvalidToolPlan):
+        await planner.plan(
+            "When may a sender retry?",
+            replace(base, reconstruction_generation=1),
+        )
+
+    assert ledger.idempotency_keys == [
+        "run-g7-planning-initial-g0",
+        "run-g7-planning-initial-g1",
+    ]
