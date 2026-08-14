@@ -11,7 +11,7 @@ import pytest
 from specpilot.api.app import create_app
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
 from specpilot.checkpoints.postgres import PostgresCheckpointStore
-from specpilot.runs.contracts import RunRecord, RunStatus
+from specpilot.runs.contracts import RunRecord, RunStatus, TerminalEvent
 from specpilot.runs.postgres import PostgresRunStore
 from specpilot.runtime import RunJob, WorkerUnavailable
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
@@ -197,6 +197,129 @@ async def test_postgres_owner_boundary_and_sanitized_trace(clean_ledger: str) ->
     assert owned.status_code == 200
     assert owned.json()["status"] == "queued"
     assert "never persist this question" not in owned.text
+
+
+@pytest.mark.anyio
+async def test_sse_supports_bearer_cookie_resume_and_terminal_close(
+    clean_ledger: str,
+) -> None:
+    """Catches auth drift, cursor replay, or a terminal stream staying open."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runtime = _runtime(clean_ledger, clock)
+    issuer = runtime.demo_issuer
+    assert issuer is not None
+    token = issuer.issue(session_id="owner-a", profile="fixture", ttl_seconds=300)
+    app = create_app(runtime=runtime)
+    private_question = "submitted-question-secret and retrieved-excerpt-secret"
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        created = await client.post(
+            "/chat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={**_payload(), "question": private_question},
+        )
+        assert created.status_code == 202
+        run_id = UUID(created.json()["run_id"])
+        assert await runtime.store.fail_delivery(
+            run_id,
+            TerminalEvent(
+                sequence=1,
+                status=RunStatus.INTERRUPTED,
+                reason="queue_delivery_failed",
+            ),
+        )
+
+        bearer = await client.get(
+            f"/runs/{run_id}/events",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resumed = await client.get(
+            f"/runs/{run_id}/events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Last-Event-ID": "1",
+            },
+        )
+        client.cookies.set("specpilot_session", token)
+        cookie = await client.get(f"/runs/{run_id}/events")
+
+    assert bearer.status_code == resumed.status_code == cookie.status_code == 200
+    assert bearer.headers["content-type"].startswith("text/event-stream")
+    assert bearer.headers["cache-control"] == "no-store"
+    assert bearer.headers["x-accel-buffering"] == "no"
+    assert b"id: 1\n" in bearer.content
+    assert bearer.content.count(b"event: terminal\n") == 1
+    assert bearer.content.endswith(b"\n\n")
+    assert b"id: 1\n" not in resumed.content
+    assert b"id: 2\n" in resumed.content
+    assert resumed.content == bearer.content[bearer.content.index(b"id: 2\n") :]
+    assert cookie.content == bearer.content
+    assert private_question.encode() not in bearer.content
+    assert b"submitted-question-secret" not in bearer.content
+    assert b"retrieved-excerpt-secret" not in bearer.content
+
+
+@pytest.mark.anyio
+async def test_sse_hides_foreign_runs_rejects_query_tokens_and_bad_cursors(
+    clean_ledger: str,
+) -> None:
+    """Catches the stream becoming an ownership oracle or URL credential sink."""
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runtime = _runtime(clean_ledger, clock)
+    issuer = runtime.demo_issuer
+    assert issuer is not None
+    owner = issuer.issue(session_id="owner-a", profile="fixture", ttl_seconds=300)
+    foreign = issuer.issue(session_id="owner-b", profile="fixture", ttl_seconds=300)
+    created = await runtime.store.create(
+        _l2_run(clock, session_id="owner-a", question="private question")
+    )
+    app = create_app(runtime=runtime)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        foreign_response = await client.get(
+            f"/runs/{created.run_id}/events",
+            headers={"Authorization": f"Bearer {foreign}"},
+        )
+        unknown = await client.get(
+            f"/runs/{uuid4()}/events",
+            headers={"Authorization": f"Bearer {foreign}"},
+        )
+        query_token = await client.get(
+            f"/runs/{created.run_id}/events?token={owner}"
+        )
+        malformed = await client.get(
+            f"/runs/{created.run_id}/events",
+            headers={
+                "Authorization": f"Bearer {owner}",
+                "Last-Event-ID": "01",
+            },
+        )
+        future = await client.get(
+            f"/runs/{created.run_id}/events",
+            headers={
+                "Authorization": f"Bearer {owner}",
+                "Last-Event-ID": "2",
+            },
+        )
+
+    assert foreign_response.status_code == unknown.status_code == 404
+    assert foreign_response.json() == unknown.json() == {"detail": "run_not_found"}
+    assert query_token.status_code == 401
+    assert query_token.json() == {"detail": "invalid_session"}
+    assert malformed.status_code == 422
+    assert malformed.json() == {"detail": "invalid_last_event_id"}
+    assert future.status_code == 422
+    assert future.json() == {"detail": "invalid_last_event_id"}
 
 
 @pytest.mark.anyio

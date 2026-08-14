@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from specpilot.api.contracts import (
     ChatAccepted,
@@ -23,6 +23,11 @@ from specpilot.api.contracts import (
     ResumeRequest,
 )
 from specpilot.api.dependencies import ApiRuntime
+from specpilot.api.sse import (
+    RunEventStreamConfig,
+    parse_last_event_id,
+    stream_owned_events,
+)
 from specpilot.api.static import install_trace_routes
 from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.runs.contracts import (
@@ -31,6 +36,7 @@ from specpilot.runs.contracts import (
     RunStatus,
     TerminalEvent,
 )
+from specpilot.runs.postgres import RunStoreValidationError
 from specpilot.runtime import RunJob, WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionClaims, SessionTokenError
 
@@ -56,6 +62,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     lifespan_users = 0
     lifecycle_state = "new"
     started_hooks = 0
+    stream_config = RunEventStreamConfig()
 
     async def close_worker() -> None:
         nonlocal lifecycle_state, started_hooks
@@ -304,6 +311,45 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         if view is None:
             raise HTTPException(status_code=404, detail="run_not_found")
         return view
+
+    @app.get("/runs/{run_id}/events")
+    async def read_run_events(
+        run_id: UUID,
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+        session: SessionClaims = Depends(dependency=claims),  # noqa: B008
+    ) -> StreamingResponse:
+        try:
+            cursor = parse_last_event_id(last_event_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail="invalid_last_event_id"
+            ) from None
+        try:
+            page = await runtime.store.read_events_owned(
+                run_id,
+                session.session_id,
+                after_sequence=cursor,
+                limit=stream_config.page_size,
+            )
+        except RunStoreValidationError:
+            raise HTTPException(
+                status_code=422, detail="invalid_last_event_id"
+            ) from None
+        except Exception:
+            raise _service_unavailable() from None
+        if page is None:
+            raise HTTPException(status_code=404, detail="run_not_found")
+        return StreamingResponse(
+            stream_owned_events(
+                runtime.store,
+                run_id,
+                session.session_id,
+                after_sequence=cursor,
+                config=stream_config,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/health", response_model=HealthView)
     async def health() -> HealthView:
