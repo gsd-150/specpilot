@@ -1616,3 +1616,67 @@ joined the set and has not been read. Coverage 0.917. The audit is sealed and
 the item counts are final, but the disclosure paragraph above cannot be written
 as-is until that read exists — and a sample that is 11/12 by omission is exactly
 the "coverage is not evidence" problem this plan already names.
+
+---
+
+### L2 is complete — 20/20, audit sealed
+
+```
+L2  20/20   dev 8/8   locked 12/12   awaiting_adjudication 0
+    compliant 7 · violating 7 · insufficient_evidence 6
+    unanswerable dev 2/2, locked 4/4
+    gold clauses 29   pooled 9
+
+audit  registered 60  adjudicated 60  complete 52  extended 8  blocked 0
+       fully_sealed true, across four sealed runs (20 + 40 + 1 + 20)
+```
+
+The L2 run registered 20 items and 162 candidates under BM25 fingerprint
+`8506ccde…` — the same fingerprint the sealed L1 runs carry, because that index
+was always built over both documents. A single-document run would have changed
+it and dragged all 40 adjudicated L1 items back for re-adjudication.
+
+Gold spread also changed: the three stored items all sat on RFC 9112 §6.3 ¶2.3,
+one paragraph carrying an entire 20-item set. The set now covers 18 distinct
+paragraphs before pooling, evenly split between the two documents.
+
+**The measurement worth reporting.** The pooling audit extended **7 of 20 L2
+items, adding 9 gold clauses — 35%.** The same audit over 40 L1 items extended
+**1, adding 1 — 2.5%.** A fourteen-fold difference between two levels of the
+same corpus, under the same protocol, adjudicated by the same reviewer.
+
+That is the direct evidence for why §8.2.3 exists. It is not a formality on top
+of careful drafting: for L2 it was the step that found what careful drafting
+missed, and the paragraph reporting L2 recall cannot omit it.
+
+**Two of the seven were not model-drafted in this pass.** `l2-dev-002` and
+`l2-dev-003` were authored earlier by `openai-codex` and had already passed a
+human source review. So the 35% is a property of the task, not only of one
+drafter — L2 gold is genuinely harder to close than L1 gold, because a
+conformance scenario can be decided by a clause in either document and the
+specifications restate each other.
+
+**What review caught before pooling ran.** Of 17 items drafted for this pass,
+11 needed revision or a different target clause before entry. The recurring
+defect was a gold clause that decides the scenario but is not the *only* clause
+that decides it: RFC 9110 §10.1.4 ¶6 and RFC 9112 §7.4 ¶8 state one TE
+requirement in two documents; §8.6 ¶8 repeats the CONNECT framing ban that
+§9.3.6 ¶12 already states; §9.3.8 ¶1 restates the Max-Forwards final-recipient
+rule for TRACE. `tmp/gold_uniqueness.py` searches both documents by rare-term
+weight and surfaces candidates, but scenario-level duplication — a scenario that
+mentions TRACE, or names Content-Length rather than Transfer-Encoding — is only
+found by reading.
+
+#### Still open
+
+- **One `<dd>` limitation is disclosed, not fixed.** The corpus excludes `<dt>`
+  by design, so 49 of 1,907 clauses are definition bodies separated from the
+  term they define; RFC 9110 §8.8.3.2 ¶2 and ¶3 give the two entity-tag
+  comparison functions without saying which is which. No stored gold clause is
+  among the 49. Fixing it changes 49 clause hashes, hence the corpus manifest,
+  hence the frozen collection — forcing a re-index and a re-run of this sealed
+  audit. Deferred past W6 rather than absorbed now.
+- **A mistyped review choice still ends the pass.** `blocked` was fixed to
+  record and continue; an unparsable line is still `invalid_choice` and returns.
+  Decisions already applied survive, and re-running resumes, but the reviewer
+  pays for a typo with a restart.
