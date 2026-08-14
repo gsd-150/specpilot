@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CURRENT_STATE_HEADING = "## Current state — 2026-08-15"
 CURRENT_DOCUMENTS = (
@@ -31,7 +30,8 @@ REQUIRED_CURRENT_FACTS = (
 def _current_state_block(document: Path) -> str:
     content = document.read_text(encoding="utf-8")
     assert content.count(CURRENT_STATE_HEADING) == 1, (
-        f"{document.relative_to(ROOT)} must contain exactly one dated current-state block"
+        f"{document.relative_to(ROOT)} must contain exactly one "
+        "dated current-state block"
     )
     _, _, after_heading = content.partition(CURRENT_STATE_HEADING)
     next_heading = re.search(r"^#{1,6} ", after_heading, flags=re.MULTILINE)
