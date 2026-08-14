@@ -18,6 +18,7 @@ from specpilot.corpus.clauses import EXCLUDED_SECTIONS, ClauseLimits
 from specpilot.corpus.dense_inventory import derived_corpus_sha256
 from specpilot.corpus.tool_metadata import build_rfc_tool_metadata
 from specpilot.corpus.walk import document_identity
+from specpilot.deployment.ready import require_ready_corpus
 from specpilot.ingestion.rfc import (
     VerifiedRfc,
     read_rfc_snapshot,
@@ -63,6 +64,8 @@ class RuntimeConfig(BaseModel):
     corpus_manifest_dir: Path
     corpus_manifest_id: Sha256
     source_manifest_dir: Path
+    ready_dir: Path | None = None
+    ready_id: Sha256 | None = None
     sources: Annotated[tuple[_RuntimeSource, ...], Field(min_length=1, max_length=12)]
     allowed_hosts: Annotated[tuple[_ExactIdentity, ...], Field(min_length=1)] = (
         LOOPBACK_HOSTS
@@ -97,6 +100,14 @@ class RuntimeConfig(BaseModel):
         deployed = self.corpus_manifest_dir == Path("/run/specpilot/corpus") and (
             self.source_manifest_dir == Path("/run/specpilot/manifests")
         )
+        if (self.ready_dir is None) != (self.ready_id is None):
+            raise ValueError(
+                "ready marker path and identity must be configured together"
+            )
+        if deployed and (
+            self.ready_dir != Path("/run/specpilot/ready") or self.ready_id is None
+        ):
+            raise ValueError("deployed runtime requires an exact ready marker")
         if deployed:
             root = _DEPLOYED_SOURCE_ROOT.resolve()
             for source in self.sources:
@@ -147,6 +158,8 @@ def load_runtime_config() -> RuntimeConfig:
         "source_manifest_dir": os.environ.get(
             "SPECPILOT_MCP_SOURCE_MANIFEST_DIR"
         ),
+        "ready_dir": os.environ.get("SPECPILOT_MCP_READY_DIR"),
+        "ready_id": os.environ.get("SPECPILOT_MCP_READY_ID"),
         "sources": json.loads(os.environ.get("SPECPILOT_MCP_SOURCES_JSON", "[]")),
     }
     allowed_hosts = os.environ.get("SPECPILOT_MCP_ALLOWED_HOSTS_JSON")
@@ -162,6 +175,14 @@ def load_runtime_services(config: RuntimeConfig) -> McpToolServices:
     corpus_manifest = CorpusManifestStore(config.corpus_manifest_dir).read(
         config.corpus_manifest_id
     )
+    source_ids = tuple(source.manifest_id for source in config.sources)
+    if config.ready_dir is not None and config.ready_id is not None:
+        require_ready_corpus(
+            ready_dir=config.ready_dir,
+            ready_id=config.ready_id,
+            corpus=corpus_manifest,
+            source_manifest_ids=source_ids,
+        )
     source_store = ManifestStore(config.source_manifest_dir)
     resolved: list[tuple[RfcSourceManifest, VerifiedRfc]] = []
     for binding in config.sources:

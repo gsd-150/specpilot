@@ -32,6 +32,7 @@ from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import ClauseLimits
 from specpilot.corpus.dense_inventory import derived_corpus_sha256
 from specpilot.corpus.tool_metadata import build_rfc_tool_metadata
+from specpilot.deployment.ready import ReadyMarker, ReadyMarkerStore
 from specpilot.egress.policy import EgressPolicy
 from specpilot.ingestion.rfc import load_verified_rfc
 from specpilot.manifests.corpus_store import CorpusManifestStore
@@ -259,6 +260,16 @@ def create_fixture_app() -> Any:
     )
     with corpus_store.acquire_freeze_lease(draft.collection_name) as lease:
         manifest = corpus_store.create(draft, lease=lease)
+    ready_dir = fixture_root / "ready"
+    ready = ReadyMarker.create(
+        source_manifest_ids=manifest.source_manifest_ids,
+        corpus_manifest_id=manifest.manifest_id,
+        collection_name=manifest.collection_name,
+        point_count=manifest.point_count,
+        inventory_root_sha256=manifest.inventory_root_sha256,
+        mode="fixture",
+    )
+    ReadyMarkerStore(ready_dir).publish(ready)
     services = McpToolServices(
         corpus=corpus,
         search_backend=_Search(corpus),
@@ -291,6 +302,8 @@ def create_fixture_app() -> Any:
         "SPECPILOT_MCP_CORPUS_MANIFEST_DIR": str(corpus_dir),
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID": manifest.manifest_id,
         "SPECPILOT_MCP_SOURCE_MANIFEST_DIR": str(source_dir),
+        "SPECPILOT_MCP_READY_DIR": str(ready_dir),
+        "SPECPILOT_MCP_READY_ID": ready.ready_id,
         "SPECPILOT_MCP_SOURCES_JSON": json.dumps(
             [{"manifest_id": source.manifest_id, "xml_path": str(xml_path)}]
         ),

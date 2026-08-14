@@ -98,6 +98,13 @@ from specpilot.corpus.walk import (
     InvalidDocumentIdentityError,
     document_identity,
 )
+from specpilot.deployment.initialize import (
+    FixtureInitializationRequest,
+    InitializationRefusal,
+    RealInitializationRequest,
+    initialize_fixture,
+    initialize_real,
+)
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
 from specpilot.embedding.local_encoder import (
@@ -260,6 +267,53 @@ def _corpus_verify(arguments: argparse.Namespace) -> int:
     except (OSError, ValueError, RuntimeError):
         return _refuse("corpus_manifest_unavailable", EXIT_IO)
     return _emit(payload)
+
+
+def _ready_payload(marker: Any) -> dict[str, Any]:
+    return {
+        "status": "ready",
+        "ready_id": marker.ready_id,
+        "mode": marker.mode,
+        "source_manifest_ids": marker.source_manifest_ids,
+        "corpus_manifest_id": marker.corpus_manifest_id,
+        "collection": marker.collection_name,
+        "point_count": marker.point_count,
+        "inventory_root_sha256": marker.inventory_root_sha256,
+    }
+
+
+def _corpus_init_fixture(arguments: argparse.Namespace) -> int:
+    try:
+        marker = initialize_fixture(
+            FixtureInitializationRequest(
+                fixture_dir=arguments.fixture_dir,
+                source_manifest_dir=arguments.source_manifest_dir,
+                corpus_manifest_dir=arguments.corpus_manifest_dir,
+                ready_dir=arguments.ready_dir,
+                qdrant_url=arguments.qdrant_url,
+            )
+        )
+    except InitializationRefusal as error:
+        return _refuse(error.code)
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_initialize_unavailable", EXIT_IO)
+    return _emit(_ready_payload(marker))
+
+
+def _corpus_init_real(arguments: argparse.Namespace) -> int:
+    try:
+        marker = initialize_real(
+            RealInitializationRequest(
+                corpus_dir=arguments.corpus_dir,
+                ready_dir=arguments.ready_dir,
+                qdrant_url=arguments.qdrant_url,
+            )
+        )
+    except InitializationRefusal as error:
+        return _refuse(error.code)
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_initialize_unavailable", EXIT_IO)
+    return _emit(_ready_payload(marker))
 
 
 def _archive_inspect(arguments: argparse.Namespace) -> int:
@@ -3295,6 +3349,20 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--model-dir", type=Path, required=True)
     verify.add_argument("--qdrant-url", required=True)
     verify.set_defaults(handler=_corpus_verify)
+
+    init_fixture = corpus.add_parser("init-fixture")
+    init_fixture.add_argument("--fixture-dir", type=Path, required=True)
+    init_fixture.add_argument("--source-manifest-dir", type=Path, required=True)
+    init_fixture.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    init_fixture.add_argument("--ready-dir", type=Path, required=True)
+    init_fixture.add_argument("--qdrant-url", required=True)
+    init_fixture.set_defaults(handler=_corpus_init_fixture)
+
+    init_real = corpus.add_parser("init-real")
+    init_real.add_argument("--corpus-dir", type=Path, required=True)
+    init_real.add_argument("--ready-dir", type=Path, required=True)
+    init_real.add_argument("--qdrant-url", required=True)
+    init_real.set_defaults(handler=_corpus_init_real)
 
     retrieval = commands.add_parser("retrieval").add_subparsers(
         dest="command", required=True

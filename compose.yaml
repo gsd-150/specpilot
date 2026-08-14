@@ -67,11 +67,14 @@ services:
       - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
       - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
       - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
+      - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready:ro
     environment:
       SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
       SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID:-}
       SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
       SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON:-[]}
+      SPECPILOT_MCP_READY_DIR: /run/specpilot/ready
+      SPECPILOT_MCP_READY_ID: ${SPECPILOT_MCP_READY_ID}
       SPECPILOT_MCP_ALLOWED_HOSTS_JSON: '["127.0.0.1:8080","mcp:8080"]'
       SPECPILOT_MCP_ALLOWED_ORIGINS_JSON: '["http://127.0.0.1:8080","http://mcp:8080"]'
     depends_on:
@@ -79,6 +82,9 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      fixture-init:
+        condition: service_completed_successfully
+        required: false
     healthcheck:
       # Hits /health rather than probing the port, so a process that is
       # listening but not serving is reported unhealthy.
@@ -98,6 +104,7 @@ services:
       - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus:ro
       - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
       - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
+      - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready:ro
     environment:
       SPECPILOT_API_PROFILE: ${SPECPILOT_API_PROFILE}
       SPECPILOT_API_DSN: ${SPECPILOT_API_DSN}
@@ -112,6 +119,8 @@ services:
       SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID}
       SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests
       SPECPILOT_MCP_SOURCES_JSON: ${SPECPILOT_MCP_SOURCES_JSON}
+      SPECPILOT_MCP_READY_DIR: /run/specpilot/ready
+      SPECPILOT_MCP_READY_ID: ${SPECPILOT_MCP_READY_ID}
       SPECPILOT_MAIN_API_KEY: ${SPECPILOT_MAIN_API_KEY}
     depends_on:
       mcp:
@@ -132,13 +141,28 @@ services:
     profiles: ["demo"]
     networks: [internal]
     depends_on:
-      postgres:
+      qdrant:
         condition: service_healthy
     restart: "no"
+    volumes:
+      - ./fixtures/demo:/run/specpilot/fixture:ro
+      - ${SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST}:/run/specpilot/corpus
+      - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests
+      - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready
     entrypoint: ["python", "-m", "specpilot.cli"]
     command:
-      - "egress"
-      - "envelope-smoke"
+      - "corpus"
+      - "init-fixture"
+      - "--fixture-dir"
+      - "/run/specpilot/fixture"
+      - "--source-manifest-dir"
+      - "/run/specpilot/manifests"
+      - "--corpus-manifest-dir"
+      - "/run/specpilot/corpus"
+      - "--ready-dir"
+      - "/run/specpilot/ready"
+      - "--qdrant-url"
+      - "http://qdrant:6333"
 
   # The only container that handles untrusted documents. Everything here is a
   # deliberate restriction, not boilerplate.

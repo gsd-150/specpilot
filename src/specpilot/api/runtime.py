@@ -29,9 +29,11 @@ from specpilot.api.static import install_trace_routes
 from specpilot.checkpoints.contracts import RunCheckpoint
 from specpilot.checkpoints.postgres import PostgresCheckpointStore
 from specpilot.demo.scenarios import scenario_for
+from specpilot.deployment.ready import require_ready_corpus
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.policy import EgressPolicy
 from specpilot.egress.postgres import PostgresEgressLedger
+from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore
 from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.runtime import load_runtime_config as load_mcp_config
@@ -262,6 +264,18 @@ def _assemble_runtime(
     if len(mcp_config.sources) != 1:
         raise ValueError("L1 API requires exactly one source binding")
     services = load_runtime_services(mcp_config)
+    if mcp_config.ready_dir is None or mcp_config.ready_id is None:
+        raise ValueError("API runtime requires an exact ready marker")
+    corpus_manifest = CorpusManifestStore(mcp_config.corpus_manifest_dir).read(
+        mcp_config.corpus_manifest_id
+    )
+    require_ready_corpus(
+        ready_dir=mcp_config.ready_dir,
+        ready_id=mcp_config.ready_id,
+        corpus=corpus_manifest,
+        source_manifest_ids=tuple(item.manifest_id for item in mcp_config.sources),
+        mode=config.profile,
+    )
     source_store = ManifestStore(mcp_config.source_manifest_dir)
     source = source_store.read_source(mcp_config.sources[0].manifest_id)
     route = source.provider_route_binding

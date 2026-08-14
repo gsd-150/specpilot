@@ -1,0 +1,30 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rfc number="9999" version="3">
+  <front>
+    <title abbrev="Synthetic">SpecPilot Offline Demonstration</title>
+    <date month="08" year="2026"/>
+  </front>
+  <middle>
+    <section anchor="delivery" numbered="true">
+      <name>Delivery</name>
+      <t pn="section-1-1">A synthetic sender <bcp14>MUST</bcp14> record a delivery marker and <bcp14>SHOULD</bcp14> retry once. <xref target="recovery" derivedContent="Section 2"/> defines recovery.</t>
+      <dl>
+        <dt>Delivery marker</dt>
+        <dd><t pn="section-1-2">A synthetic identifier used only by the offline demonstration.</t></dd>
+      </dl>
+      <table pn="table-1">
+        <thead><tr><th>Marker</th><th>Meaning</th></tr></thead>
+        <tbody><tr><td>ready</td><td>synthetic success</td></tr></tbody>
+      </table>
+    </section>
+    <section anchor="recovery" numbered="true">
+      <name>Recovery</name>
+      <t pn="section-2-1">A synthetic recipient <bcp14>MAY</bcp14> request one bounded recovery attempt.</t>
+      <t pn="section-2-2">Recovery refers to <xref target="evidence" derivedContent="Section 3"/>.</t>
+    </section>
+    <section anchor="evidence" numbered="true">
+      <name>Evidence</name>
+      <t pn="section-3-1">Synthetic evidence is sufficient only for demonstrating local engineering paths.</t>
+    </section>
+  </middle>
+</rfc>

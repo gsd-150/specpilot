@@ -1,0 +1,32 @@
+# Real initialization override. It publishes no host ports and never mounts or
+# invokes the synthetic fixture. The operator supplies one absolute secure tree.
+
+services:
+  mcp:
+    depends_on:
+      real-init:
+        condition: service_completed_successfully
+
+  real-init:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    profiles: ["real"]
+    networks: [internal]
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ${CORPUS_DIR}:/run/specpilot/real-corpus:ro
+      - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready
+    entrypoint: ["python", "-m", "specpilot.cli"]
+    command:
+      - "corpus"
+      - "init-real"
+      - "--corpus-dir"
+      - "/run/specpilot/real-corpus"
+      - "--ready-dir"
+      - "/run/specpilot/ready"
+      - "--qdrant-url"
+      - "http://qdrant:6333"

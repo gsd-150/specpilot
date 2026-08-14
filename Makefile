@@ -1,4 +1,4 @@
-.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant frontend-test frontend-build
+.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant frontend-test frontend-build ingest-real
 
 SPECPILOT_PYTHON ?= .venv/bin/python
 
@@ -58,3 +58,11 @@ require-dsn:
 	@test -n "$$SPECPILOT_TEST_DSN" || { \
 		echo "set SPECPILOT_TEST_DSN to a throwaway PostgreSQL; see README"; \
 		exit 1; }
+
+ingest-real:
+	@test -n "$(CORPUS_DIR)" || { echo "set CORPUS_DIR to an absolute path"; exit 1; }
+	@test "$$(printf '%s' "$(CORPUS_DIR)" | cut -c1)" = / || { echo "CORPUS_DIR must be absolute"; exit 1; }
+	$(SPECPILOT_PYTHON) -m specpilot.cli corpus init-real \
+		--corpus-dir "$(CORPUS_DIR)" \
+		--ready-dir "$${SPECPILOT_READY_DIR:?set SPECPILOT_READY_DIR}" \
+		--qdrant-url "$${SPECPILOT_QDRANT_URL:?set SPECPILOT_QDRANT_URL}"
