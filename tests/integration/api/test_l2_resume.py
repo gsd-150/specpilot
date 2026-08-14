@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import httpx
 import psycopg
 import pytest
+from psycopg import sql
 
 from specpilot.api.app import create_app
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
@@ -19,11 +20,12 @@ from specpilot.providers.base import ProviderResponse
 from specpilot.providers.fake import FakeProvider
 from specpilot.runs.contracts import RunStatus
 from specpilot.runtime import RunWorker
-from tests.integration.api.test_l1_end_to_end import _runtime as fixture_runtime
+from tests.integration.api import test_l1_end_to_end as l1_fixture
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
-_SENTINEL = "resume-sentinel-question-must-never-enter-postgres"
+_QUESTION_SENTINEL = "resume-sentinel-question-must-never-enter-postgres"
+_EXCERPT_SENTINEL = "resume-sentinel-excerpt-must-leave-but-never-persist"
 _NONTERMINAL = (
     CheckpointStage.PLANNED,
     CheckpointStage.EVIDENCE_COLLECTED,
@@ -31,6 +33,48 @@ _NONTERMINAL = (
     CheckpointStage.DETERMINISTIC_VERIFIED,
     CheckpointStage.RECOVERY_COMPLETED,
     CheckpointStage.SEMANTIC_VERIFIED,
+)
+_PERSISTED_SCOPES = (
+    ("specpilot_run", "run_id = %s"),
+    ("specpilot_run_event", "run_id = %s"),
+    ("specpilot_run_checkpoint", "run_id = %s"),
+    ("specpilot_run_attempt", "run_id = %s"),
+    (
+        "egress_policy_snapshot",
+        "policy_hash = (SELECT policy_hash FROM specpilot_run WHERE run_id = %s)",
+    ),
+    (
+        "egress_evaluation_root",
+        "evaluation_root_id = (SELECT evaluation_root_id FROM specpilot_run "
+        "WHERE run_id = %s)",
+    ),
+    (
+        "egress_corpus_ledger",
+        "corpus_manifest_id = (SELECT corpus_manifest_id FROM specpilot_run "
+        "WHERE run_id = %s)",
+    ),
+    (
+        "egress_corpus_ledger_head",
+        "corpus_manifest_id = (SELECT corpus_manifest_id FROM specpilot_run "
+        "WHERE run_id = %s)",
+    ),
+    ("egress_reservation", "run_id = %s::text"),
+    (
+        "egress_reservation_disclosure",
+        "reservation_id IN (SELECT reservation_id FROM egress_reservation "
+        "WHERE run_id = %s::text)",
+    ),
+    (
+        "egress_route_disclosure",
+        "corpus_manifest_id = (SELECT corpus_manifest_id FROM specpilot_run "
+        "WHERE run_id = %s)",
+    ),
+    (
+        "egress_attempt",
+        "reservation_id IN (SELECT reservation_id FROM egress_reservation "
+        "WHERE run_id = %s::text)",
+    ),
+    ("egress_run_seal", "run_id = %s::text"),
 )
 
 
@@ -69,9 +113,7 @@ def _fixture_adapter(runtime: Any) -> FakeProvider:
     return adapter
 
 
-def _force_one_semantic_recovery(
-    runtime: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _force_one_semantic_recovery(runtime: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _fixture_adapter(runtime)
     original = adapter.send
     semantic_calls = 0
@@ -128,24 +170,16 @@ async def _restart_worker(runtime: Any) -> RunWorker:
     return restarted
 
 
-async def _assert_sentinel_absent(dsn: str, run_id: UUID) -> None:
-    pattern = f"%{_SENTINEL}%"
+async def _assert_sentinels_absent(dsn: str, run_id: UUID) -> None:
     async with await psycopg.AsyncConnection.connect(dsn) as connection:
-        row = await (
-            await connection.execute(
-                "SELECT "
-                "EXISTS (SELECT 1 FROM specpilot_run r WHERE r.run_id = %s "
-                "AND to_jsonb(r)::text LIKE %s) OR "
-                "EXISTS (SELECT 1 FROM specpilot_run_event e WHERE e.run_id = %s "
-                "AND to_jsonb(e)::text LIKE %s) OR "
-                "EXISTS (SELECT 1 FROM specpilot_run_checkpoint c "
-                "WHERE c.run_id = %s AND to_jsonb(c)::text LIKE %s) OR "
-                "EXISTS (SELECT 1 FROM specpilot_run_attempt a WHERE a.run_id = %s "
-                "AND to_jsonb(a)::text LIKE %s)",
-                (run_id, pattern, run_id, pattern, run_id, pattern, run_id, pattern),
-            )
-        ).fetchone()
-    assert row == (False,)
+        for table, predicate in _PERSISTED_SCOPES:
+            statement = sql.SQL(
+                "SELECT to_jsonb(persisted)::text FROM {} AS persisted WHERE "
+            ).format(sql.Identifier(table)) + sql.SQL(predicate)
+            rows = await (await connection.execute(statement, (run_id,))).fetchall()
+            serialized = "\n".join(row[0] for row in rows)
+            assert _QUESTION_SENTINEL not in serialized, table
+            assert _EXCERPT_SENTINEL not in serialized, table
 
 
 async def _reservation_keys(dsn: str, run_id: UUID) -> tuple[tuple[str, str], ...]:
@@ -170,7 +204,12 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del qdrant_url
-    async with fixture_runtime(clean_ledger, tmp_path, monkeypatch) as (
+    instrumented_xml = l1_fixture.TOOL_RFC_XML.replace(
+        "record it.", f"record it. {_EXCERPT_SENTINEL}"
+    )
+    assert _EXCERPT_SENTINEL in instrumented_xml
+    monkeypatch.setattr(l1_fixture, "TOOL_RFC_XML", instrumented_xml)
+    async with l1_fixture._runtime(clean_ledger, tmp_path, monkeypatch) as (
         runtime,
         issuer,
     ):
@@ -194,7 +233,7 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
         headers = {"Authorization": f"Bearer {token}"}
         app = create_app(runtime=runtime)
         payload = {
-            "question": _SENTINEL,
+            "question": f"Which retry requirement applies? {_QUESTION_SENTINEL}",
             "request_id": str(uuid4()),
             "evaluation_root_id": "l2-resume-root",
             "task_level": "L2",
@@ -238,7 +277,7 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
 
             monkeypatch.setattr(restarted_worker, "_l2_runner", gated_runner)
             resume_body = {
-                "question": _SENTINEL,
+                "question": f"Which retry requirement applies? {_QUESTION_SENTINEL}",
                 "resume_key": f"resume-{stop_stage.value}",
             }
             resumed = await client.post(
@@ -259,7 +298,9 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
                 f"/runs/{run_id}/resume",
                 headers=headers,
                 json={
-                    "question": _SENTINEL,
+                    "question": (
+                        f"Which retry requirement applies? {_QUESTION_SENTINEL}"
+                    ),
                     "resume_key": f"other-{stop_stage.value}",
                 },
             )
@@ -284,7 +325,7 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
                 resumed_checkpoint.reconstruction_generations
                 == interrupted_checkpoint.reconstruction_generations
             )
-            await _assert_sentinel_absent(clean_ledger, run_id)
+            await _assert_sentinels_absent(clean_ledger, run_id)
 
             release_resume.set()
             terminal = await _wait_terminal(runtime, run_id, owner)
@@ -293,4 +334,10 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
             assert set(keys_before_resume).issubset(keys_after_resume)
             assert len(keys_after_resume) == len(set(keys_after_resume))
             assert all(root == "l2-resume-root" for _, root in keys_after_resume)
-            await _assert_sentinel_absent(clean_ledger, run_id)
+            disclosed_quotes = tuple(
+                excerpt.quote
+                for call in _fixture_adapter(runtime).calls
+                for excerpt in getattr(call, "evidence_excerpts", ())
+            )
+            assert any(_EXCERPT_SENTINEL in quote for quote in disclosed_quotes)
+            await _assert_sentinels_absent(clean_ledger, run_id)

@@ -82,8 +82,12 @@ async def test_resume_refuses_non_lease_expired_interruption_without_mutation(
         None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
     )
     result = await store.begin_resume(
-        created.run_id, created.session_id, created.query_hash, "new-key",
-        lease_owner="resume-worker", lease_seconds=30,
+        created.run_id,
+        created.session_id,
+        created.query_hash,
+        "new-key",
+        lease_owner="resume-worker",
+        lease_seconds=30,
     )
     assert result.disposition is ResumeDisposition.NOT_INTERRUPTED
 
@@ -228,3 +232,69 @@ async def test_failed_resume_delivery_closes_only_the_acquired_attempt(
     )
     assert replay.disposition is ResumeDisposition.REPLAY
     assert replay.attempt == 2
+
+
+@pytest.mark.anyio
+async def test_failed_resume_delivery_does_not_touch_an_expired_lease(
+    clean_ledger: str,
+) -> None:
+    import psycopg
+
+    from specpilot.checkpoints.contracts import CheckpointStage
+    from specpilot.checkpoints.postgres import PostgresCheckpointStore
+    from specpilot.runs.contracts import ResumeDisposition
+
+    await _seed_bindings(clean_ledger)
+    clock = Clock()
+    runs = PostgresRunStore(clean_ledger, clock=clock)
+    created = await runs.create(_l2_run(clock))
+    clock.advance(seconds=31)
+    assert await runs.reconcile_expired(clock()) == 1
+    store = PostgresCheckpointStore(clean_ledger, clock=clock)
+    await store.write(
+        None, store.new_checkpoint(created, stage=CheckpointStage.PLANNED)
+    )
+    acquired = await store.begin_resume(
+        created.run_id,
+        created.session_id,
+        created.query_hash,
+        "expiring-delivery-key",
+        lease_owner="resume-worker",
+        lease_seconds=30,
+    )
+    assert acquired.disposition is ResumeDisposition.ACQUIRED
+    clock.advance(seconds=31)
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        events_before = await (
+            await connection.execute(
+                "SELECT count(*) FROM specpilot_run_event WHERE run_id = %s",
+                (created.run_id,),
+            )
+        ).fetchone()
+    assert not await store.fail_resume_delivery(
+        created.run_id, 2, lease_owner="resume-worker"
+    )
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        attempt = await (
+            await connection.execute(
+                "SELECT ended_at, end_reason FROM specpilot_run_attempt "
+                "WHERE run_id = %s AND attempt = 2",
+                (created.run_id,),
+            )
+        ).fetchone()
+        run = await (
+            await connection.execute(
+                "SELECT status, lease_owner FROM specpilot_run WHERE run_id = %s",
+                (created.run_id,),
+            )
+        ).fetchone()
+        events_after = await (
+            await connection.execute(
+                "SELECT count(*) FROM specpilot_run_event WHERE run_id = %s",
+                (created.run_id,),
+            )
+        ).fetchone()
+    assert attempt == (None, None)
+    assert run == (RunStatus.RUNNING.value, "resume-worker")
+    assert events_after == events_before

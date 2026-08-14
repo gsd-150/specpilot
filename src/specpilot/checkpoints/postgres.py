@@ -406,6 +406,8 @@ class PostgresCheckpointStore:
                 if (
                     run["status"] != RunStatus.RUNNING.value
                     or run["lease_owner"] != lease_owner
+                    or not isinstance(run["lease_expires_at"], datetime)
+                    or run["lease_expires_at"] <= now
                 ):
                     return False
                 closed = await connection.execute(
@@ -532,7 +534,7 @@ class PostgresCheckpointStore:
                 "source_manifest_id, "
                 "corpus_manifest_id, policy_hash, configuration_hash, provider_id, "
                 "model_id, query_hash, terminal_reason, compliance_prompt_hash, "
-                "verifier_prompt_hash, status, lease_owner "
+                "verifier_prompt_hash, status, lease_owner, lease_expires_at "
                 "FROM specpilot_run WHERE run_id = %s "
                 "FOR UPDATE",
                 (run_id,),
