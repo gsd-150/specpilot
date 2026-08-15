@@ -134,6 +134,15 @@ def test_confirmation_cli_retry_keeps_the_same_three_field_output(
 
 
 def test_evaluation_cli_has_no_execution_subcommand() -> None:
+    """W6 is the first path allowed to run a locked case, so none exists here.
+
+    Exact equality on purpose. Every name below prepares or seals inputs and
+    none of them reads a locked set, calls a provider, or produces a score:
+    `dependency-lock` pins the runtime closure, `identities` hashes recorded
+    bindings, and the two freeze commands build and confirm a spec. Adding a
+    subcommand has to be a deliberate edit here, because the boundary this
+    guards is one that an innocuous-looking helper is exactly how you cross.
+    """
     parser = __import__("specpilot.cli", fromlist=["_parser"])._parser()
     evaluation_action = next(
         action for action in parser._actions if action.dest == "group"
@@ -145,4 +154,9 @@ def test_evaluation_cli_has_no_execution_subcommand() -> None:
         if action.dest == "evaluation_command"
     )
 
-    assert set(subcommands) == {"freeze-candidate", "freeze-confirm"}
+    assert set(subcommands) == {
+        "dependency-lock",
+        "identities",
+        "freeze-candidate",
+        "freeze-confirm",
+    }

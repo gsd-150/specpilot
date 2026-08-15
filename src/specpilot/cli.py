@@ -131,6 +131,15 @@ from specpilot.embedding.throughput import (
     measure_throughput,
     weights_sha256,
 )
+from specpilot.evaluation.dependency_lock import (
+    DependencyLockError,
+    render_dependency_lock,
+)
+from specpilot.evaluation.identities import (
+    IdentityInputs,
+    IdentityUnavailableError,
+    build_identity_status,
+)
 from specpilot.evaluation.retrieval import (
     RetrievedItem,
     score_route,
@@ -916,6 +925,124 @@ def _annotation_template(arguments: argparse.Namespace) -> int:
     json.dump(template, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def _evaluation_dependency_lock(arguments: argparse.Namespace) -> int:
+    """Pin the runtime closure of the installed distribution.
+
+    The closure is read from the installed metadata rather than from
+    `pyproject.toml`, because what the packaged image runs is the resolved
+    transitive set, not the five declared ranges. Extras are excluded by asking
+    for the base requirements only.
+    """
+    from importlib import metadata
+
+    from packaging.requirements import Requirement
+
+    def _applies(requirement: Requirement, extras: frozenset[str]) -> bool:
+        """Evaluate the marker against the extras actually requested.
+
+        Two ways to get this wrong, and both produce a lock that hashes cleanly
+        while describing an environment that is not the one the image builds.
+        Stripping markers admits `colorama; platform_system == "Windows"`, which
+        this platform cannot install. Excluding every extra drops
+        `psycopg[binary]` — which `pyproject.toml` asks for by name — along with
+        the http2 and crypto extras that `qdrant-client` and `mcp` request, so
+        the lock comes out seven packages short of what the image installs.
+
+        So the marker is evaluated once with no extra and once per requested
+        extra, and the requirement is in if any of those holds.
+        """
+        marker = requirement.marker
+        if marker is None:
+            return True
+        if bool(marker.evaluate({"extra": ""})):
+            return True
+        return any(bool(marker.evaluate({"extra": extra})) for extra in extras)
+
+    def _runtime_closure(root: str) -> set[str]:
+        seen: set[str] = set()
+        pending: list[tuple[str, frozenset[str]]] = [(root, frozenset())]
+        visited: set[tuple[str, frozenset[str]]] = set()
+        while pending:
+            name, extras = pending.pop()
+            key = name.lower().replace("_", "-")
+            if (key, extras) in visited:
+                continue
+            visited.add((key, extras))
+            seen.add(key)
+            try:
+                requires = metadata.requires(name) or []
+            except metadata.PackageNotFoundError:
+                continue
+            for entry in requires:
+                try:
+                    requirement = Requirement(entry)
+                except Exception:
+                    continue
+                if _applies(requirement, extras):
+                    pending.append(
+                        (requirement.name, frozenset(requirement.extras))
+                    )
+        return seen - {root.lower()}
+
+    try:
+        closure = _runtime_closure("specpilot")
+    except metadata.PackageNotFoundError:
+        return _refuse("distribution_not_installed")
+
+    def _version(name: str) -> str:
+        try:
+            return metadata.version(name)
+        except metadata.PackageNotFoundError as error:
+            # Surfaced as a lookup so the lock refuses by name rather than
+            # letting an ImportError subclass escape the command.
+            raise KeyError(name) from error
+
+    try:
+        rendered = render_dependency_lock(closure, _version)
+    except DependencyLockError:
+        return _refuse("dependency_lock_incomplete")
+    try:
+        arguments.out.write_text(rendered, encoding="utf-8")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    return _emit({"status": "written", "pinned": len(closure)})
+
+
+def _evaluation_identities(arguments: argparse.Namespace) -> int:
+    """Compute the twelve identity hashes from recorded bindings only."""
+    try:
+        manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError):
+        return _refuse("corpus_manifest_not_found")
+
+    inputs = IdentityInputs(
+        repository=arguments.repository,
+        dependency_lock=arguments.dependency_lock,
+        corpus_manifest_id=manifest.manifest_id,
+        derived_corpus_sha256=manifest.derived_corpus_sha256,
+        collection_inventory_sha256=manifest.inventory_root_sha256,
+        source_manifest_ids=tuple(arguments.source_manifest),
+        group_dir=arguments.group_dir,
+        annotation_dir=arguments.annotation_dir,
+        model_ids=tuple(arguments.model_id),
+        python_version=arguments.python_version,
+    )
+    try:
+        status = build_identity_status(inputs)
+    except IdentityUnavailableError:
+        return _refuse("identity_input_unavailable")
+    try:
+        arguments.out.write_text(
+            json.dumps(status, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+    return _emit({"status": "written", "fields": len(status)})
 
 
 def _corpus_requirements(arguments: argparse.Namespace) -> int:
@@ -3979,6 +4106,27 @@ def _parser() -> argparse.ArgumentParser:
     evaluation = commands.add_parser("evaluation").add_subparsers(
         dest="evaluation_command", required=True
     )
+    dependency_lock = evaluation.add_parser("dependency-lock")
+    dependency_lock.add_argument("--out", type=Path, required=True)
+    dependency_lock.set_defaults(handler=_evaluation_dependency_lock)
+
+    identities = evaluation.add_parser("identities")
+    identities.add_argument("--out", type=Path, required=True)
+    identities.add_argument("--repository", type=Path, required=True)
+    identities.add_argument("--dependency-lock", type=Path, required=True)
+    identities.add_argument("--corpus-manifest", required=True)
+    identities.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    identities.add_argument("--source-manifest", action="append", required=True,
+                            default=[])
+    identities.add_argument("--group-dir", type=Path, required=True)
+    identities.add_argument("--annotation-dir", type=Path, required=True)
+    identities.add_argument("--model-id", action="append", required=True,
+                            default=[])
+    # Supplied, never read from sys: a reader needs the version the author
+    # intends for the run, not the interpreter that computed this file.
+    identities.add_argument("--python-version", required=True)
+    identities.set_defaults(handler=_evaluation_identities)
+
     freeze_candidate = evaluation.add_parser("freeze-candidate")
     freeze_candidate.add_argument("--repository", type=Path, required=True)
     freeze_candidate.add_argument("--dependency-lock", type=Path, required=True)
