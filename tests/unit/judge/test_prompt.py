@@ -94,7 +94,7 @@ def test_rendering_names_excerpts_by_content_hash() -> None:
 def test_the_body_prints_the_schema_the_parser_accepts() -> None:
     body = PROMPT.body
     for token in (
-        '"key_points"',
+        '"key_point_hits"',
         '"point_id"',
         '"hit"',
         '"miss_reason"',

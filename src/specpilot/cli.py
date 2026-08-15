@@ -84,7 +84,7 @@ from specpilot.contracts.proposal import (
     proposal_for_schema,
 )
 from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
-from specpilot.contracts.scoring import HumanDevLabels
+from specpilot.contracts.scoring import HumanDevLabels, JudgeRecord
 from specpilot.corpus.clauses import (
     EXCLUDED_SECTIONS,
     Clause,
@@ -1321,6 +1321,151 @@ def _judge_labels_add(arguments: argparse.Namespace) -> int:
         return _refuse("labels_not_stored", EXIT_IO)
     return _emit(
         {"status": "stored", "label_id": label_id, "case_id": labels.case_id}
+    )
+
+
+def _judge_prompt_by_version(version: str) -> JudgePrompt | None:
+    """Pick the registered prompt the author asked to send by version."""
+    for prompt in _JUDGE_PROMPTS:
+        if prompt.version == version:
+            return prompt
+    return None
+
+
+def _judge_score(arguments: argparse.Namespace) -> int:
+    """Score one prepared judge payload through the ledger-backed gate.
+
+    The author runs this command with the judge credential in the environment;
+    it never appears in tests with a live adapter. Everything before the send
+    is deterministic, and everything after the send is refused rather than
+    guessed — an unreadable reply or a mismatched output becomes a stable code,
+    never a stored record.
+    """
+    return asyncio.run(_judge_score_async(arguments))
+
+
+def _authorized_judge_endpoint(route_name: str, manifest: Any) -> Any:
+    from specpilot.providers.http import LIVE_ROUTES
+
+    endpoint = LIVE_ROUTES[route_name].endpoint
+    binding = manifest.provider_route_binding
+    if (
+        binding is None
+        or binding.provider_id != endpoint.provider_id
+        or binding.use is not ProviderUse.OFFLINE_JUDGE
+    ):
+        raise EgressPolicyViolation(
+            "route_unauthorized",
+            "selected judge route is not authorized by the source manifest",
+        )
+    return endpoint
+
+
+async def _judge_score_async(arguments: argparse.Namespace) -> int:
+    from specpilot.egress.ledger import LedgerError
+    from specpilot.egress.postgres import PostgresEgressLedger
+    from specpilot.judge.call import build_judge_request, parse_judge_reply
+    from specpilot.providers.http import (
+        HttpChatAdapter,
+        ProviderCredentialMissing,
+        resolve_credential,
+    )
+    from specpilot.providers.transport import (
+        NoAdapterForRoute,
+        PolicyBoundTransport,
+        ProviderAttemptError,
+        TransportReplayError,
+    )
+
+    try:
+        payload_data = json.loads(arguments.payload.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _refuse("judge_payload_unreadable", EXIT_IO)
+    try:
+        payload = JudgePayload.model_validate(payload_data)
+    except ValidationError:
+        return _refuse("judge_payload_invalid")
+    prompt = _judge_prompt_by_version(arguments.prompt_version)
+    if prompt is None:
+        return _refuse("judge_prompt_unresolvable")
+    store = ManifestStore(arguments.manifest_dir)
+    try:
+        authorized = store.read_source(arguments.source_manifest)
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("manifest_not_found")
+    try:
+        corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_manifest_not_found")
+    try:
+        endpoint = _authorized_judge_endpoint(arguments.route, authorized)
+    except EgressPolicyViolation as violation:
+        return _refuse(f"blocked:{violation.code}")
+    enforcer = EgressPolicyEnforcer(EgressPolicy.load(), manifests=store)
+    ledger = PostgresEgressLedger(
+        arguments.ledger_dsn, policy=EgressPolicy.load(), manifests=store
+    )
+    try:
+        key = resolve_credential(endpoint)
+    except ProviderCredentialMissing:
+        return _refuse("provider_credential_missing", EXIT_USAGE)
+    adapter = HttpChatAdapter(endpoint, api_key=key)
+    transport = PolicyBoundTransport(
+        enforcer=enforcer,
+        ledger=ledger,
+        adapters=(cast(Any, adapter),),
+    )
+    request = build_judge_request(
+        payload,
+        source_manifest=authorized,
+        corpus_manifest_id=corpus_manifest.manifest_id,
+        model_id=endpoint.model_id,
+        task_level=TaskLevel(arguments.task_level),
+        evaluation_root_id=arguments.evaluation_root_id,
+        run_id=arguments.run_id,
+    )
+    try:
+        receipt = await transport.send(
+            request, idempotency_key=str(uuid.uuid4())
+        )
+    except ProviderAttemptError as error:
+        return _refuse(f"failed:{error.public_error_code}")
+    except EgressPolicyViolation as violation:
+        return _refuse(f"blocked:{violation.code}")
+    except (TransportReplayError, NoAdapterForRoute) as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except LedgerError as error:
+        return _refuse(f"blocked:{error.code}", EXIT_IO)
+    finally:
+        await adapter.aclose()
+
+    output, fault = parse_judge_reply(receipt.response.content)
+    if output is None:
+        return _refuse(f"judge:{fault}")
+    try:
+        output.verify_against(payload)
+    except ValueError:
+        return _refuse("judge_output_mismatch")
+    record = JudgeRecord(
+        case_id=arguments.case_id,
+        question_hash=hashlib.sha256(payload.query.encode("utf-8")).hexdigest(),
+        final_answer_hash=hashlib.sha256(
+            payload.final_answer.encode("utf-8")
+        ).hexdigest(),
+        prompt_hash=prompt.content_sha256,
+        prompt_version=prompt.version,
+        model_id=endpoint.model_id,
+        output=output,
+        scored_at=datetime.now(UTC),
+    )
+    try:
+        record_id = JudgeRecordStore(arguments.records_dir).create(record)
+    except (OSError, ValueError):
+        return _refuse("judge_record_not_stored", EXIT_IO)
+    return _emit(
+        {"status": "scored", "record_id": record_id, "case_id": record.case_id}
     )
 
 
@@ -3875,6 +4020,24 @@ def _parser() -> argparse.ArgumentParser:
     judge_add.add_argument("--records-dir", type=Path, required=True)
     judge_add.add_argument("--labels-dir", type=Path, required=True)
     judge_add.set_defaults(handler=_judge_labels_add)
+
+    judge_score = judge.add_parser("score")
+    judge_score.add_argument("--payload", type=Path, required=True)
+    judge_score.add_argument("--case-id", required=True)
+    judge_score.add_argument("--task-level", choices=["l1", "l2"], required=True)
+    judge_score.add_argument("--prompt-version", required=True)
+    judge_score.add_argument("--source-manifest", required=True)
+    judge_score.add_argument("--manifest-dir", type=Path, required=True)
+    judge_score.add_argument("--corpus-manifest", required=True)
+    judge_score.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    judge_score.add_argument("--ledger-dsn", required=True)
+    judge_score.add_argument(
+        "--route", choices=sorted(LIVE_ROUTE_NAMES), default="judge"
+    )
+    judge_score.add_argument("--evaluation-root-id", required=True)
+    judge_score.add_argument("--run-id", required=True)
+    judge_score.add_argument("--records-dir", type=Path, required=True)
+    judge_score.set_defaults(handler=_judge_score)
 
     corpus = commands.add_parser("corpus").add_subparsers(
         dest="command", required=True

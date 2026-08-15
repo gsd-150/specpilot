@@ -34,7 +34,7 @@ from specpilot.contracts.manifests import Identifier
 # prompt body pins the contract the parser enforces.
 REPLY_SCHEMA = """\
 {
-  "key_points": [
+  "key_point_hits": [
     {"point_id": "...", "hit": true, "miss_reason": null}
   ],
   "answer_claims": [

@@ -313,3 +313,85 @@ def test_labels_add_refuses_a_point_mismatch(tmp_path: Path) -> None:
         ]
     )
     assert exit_code == 2
+
+
+def test_score_refuses_an_unreadable_payload(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_text("not json", encoding="utf-8")
+    exit_code = main(
+        [
+            "judge",
+            "score",
+            "--payload",
+            str(payload),
+            "--case-id",
+            "l1-dev-001",
+            "--task-level",
+            "l1",
+            "--prompt-version",
+            "1",
+            "--source-manifest",
+            "a" * 64,
+            "--manifest-dir",
+            str(tmp_path / "manifests"),
+            "--corpus-manifest",
+            "b" * 64,
+            "--corpus-manifest-dir",
+            str(tmp_path / "corpus-manifests"),
+            "--ledger-dsn",
+            "postgresql://localhost/invalid",
+            "--evaluation-root-id",
+            "root-1",
+            "--run-id",
+            "run-1",
+            "--records-dir",
+            str(tmp_path / "records"),
+        ]
+    )
+    assert exit_code == 3
+
+
+def test_score_refuses_an_unknown_prompt_version(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "kind": "judge",
+                "query": "The question.",
+                "final_answer": "The answer.",
+                "scoring_points": [{"point_id": "p1", "text": "The point."}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    exit_code = main(
+        [
+            "judge",
+            "score",
+            "--payload",
+            str(payload),
+            "--case-id",
+            "l1-dev-001",
+            "--task-level",
+            "l1",
+            "--prompt-version",
+            "99",
+            "--source-manifest",
+            "a" * 64,
+            "--manifest-dir",
+            str(tmp_path / "manifests"),
+            "--corpus-manifest",
+            "b" * 64,
+            "--corpus-manifest-dir",
+            str(tmp_path / "corpus-manifests"),
+            "--ledger-dsn",
+            "postgresql://localhost/invalid",
+            "--evaluation-root-id",
+            "root-1",
+            "--run-id",
+            "run-1",
+            "--records-dir",
+            str(tmp_path / "records"),
+        ]
+    )
+    assert exit_code == 2
