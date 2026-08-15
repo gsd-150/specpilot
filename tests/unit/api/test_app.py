@@ -12,9 +12,16 @@ import pytest
 from specpilot.api.app import create_app
 from specpilot.api.contracts import ChatRequest
 from specpilot.api.dependencies import ApiRunBinding, ApiRuntime
+from specpilot.api.sse import RunEventStreamConfig
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.checkpoints.postgres import CheckpointResumeResult
-from specpilot.runs.contracts import ResumeDisposition, RunRecord, RunStatus, RunView
+from specpilot.runs.contracts import (
+    ResumeDisposition,
+    RunEventPage,
+    RunRecord,
+    RunStatus,
+    RunView,
+)
 from specpilot.runtime import RunJob, WorkerQueueFull, WorkerUnavailable
 from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
 
@@ -304,6 +311,34 @@ async def client_for(made: ApiRuntime) -> Any:
     )
 
 
+@dataclass
+class DeadlineStore(FakeStore):
+    preflight_delay: float | None = None
+    event_reads: int = 0
+    stalled_read_cancelled: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def read_events_owned(
+        self,
+        run_id: UUID,
+        session_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> RunEventPage | None:
+        del after_sequence, limit
+        self.event_reads += 1
+        stored = self.runs.get(run_id)
+        if stored is None or stored[0] != session_id:
+            return None
+        if self.event_reads == 1 and self.preflight_delay is not None:
+            await asyncio.sleep(self.preflight_delay)
+            return RunEventPage(events=(), terminal=False, last_sequence=0)
+        try:
+            await asyncio.Future()
+        finally:
+            self.stalled_read_cancelled.set()
+
+
 def payload() -> dict[str, str]:
     return {
         "question": "private question",
@@ -374,6 +409,84 @@ async def test_chat_returns_202_and_foreign_trace_is_same_404_as_unknown() -> No
         )
     assert owned.status_code == 200
     assert "private question" not in owned.text
+
+
+async def test_sse_deadline_cancels_owner_preflight_before_response_start() -> None:
+    made = runtime()
+    store = DeadlineStore()
+    object.__setattr__(made, "store", store)
+    config = RunEventStreamConfig(
+        heartbeat_seconds=0.02,
+        poll_seconds=0.01,
+        max_connection_seconds=0.05,
+        page_size=1,
+    )
+    app = create_app(runtime=made, stream_config=config)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        created = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+        )
+        run_id = created.json()["run_id"]
+        response = await asyncio.wait_for(
+            client.get(
+                f"/runs/{run_id}/events",
+                headers={"Authorization": f"Bearer {token}"},
+            ),
+            timeout=0.15,
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service_unavailable"}
+    assert store.event_reads == 1
+    assert store.stalled_read_cancelled.is_set()
+
+
+async def test_sse_stream_uses_only_time_remaining_after_owner_preflight() -> None:
+    made = runtime()
+    store = DeadlineStore(preflight_delay=0.08)
+    object.__setattr__(made, "store", store)
+    config = RunEventStreamConfig(
+        heartbeat_seconds=0.05,
+        poll_seconds=0.01,
+        max_connection_seconds=0.2,
+        page_size=1,
+    )
+    app = create_app(runtime=made, stream_config=config)
+    assert made.demo_issuer is not None
+    token = made.demo_issuer.issue(
+        session_id="owner-a", profile="fixture", ttl_seconds=300
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        created = await client.post(
+            "/chat", headers={"Authorization": f"Bearer {token}"}, json=payload()
+        )
+        run_id = created.json()["run_id"]
+        started = asyncio.get_running_loop().time()
+        response = await client.get(
+            f"/runs/{run_id}/events",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+
+    assert response.status_code == 200
+    assert response.content == b""
+    assert elapsed < 0.14
+    assert store.event_reads == 2
+    assert store.stalled_read_cancelled.is_set()
 
 
 async def test_chat_accepts_l2_and_persists_the_requested_task_level() -> None:

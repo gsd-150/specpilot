@@ -90,10 +90,16 @@ def make_evaluation_workspace(tmp_path: Path) -> dict[str, Path]:
     l2_adv = _write(
         status_dir / "l2-adv.json",
         {
-            "dev": {"item_ids": ["adv-dev-1"], "families": ["family-dev"]},
+            "schema_version": "l2-adv-registration/v1",
+            "dev": {
+                "item_ids": [f"adv-dev-{index}" for index in range(1, 7)],
+                "families": [f"family-dev-{index}" for index in range(1, 7)],
+            },
             "locked": {
-                "item_ids": ["adv-locked-1"],
-                "families": ["family-locked"],
+                "item_ids": [f"adv-locked-{index}" for index in range(1, 11)],
+                "families": [
+                    f"family-locked-{index}" for index in range(1, 11)
+                ],
             },
             "overlap_report_sha256": HASHES["overlap"],
         },

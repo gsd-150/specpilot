@@ -5,10 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from specpilot.deployment.initialize import InitializationRefusal, _read_bounded
+from specpilot.deployment.initialize import (
+    InitializationRefusal,
+    _pinned_real_directories,
+    _read_bounded,
+)
 
 
-def test_bounded_read_pins_open_file_across_path_swap(
+def test_bounded_read_refuses_when_open_file_name_is_swapped(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -25,9 +29,11 @@ def test_bounded_read_pins_open_file_across_path_swap(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
         flags: int,
         mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
     ) -> int:
-        descriptor = original_open(path, flags, mode)
-        if Path(path) == source:
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == source.name and dir_fd is not None:
             source.rename(pinned)
             source.symlink_to(attacker)
         return descriptor
@@ -40,8 +46,12 @@ def test_bounded_read_pins_open_file_across_path_swap(
 
     monkeypatch.setattr(Path, "read_bytes", swap_then_read)
     monkeypatch.setattr(os, "open", open_then_swap)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {open_then_swap})
 
-    assert _read_bounded(source, max_bytes=len(trusted), code="invalid") == trusted
+    with pytest.raises(InitializationRefusal) as raised:
+        _read_bounded(source, max_bytes=len(trusted), code="invalid")
+
+    assert raised.value.code == "invalid"
 
 
 def test_bounded_read_refuses_a_symlink(tmp_path: Path) -> None:
@@ -54,3 +64,54 @@ def test_bounded_read_refuses_a_symlink(tmp_path: Path) -> None:
         _read_bounded(source, max_bytes=1024, code="fixture_source_invalid")
 
     assert raised.value.code == "fixture_source_invalid"
+
+
+def test_bounded_read_refuses_a_fifo_without_blocking(tmp_path: Path) -> None:
+    source = tmp_path / "source.xml"
+    os.mkfifo(source, mode=0o600)
+
+    with pytest.raises(InitializationRefusal) as raised:
+        _read_bounded(source, max_bytes=1024, code="fixture_source_invalid")
+
+    assert raised.value.code == "fixture_source_invalid"
+
+
+def _private_real_tree(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "real-input"
+    root.mkdir(mode=0o700)
+    for name in ("source-manifests", "sources", "model"):
+        (root / name).mkdir(mode=0o700)
+    output = tmp_path / "corpus-output"
+    output.mkdir(mode=0o700)
+    return root, output
+
+
+def test_pinned_real_tree_refuses_a_named_child_inode_swap(tmp_path: Path) -> None:
+    root, output = _private_real_tree(tmp_path)
+
+    with (
+        _pinned_real_directories(root, output) as pinned,
+        pytest.raises(InitializationRefusal) as raised,
+    ):
+        child = root / "sources"
+        child.rename(root / "sources-pinned")
+        child.mkdir(mode=0o700)
+        pinned.revalidate()
+
+    assert raised.value.code == "real_corpus_unavailable"
+
+
+def test_pinned_real_tree_refuses_the_root_path_inode_swap(tmp_path: Path) -> None:
+    root, output = _private_real_tree(tmp_path)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir(mode=0o700)
+
+    with (
+        _pinned_real_directories(root, output) as pinned,
+        pytest.raises(InitializationRefusal) as raised,
+    ):
+        root.rename(tmp_path / "real-input-pinned")
+        root.symlink_to(attacker, target_is_directory=True)
+        pinned.revalidate()
+
+    assert raised.value.code == "real_corpus_unavailable"

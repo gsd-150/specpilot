@@ -13,7 +13,8 @@ RUN rm -rf src/specpilot/api/static/trace \
 
 FROM python:3.12-slim AS python-runtime
 
-RUN useradd --create-home --uid 10001 specpilot
+RUN useradd --create-home --uid 10001 specpilot \
+    && install -d -m 0700 -o 10001 -g 10001 /run/specpilot/provider-cache
 COPY --from=python-build /wheels /wheels
 RUN python -m pip install --no-cache-dir /wheels/*.whl uvicorn \
     && rm -rf /wheels

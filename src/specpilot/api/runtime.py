@@ -131,6 +131,9 @@ class ApiRuntimeConfig(BaseModel):
 def load_runtime_config() -> ApiRuntimeConfig:
     """Read only named environment inputs without opening a dependency."""
 
+    cache_directory = os.environ.get("SPECPILOT_API_CACHE_DIR")
+    cache_ttl_seconds = os.environ.get("SPECPILOT_API_CACHE_TTL_SECONDS")
+
     return ApiRuntimeConfig.model_validate(
         {
             "profile": os.environ.get("SPECPILOT_API_PROFILE"),
@@ -148,8 +151,8 @@ def load_runtime_config() -> ApiRuntimeConfig:
             "verifier_prompt_hash": os.environ.get(
                 "SPECPILOT_API_VERIFIER_PROMPT_HASH"
             ),
-            "cache_directory": os.environ.get("SPECPILOT_API_CACHE_DIR"),
-            "cache_ttl_seconds": os.environ.get("SPECPILOT_API_CACHE_TTL_SECONDS"),
+            "cache_directory": cache_directory or None,
+            "cache_ttl_seconds": cache_ttl_seconds or None,
         }
     )
 

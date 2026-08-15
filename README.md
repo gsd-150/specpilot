@@ -311,3 +311,38 @@ Docker Desktop and on Linux it is reachable from the host directly.
 
 Copy `.env.example` to `.env` only for local settings. Never commit credentials,
 provider account metadata, or restricted source material.
+
+## Optional local provider-response cache
+
+Compose gives the API a persistent named volume at
+`/run/specpilot/provider-cache`. The image creates that directory for the
+unprivileged API user with mode `0700`; cache records remain private regular
+files. Both fixture and real profiles leave the cache disabled unless the
+operator supplies the complete pair below. There is no implicit real-profile
+TTL:
+
+```dotenv
+SPECPILOT_API_CACHE_DIR=/run/specpilot/provider-cache
+SPECPILOT_API_CACHE_TTL_SECONDS=604800
+```
+
+`604800` is the registered seven-day retention period. Cache entries can hold
+provider responses, so the volume is local sensitive state: do not copy it into
+logs, reports, source control, or evaluation artifacts. Expiry is enforced on
+lookup, but physical retention cleanup is deliberately operator-owned and does
+not run at service startup. Run the bounded count-only cleanup explicitly:
+
+```bash
+python -m specpilot.cli cache delete-expired \
+  --directory /run/specpilot/provider-cache --ttl-seconds 604800
+python -m specpilot.cli cache delete-run \
+  --directory /run/specpilot/provider-cache --ttl-seconds 604800 \
+  --run-id RUN_ID
+python -m specpilot.cli cache delete-session \
+  --directory /run/specpilot/provider-cache --ttl-seconds 604800 \
+  --session-id SESSION_ID
+```
+
+Disable the cache by leaving both variables empty or unset. Never configure
+only one member of the pair; startup fails closed when the pair is incomplete,
+the TTL is nonpositive, or the directory is not absolute.

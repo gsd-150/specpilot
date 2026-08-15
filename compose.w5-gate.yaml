@@ -34,6 +34,7 @@ services:
       - w5-manifests:/run/specpilot/manifests:ro
       - w5-sources:/run/specpilot/sources:ro
       - w5-ready:/run/specpilot/ready:ro
+      - provider-cache:/run/specpilot/provider-cache
     ports: !override
       - "127.0.0.1:${SPECPILOT_W5_API_PORT}:8000"
     depends_on: !override

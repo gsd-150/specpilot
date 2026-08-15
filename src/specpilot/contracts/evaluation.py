@@ -1,9 +1,8 @@
 """Closed, prose-free contracts for immutable evaluation run specifications.
 
-The run spec binds identities and counts, never evaluation cases or outputs.  In
-particular, the extensibility map is still recursively inspected: hiding source
-text one level below a harmless-looking key would otherwise bypass the same
-boundary enforced by the named fields.
+The run spec binds identities and counts, never evaluation cases or outputs.
+Its schema is deliberately closed: successors require a versioned contract
+rather than an untyped extension channel that could carry locked output.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -74,12 +73,12 @@ class _EvaluationRunSpecFields(_ClosedEvaluationModel):
     l2_locked_count: int = Field(ge=0)
     deep_review_count: int = Field(ge=0)
     pooling_count: int = Field(ge=0)
-    l2_adv_dev_count: int = Field(ge=1)
-    l2_adv_locked_count: int = Field(ge=1)
+    l2_adv_dev_count: Literal[6]
+    l2_adv_locked_count: Literal[10]
+    l2_adv_registration_sha256: Sha256
     l2_adv_overlap_report_sha256: Sha256
     scoring_route_id: Identifier
     dev_scoring_evidence_sha256: Sha256
-    extensions: dict[Identifier, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _split_counts_sum_to_totals(self) -> Self:

@@ -30,7 +30,6 @@ ENV_FILE = ROOT / "fixtures" / "demo" / "w5-gate.env"
 
 
 API_PORT = 49152 + int(RUN_TOKEN.rsplit("-", 1)[1], 16) % 16384
-os.environ["SPECPILOT_W5_API_PORT"] = str(API_PORT)
 API_BASE_URL = f"http://127.0.0.1:{API_PORT}"
 EXPECTED_MIGRATIONS = tuple(f"{number:03d}" for number in range(1, 17))
 COMMAND_TIMEOUT_SECONDS = 180
@@ -40,7 +39,13 @@ _PROJECT = re.compile(r"^specpilot-w5-task9-packaged-[0-9]+-[0-9a-f]{8}$")
 GATE_LABEL = "io.specpilot.w5.gate"
 VOLUME_NAMES = {
     name: f"{PROJECT_NAME}_{name}"
-    for name in ("w5-corpus", "w5-manifests", "w5-ready", "w5-sources")
+    for name in (
+        "provider-cache",
+        "w5-corpus",
+        "w5-manifests",
+        "w5-ready",
+        "w5-sources",
+    )
 }
 INTERNAL_NETWORK = f"{PROJECT_NAME}_internal"
 API_IMAGE = f"{PROJECT_NAME}-api"
@@ -51,6 +56,38 @@ AUDIT_PROXY_NAME = f"{PROJECT_NAME}-qdrant-read-audit"
 IMAGE_TAGS = (API_IMAGE, MCP_IMAGE, FIXTURE_INIT_IMAGE, MIGRATION_IMAGE)
 _READ_POST_PATH = re.compile(
     r"^/collections/[^/?]+/points/(?:count|scroll)(?:\?.*)?$"
+)
+_PERMITTED_HOST_ENVIRONMENT = frozenset(
+    {
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_TLS_VERIFY",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_RUNTIME_DIR",
+    }
+)
+_BOUND_COMPOSE_ENVIRONMENT = {"SPECPILOT_W5_API_PORT": str(API_PORT)}
+PERMITTED_SUBPROCESS_ENVIRONMENT = frozenset(
+    _PERMITTED_HOST_ENVIRONMENT
+    | {
+        "BUILDKIT_PROGRESS",
+        "NO_COLOR",
+        "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
+        "SPECPILOT_MCP_READY_ID",
+        "SPECPILOT_MCP_SOURCES_JSON",
+        "SPECPILOT_W5_API_PORT",
+        # macOS inserts this locale identity into a child even when the caller
+        # passes an otherwise closed environment mapping.
+        "__CF_USER_TEXT_ENCODING",
+    }
 )
 
 if not _PROJECT.fullmatch(PROJECT_NAME):
@@ -157,7 +194,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "NO_COLOR": "1"},
+            env=_subprocess_environment(),
         )
     except subprocess.TimeoutExpired as error:
         elapsed = time.monotonic() - started
@@ -181,6 +218,21 @@ def run_command(
             f"command failed with exit {result.returncode}: {shlex.join(command)}"
         )
     return result
+
+
+def _subprocess_environment() -> dict[str, str]:
+    """Build the gate's closed host-to-child environment boundary."""
+    environment = {
+        name: value
+        for name in _PERMITTED_HOST_ENVIRONMENT
+        if (value := os.environ.get(name)) is not None
+    }
+    environment.update(_BOUND_COMPOSE_ENVIRONMENT)
+    environment["BUILDKIT_PROGRESS"] = "plain"
+    environment["NO_COLOR"] = "1"
+    if not set(environment) <= PERMITTED_SUBPROCESS_ENVIRONMENT:
+        raise AssertionError("packaged gate subprocess environment is not closed")
+    return environment
 
 
 def _docker_run_command(
@@ -395,7 +447,7 @@ http.server.ThreadingHTTPServer(("0.0.0.0", 6334), Handler).serve_forever()
 '''.strip()
 
 
-def _start_read_only_qdrant_proxy() -> None:
+def _start_read_only_qdrant_proxy() -> int:
     run_command(
         [
             "docker",
@@ -428,25 +480,92 @@ def _start_read_only_qdrant_proxy() -> None:
         ],
         timeout=20,
     )
+    baseline = _proxy_audit_records(
+        run_command(["docker", "logs", AUDIT_PROXY_NAME]).stdout
+    )
+    if not any(
+        record.get("audit") == "read"
+        and record.get("method") == "GET"
+        and record.get("path") == "/"
+        for record in baseline
+    ):
+        raise AssertionError("Qdrant audit proxy readiness was not recorded")
+    return len(baseline)
 
 
-def assert_read_only_proxy_audit(logs: str) -> int:
-    records = [
-        json.loads(line)
-        for line in logs.splitlines()
-        if line.strip().startswith("{")
-    ]
-    if any(record.get("audit") == "mutation_rejected" for record in records):
+def _proxy_audit_records(logs: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in logs.splitlines():
+        if not line.strip().startswith("{"):
+            continue
+        record = json.loads(line)
+        if not isinstance(record, dict):
+            raise AssertionError("Qdrant audit record is not an object")
+        if (
+            record.get("audit") not in {"read", "mutation_rejected"}
+            or not isinstance(record.get("method"), str)
+            or not isinstance(record.get("path"), str)
+        ):
+            raise AssertionError("Qdrant audit record is incomplete")
+        records.append(record)
+    return records
+
+
+def assert_read_only_proxy_audit(
+    logs: str,
+    *,
+    after_records: int = 0,
+    collection: str | None = None,
+) -> int:
+    records = _proxy_audit_records(logs)
+    if (
+        isinstance(after_records, bool)
+        or not isinstance(after_records, int)
+        or after_records < 0
+        or after_records >= len(records)
+    ):
+        raise AssertionError("fixture replay made no Qdrant reads after readiness")
+    replay = records[after_records:]
+    if any(record.get("audit") == "mutation_rejected" for record in replay):
         raise AssertionError("fixture replay attempted a mutating Qdrant request")
-    reads = sum(1 for record in records if record.get("audit") == "read")
+    reads = sum(1 for record in replay if record.get("audit") == "read")
     if not reads:
-        raise AssertionError("fixture replay made no Qdrant reads through audit proxy")
+        raise AssertionError("fixture replay made no Qdrant reads after readiness")
+    if collection is not None:
+        if (
+            not collection
+            or "/" in collection
+            or "?" in collection
+            or "#" in collection
+        ):
+            raise AssertionError("fixture replay collection identity is invalid")
+        observed = {
+            (str(record["method"]), str(record["path"]).partition("?")[0])
+            for record in replay
+            if record.get("audit") == "read"
+        }
+        required = {
+            ("GET", f"/collections/{collection}"),
+            ("POST", f"/collections/{collection}/points/count"),
+            ("POST", f"/collections/{collection}/points/scroll"),
+        }
+        missing = required - observed
+        if missing:
+            kinds = ", ".join(sorted(path.rsplit("/", 1)[-1] for _, path in missing))
+            raise AssertionError(
+                "fixture replay audit is missing collection/count/scroll reads: "
+                + kinds
+            )
     return reads
 
 
-def _audit_proxy_logs() -> str:
+def _audit_proxy_logs(*, after_records: int, collection: str) -> str:
     result = run_command(["docker", "logs", AUDIT_PROXY_NAME])
-    reads = assert_read_only_proxy_audit(result.stdout)
+    reads = assert_read_only_proxy_audit(
+        result.stdout,
+        after_records=after_records,
+        collection=collection,
+    )
     print(f"fixture_repeat_qdrant_reads={reads} mutating_requests=0", flush=True)
     return result.stdout
 
@@ -570,23 +689,80 @@ def assert_scenario_events(
 ) -> list[dict[str, Any]]:
     if private_marker in raw_sse:
         raise AssertionError(f"{scenario_id}: private marker leaked into SSE")
+    frames = _parse_sse_frames(raw_sse)
     events: list[dict[str, Any]] = []
-    for line in raw_sse.splitlines():
-        if not line.startswith("data: "):
-            continue
-        payload = json.loads(line.removeprefix("data: "))
-        if not isinstance(payload, dict):
-            raise AssertionError(f"{scenario_id}: SSE event is not an object")
+    for frame_id, frame_event, payload in frames:
+        sequence = payload.get("sequence")
+        kind = payload.get("kind")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or frame_id != str(sequence)
+        ):
+            raise AssertionError(f"{scenario_id}: SSE id does not match sequence")
+        if not isinstance(kind, str) or frame_event != kind:
+            raise AssertionError(f"{scenario_id}: SSE event does not match kind")
         events.append(payload)
-    if not events or events[-1].get("kind") != "terminal":
-        raise AssertionError(f"{scenario_id}: SSE has no terminal event")
+    terminals = [event for event in events if event.get("kind") == "terminal"]
+    if len(terminals) != 1:
+        raise AssertionError(f"{scenario_id}: SSE requires exactly one terminal")
+    if events[-1] is not terminals[0]:
+        raise AssertionError(f"{scenario_id}: SSE terminal is not last")
     if events[-1].get("status") != expected_terminal:
         raise AssertionError(f"{scenario_id}: terminal status changed")
-    if not required_kinds <= {str(event.get("kind")) for event in events}:
+    kinds = [str(event.get("kind")) for event in events]
+    if not required_kinds <= set(kinds):
         raise AssertionError(f"{scenario_id}: required SSE kinds are missing")
     if [event.get("sequence") for event in events] != list(range(1, len(events) + 1)):
         raise AssertionError(f"{scenario_id}: SSE sequences are not contiguous")
+    expected_recoveries = 1 if scenario_id == "verifier_recovered" else 0
+    if kinds.count("recovery_summary") != expected_recoveries:
+        raise AssertionError(
+            f"{scenario_id}: SSE requires exactly one recovery for recovered scenario"
+        )
     return events
+
+
+def _parse_sse_frames(raw_sse: str) -> list[tuple[str, str, dict[str, Any]]]:
+    normalized = raw_sse.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.endswith("\n\n"):
+        raise AssertionError("SSE ended with an incomplete frame")
+    frames: list[tuple[str, str, dict[str, Any]]] = []
+    for block in normalized.split("\n\n"):
+        if not block:
+            continue
+        ids: list[str] = []
+        events: list[str] = []
+        data: list[str] = []
+        saw_field = False
+        for line in block.split("\n"):
+            if not line or line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if not separator:
+                raise AssertionError("SSE frame contains a malformed field")
+            if value.startswith(" "):
+                value = value[1:]
+            saw_field = True
+            if field == "id":
+                ids.append(value)
+            elif field == "event":
+                events.append(value)
+            elif field == "data":
+                data.append(value)
+            else:
+                raise AssertionError("SSE frame contains an unexpected field")
+        if not saw_field:
+            continue
+        if len(ids) != 1 or len(events) != 1 or not data:
+            raise AssertionError("SSE frame requires one id, one event, and data")
+        payload = json.loads("\n".join(data))
+        if not isinstance(payload, dict):
+            raise AssertionError("SSE event is not an object")
+        frames.append((ids[0], events[0], payload))
+    if not frames:
+        raise AssertionError("SSE contains no event frames")
+    return frames
 
 
 def _validate_migrations() -> None:
@@ -753,11 +929,11 @@ def _bind_ready_environment(ready: Mapping[str, Any]) -> None:
     source_ids = ready["source_manifest_ids"]
     if not isinstance(source_ids, list) or len(source_ids) != 1:
         raise AssertionError("fixture ready payload must contain one source")
-    os.environ["SPECPILOT_MCP_CORPUS_MANIFEST_ID"] = str(
+    _BOUND_COMPOSE_ENVIRONMENT["SPECPILOT_MCP_CORPUS_MANIFEST_ID"] = str(
         ready["corpus_manifest_id"]
     )
-    os.environ["SPECPILOT_MCP_READY_ID"] = str(ready["ready_id"])
-    os.environ["SPECPILOT_MCP_SOURCES_JSON"] = json.dumps(
+    _BOUND_COMPOSE_ENVIRONMENT["SPECPILOT_MCP_READY_ID"] = str(ready["ready_id"])
+    _BOUND_COMPOSE_ENVIRONMENT["SPECPILOT_MCP_SOURCES_JSON"] = json.dumps(
         [
             {
                 "manifest_id": source_ids[0],
@@ -801,7 +977,7 @@ def exercise_packaged_demo() -> None:
     first = parse_ready_payload(first_run.stdout)
     before = _qdrant_snapshot(str(first["collection"]))
 
-    _start_read_only_qdrant_proxy()
+    audit_readiness_records = _start_read_only_qdrant_proxy()
     repeat_started = time.monotonic()
     repeated = run_command(
         _fixture_init_command(
@@ -811,7 +987,10 @@ def exercise_packaged_demo() -> None:
         check=False,
     )
     repeat_elapsed = time.monotonic() - repeat_started
-    _audit_proxy_logs()
+    _audit_proxy_logs(
+        after_records=audit_readiness_records,
+        collection=str(first["collection"]),
+    )
     if repeated.returncode != 0:
         raise RuntimeError(
             f"audited fixture repeat failed with exit {repeated.returncode}"

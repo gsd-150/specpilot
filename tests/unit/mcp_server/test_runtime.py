@@ -153,6 +153,46 @@ def test_runtime_transport_configuration_rejects_normalized_host_input(
         raise AssertionError("normalized host input was accepted")
 
 
+def test_production_runtime_requires_ready_identity_at_nonstandard_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("SPECPILOT_MCP_CORPUS_MANIFEST_DIR", "/runtime/corpus")
+    monkeypatch.setenv("SPECPILOT_MCP_CORPUS_MANIFEST_ID", "a" * 64)
+    monkeypatch.setenv("SPECPILOT_MCP_SOURCE_MANIFEST_DIR", "/runtime/sources")
+    monkeypatch.setenv(
+        "SPECPILOT_MCP_SOURCES_JSON",
+        json.dumps(
+            [{"manifest_id": "b" * 64, "xml_path": "/runtime/rfc.xml"}]
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="ready marker"):
+        load_runtime_config()
+
+
+def test_markerless_runtime_requires_an_explicit_non_environment_test_flag(
+    tmp_path: Path,
+) -> None:
+    config = RuntimeConfig(
+        corpus_manifest_dir=tmp_path / "corpus",
+        corpus_manifest_id="a" * 64,
+        source_manifest_dir=tmp_path / "sources",
+        sources=(
+            {
+                "manifest_id": "b" * 64,
+                "xml_path": tmp_path / "rfc.xml",
+            },
+        ),
+        allow_missing_ready_for_tests=True,
+    )
+
+    assert config.ready_dir is None
+    assert config.ready_id is None
+    assert config.mode is None
+    assert config.allow_missing_ready_for_tests is True
+
+
 @pytest.mark.parametrize(
     "xml_path",
     [
@@ -258,12 +298,25 @@ async def test_runtime_factory_builds_services_and_serves_real_mcp_protocol(
     )
     with corpus_store.acquire_freeze_lease(draft.collection_name) as lease:
         corpus_manifest = corpus_store.create(draft, lease=lease)
+    ready = ReadyMarker.create(
+        source_manifest_ids=corpus_manifest.source_manifest_ids,
+        corpus_manifest_id=corpus_manifest.manifest_id,
+        collection_name=corpus_manifest.collection_name,
+        point_count=corpus_manifest.point_count,
+        inventory_root_sha256=corpus_manifest.inventory_root_sha256,
+        mode="fixture",
+    )
+    ready_dir = tmp_path / "ready"
+    ReadyMarkerStore(ready_dir).publish(ready)
 
     monkeypatch.setenv("SPECPILOT_MCP_CORPUS_MANIFEST_DIR", str(corpus_dir))
     monkeypatch.setenv(
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID", corpus_manifest.manifest_id
     )
     monkeypatch.setenv("SPECPILOT_MCP_SOURCE_MANIFEST_DIR", str(source_dir))
+    monkeypatch.setenv("SPECPILOT_MCP_READY_DIR", str(ready_dir))
+    monkeypatch.setenv("SPECPILOT_MCP_READY_ID", ready.ready_id)
+    monkeypatch.setenv("SPECPILOT_MCP_MODE", "fixture")
     monkeypatch.setenv(
         "SPECPILOT_MCP_SOURCES_JSON",
         json.dumps(

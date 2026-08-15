@@ -58,6 +58,33 @@ def test_compose_commands_are_scoped_to_one_exact_project(gate: ModuleType) -> N
     ]
 
 
+def test_packaged_commands_use_a_closed_environment_without_provider_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: ModuleType,
+) -> None:
+    monkeypatch.setenv("SPECPILOT_MAIN_API_KEY", "private-main-provider-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "private-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-anthropic-key")
+    monkeypatch.setenv("UNRELATED_HOST_VALUE", "must-not-cross-the-boundary")
+
+    probe = gate.run_command(
+        [
+            sys.executable,
+            "-c",
+            "import json,os; print(json.dumps(dict(os.environ),sort_keys=True))",
+        ]
+    )
+    child = json.loads(probe.stdout)
+
+    assert child["SPECPILOT_W5_API_PORT"] == str(gate.API_PORT)
+    assert child["NO_COLOR"] == "1"
+    assert "SPECPILOT_MAIN_API_KEY" not in child
+    assert "OPENAI_API_KEY" not in child
+    assert "ANTHROPIC_API_KEY" not in child
+    assert "UNRELATED_HOST_VALUE" not in child
+    assert set(child) <= gate.PERMITTED_SUBPROCESS_ENVIRONMENT
+
+
 def test_failure_path_always_requests_exact_project_volume_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     gate: ModuleType,
@@ -249,6 +276,14 @@ def test_packaged_sse_validator_rejects_noncontiguous_or_private_output(
         {"sequence": 4, "kind": "answer_outcome", "status": None},
         {"sequence": 5, "kind": "terminal", "status": "answered"},
     ]
+    raw = ": keep-alive\n\n" + "".join(
+        (
+            f"id: {event['sequence']}\n"
+            f"event: {event['kind']}\n"
+            f"data: {json.dumps(event)}\n\n"
+        )
+        for event in events
+    )
     gate.assert_scenario_events(
         scenario_id="l1_answered",
         expected_terminal="answered",
@@ -260,7 +295,7 @@ def test_packaged_sse_validator_rejects_noncontiguous_or_private_output(
             "terminal",
         },
         private_marker="private-marker",
-        raw_sse="\n".join(f"data: {json.dumps(event)}" for event in events),
+        raw_sse=raw,
     )
 
     broken = [dict(event) for event in events]
@@ -271,7 +306,11 @@ def test_packaged_sse_validator_rejects_noncontiguous_or_private_output(
             expected_terminal="answered",
             required_kinds={"terminal"},
             private_marker="private-marker",
-            raw_sse="\n".join(f"data: {json.dumps(event)}" for event in broken),
+            raw_sse="".join(
+                f"id: {event['sequence']}\nevent: {event['kind']}\n"
+                f"data: {json.dumps(event)}\n\n"
+                for event in broken
+            ),
         )
 
     leaked = "private-marker\n" + "\n".join(
@@ -284,6 +323,78 @@ def test_packaged_sse_validator_rejects_noncontiguous_or_private_output(
             required_kinds={"terminal"},
             private_marker="private-marker",
             raw_sse=leaked,
+        )
+
+
+def test_packaged_sse_validator_binds_frame_fields_and_terminal_cardinality(
+    gate: ModuleType,
+) -> None:
+    events = [
+        {"sequence": 1, "kind": "recovery_summary", "status": None},
+        {"sequence": 2, "kind": "terminal", "status": "answered"},
+    ]
+
+    def framed(
+        *,
+        id_override: str | None = None,
+        event_override: str | None = None,
+    ) -> str:
+        return "".join(
+            f"id: {id_override if index == 0 and id_override else event['sequence']}\n"
+            "event: "
+            f"{event_override if index == 0 and event_override else event['kind']}\n"
+            f"data: {json.dumps(event)}\n\n"
+            for index, event in enumerate(events)
+        )
+
+    gate.assert_scenario_events(
+        scenario_id="verifier_recovered",
+        expected_terminal="answered",
+        required_kinds={"recovery_summary", "terminal"},
+        private_marker="private-marker",
+        raw_sse=framed(),
+    )
+    with pytest.raises(AssertionError, match="id.*sequence"):
+        gate.assert_scenario_events(
+            scenario_id="verifier_recovered",
+            expected_terminal="answered",
+            required_kinds={"terminal"},
+            private_marker="private-marker",
+            raw_sse=framed(id_override="9"),
+        )
+    with pytest.raises(AssertionError, match="event.*kind"):
+        gate.assert_scenario_events(
+            scenario_id="verifier_recovered",
+            expected_terminal="answered",
+            required_kinds={"terminal"},
+            private_marker="private-marker",
+            raw_sse=framed(event_override="tool_finished"),
+        )
+
+    duplicate_terminal = framed() + (
+        'id: 3\nevent: terminal\ndata: '
+        '{"sequence":3,"kind":"terminal","status":"answered"}\n\n'
+    )
+    with pytest.raises(AssertionError, match="exactly one terminal"):
+        gate.assert_scenario_events(
+            scenario_id="verifier_recovered",
+            expected_terminal="answered",
+            required_kinds={"terminal"},
+            private_marker="private-marker",
+            raw_sse=duplicate_terminal,
+        )
+
+    without_recovery = (
+        'id: 1\nevent: terminal\ndata: '
+        '{"sequence":1,"kind":"terminal","status":"answered"}\n\n'
+    )
+    with pytest.raises(AssertionError, match="exactly one recovery"):
+        gate.assert_scenario_events(
+            scenario_id="verifier_recovered",
+            expected_terminal="answered",
+            required_kinds={"terminal"},
+            private_marker="private-marker",
+            raw_sse=without_recovery,
         )
 
 
@@ -329,3 +440,40 @@ def test_repeat_audit_requires_successful_reads_and_zero_mutations(
         )
     with pytest.raises(AssertionError, match="no Qdrant reads"):
         gate.assert_read_only_proxy_audit("")
+
+
+def test_repeat_audit_requires_collection_count_and_scroll_after_readiness(
+    gate: ModuleType,
+) -> None:
+    readiness = '{"audit":"read","method":"GET","path":"/"}'
+    replay = "\n".join(
+        (
+            '{"audit":"read","method":"GET","path":"/collections/x"}',
+            '{"audit":"read","method":"POST",'
+            '"path":"/collections/x/points/count"}',
+            '{"audit":"read","method":"POST",'
+            '"path":"/collections/x/points/scroll"}',
+        )
+    )
+
+    assert gate.assert_read_only_proxy_audit(
+        readiness + "\n" + replay,
+        after_records=1,
+        collection="x",
+    ) == 3
+    with pytest.raises(AssertionError, match="count"):
+        gate.assert_read_only_proxy_audit(
+            readiness + "\n" + replay.replace(
+                '{"audit":"read","method":"POST",'
+                '"path":"/collections/x/points/count"}\n',
+                "",
+            ),
+            after_records=1,
+            collection="x",
+        )
+    with pytest.raises(AssertionError, match="after readiness"):
+        gate.assert_read_only_proxy_audit(
+            replay,
+            after_records=3,
+            collection="x",
+        )

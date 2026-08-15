@@ -13,6 +13,7 @@ export class StreamProtocolError extends Error {
 
 export interface RunStreamOptions extends ClientOptions {
   afterSequence?: number;
+  afterFingerprint?: string;
 }
 
 interface ParserState {
@@ -23,6 +24,10 @@ interface ParserState {
   pendingLine: string;
   lastSequence: number;
   lastFingerprint: string | null;
+}
+
+export function eventFingerprint(event: RunEvent): string {
+  return JSON.stringify(event);
 }
 
 function resetFrame(state: ParserState): void {
@@ -55,7 +60,7 @@ function parseLine(state: ParserState, rawLine: string): RunEvent | null {
       throw new StreamProtocolError("invalid SSE event data");
     }
     if (event.kind !== state.event || event.sequence !== id) throw new StreamProtocolError("invalid SSE frame identity");
-    const fingerprint = `${state.event}\n${state.data}`;
+    const fingerprint = eventFingerprint(event);
     if (id < state.lastSequence) throw new StreamProtocolError("invalid SSE sequence decrease");
     if (id === state.lastSequence) {
       if (state.lastFingerprint !== fingerprint) throw new StreamProtocolError("invalid SSE sequence conflict");
@@ -166,7 +171,7 @@ export async function* streamRunEvents(
     data: null,
     pendingLine: "",
     lastSequence: afterSequence,
-    lastFingerprint: null,
+    lastFingerprint: options.afterFingerprint ?? null,
   };
   try {
     while (true) {

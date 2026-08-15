@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getRun, type RunEvent, type RunResultView, type StreamRunProjection, type TerminalStatus } from "./api";
-import { StreamProtocolError, streamRunEvents } from "./sse";
+import { eventFingerprint, StreamProtocolError, streamRunEvents } from "./sse";
 import type { ConnectionState, RunPollingOptions, RunPollingResult } from "./useRunPolling";
 
 const TERMINAL = new Set<TerminalStatus>([
@@ -65,6 +65,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
     let currentRun: RunResultView | null = null;
     let replayRun: RunResultView | null = null;
     let cursor = 0;
+    let cursorFingerprint: string | undefined;
     let retryIndex = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -109,11 +110,17 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
       const controller = new AbortController();
       streamController = controller;
       try {
-        for await (const event of streamRunEvents(runId, { token, afterSequence: cursor, signal: controller.signal })) {
+        for await (const event of streamRunEvents(runId, {
+          token,
+          afterSequence: cursor,
+          ...(cursorFingerprint === undefined ? {} : { afterFingerprint: cursorFingerprint }),
+          signal: controller.signal,
+        })) {
           const prior = terminalReplay ? replayRun : currentRun;
           if (!active || controller.signal.aborted || prior === null) return;
           const next = appendEvent(prior, event);
           cursor = event.sequence;
+          cursorFingerprint = eventFingerprint(event);
           retryIndex = 0;
           if (terminalReplay) {
             replayRun = next;
@@ -175,6 +182,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
         .then((run) => {
           if (!active || controller.signal.aborted) return;
           cursor = run.events.at(-1)?.sequence ?? 0;
+          cursorFingerprint = run.events.length === 0 ? undefined : eventFingerprint(run.events.at(-1)!);
           publish(run, TERMINAL.has(run.status as TerminalStatus) ? "connected" : streamUnavailable ? "stream_unavailable" : "connected");
           if (TERMINAL.has(run.status as TerminalStatus)) finishTerminal();
         })
@@ -216,6 +224,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
           currentRun = run;
           replayRun = { ...run, events: [] };
           cursor = 0;
+          cursorFingerprint = undefined;
           terminal = true;
           terminalReplay = true;
           publish(run, "connected");
@@ -224,6 +233,7 @@ export function useRunStream({ runId, token, deadlineMs }: RunPollingOptions): R
         }
         currentRun = run;
         cursor = run.events.at(-1)?.sequence ?? 0;
+        cursorFingerprint = run.events.length === 0 ? undefined : eventFingerprint(run.events.at(-1)!);
         publish(run, "connected");
         void connect();
       })

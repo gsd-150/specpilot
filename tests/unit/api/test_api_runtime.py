@@ -163,6 +163,19 @@ def test_response_cache_is_disabled_by_default_and_requires_explicit_pair(
     assert enabled.cache_ttl_seconds == 604800
 
 
+def test_response_cache_treats_compose_empty_pair_as_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid(monkeypatch)
+    monkeypatch.setenv("SPECPILOT_API_CACHE_DIR", "")
+    monkeypatch.setenv("SPECPILOT_API_CACHE_TTL_SECONDS", "")
+
+    config = load_runtime_config()
+
+    assert config.cache_directory is None
+    assert config.cache_ttl_seconds is None
+
+
 @pytest.mark.parametrize("ttl", ["0", "-1"])
 def test_response_cache_rejects_nonpositive_ttl(
     monkeypatch: pytest.MonkeyPatch, tmp_path, ttl: str

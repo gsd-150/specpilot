@@ -96,6 +96,8 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
         "SPECPILOT_API_PROMPT_HASH",
         "SPECPILOT_API_COMPLIANCE_PROMPT_HASH",
         "SPECPILOT_API_VERIFIER_PROMPT_HASH",
+        "SPECPILOT_API_CACHE_DIR",
+        "SPECPILOT_API_CACHE_TTL_SECONDS",
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
         "SPECPILOT_MCP_SOURCES_JSON",
         "SPECPILOT_MCP_READY_ID",
@@ -108,10 +110,22 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
 
     assert set(declarations) == expected
     assert declarations == {
-        name: ("SPECPILOT_API_PROFILE" if name == "SPECPILOT_MCP_MODE" else name)
+        name: (
+            f"{name}:-"
+            if name
+            in {"SPECPILOT_API_CACHE_DIR", "SPECPILOT_API_CACHE_TTL_SECONDS"}
+            else "SPECPILOT_API_PROFILE"
+            if name == "SPECPILOT_MCP_MODE"
+            else name
+        )
         for name in expected
     }
-    assert ":-" not in block
+    for name, interpolation in declarations.items():
+        if name not in {
+            "SPECPILOT_API_CACHE_DIR",
+            "SPECPILOT_API_CACHE_TTL_SECONDS",
+        }:
+            assert ":-" not in interpolation
 
 
 def test_api_and_mcp_share_three_explicit_read_only_artifact_mounts() -> None:
@@ -222,3 +236,19 @@ def test_base_and_real_api_have_egress_but_demo_override_removes_it() -> None:
 
     assert set(base_api["networks"]) == {"internal", "egress"}
     assert set(demo_api["networks"]) == {"internal", "demo"}
+
+
+def test_api_has_an_explicit_persistent_cache_mount_disabled_by_default() -> None:
+    base = _compose_config(COMPOSE)
+    api = base["services"]["api"]  # type: ignore[index]
+
+    assert api["environment"]["SPECPILOT_API_CACHE_DIR"] == ""  # type: ignore[index]
+    assert api["environment"]["SPECPILOT_API_CACHE_TTL_SECONDS"] == ""  # type: ignore[index]
+    cache_mounts = [
+        mount
+        for mount in api["volumes"]  # type: ignore[index]
+        if mount["target"] == "/run/specpilot/provider-cache"
+    ]
+    assert len(cache_mounts) == 1
+    assert cache_mounts[0]["type"] == "volume"
+    assert cache_mounts[0]["source"] == "provider-cache"

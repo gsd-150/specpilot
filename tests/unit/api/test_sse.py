@@ -12,6 +12,7 @@ import specpilot.api.sse as sse
 from specpilot.api.sse import (
     BoundedStreamingResponse,
     RunEventStreamConfig,
+    connection_deadline,
     encode_event,
     parse_last_event_id,
     stream_owned_events,
@@ -135,12 +136,14 @@ async def test_stream_replays_resumed_pages_without_prefetching_more_than_one(
             ),
         ]
     )
+    config = RunEventStreamConfig(page_size=2)
     stream = stream_owned_events(
         store,
         run_id,
         "owner-a",
         after_sequence=1,
-        config=RunEventStreamConfig(page_size=2),
+        config=config,
+        deadline=connection_deadline(config),
     )
 
     assert await anext(stream) == encode_event(_transition(2))
@@ -174,12 +177,14 @@ async def test_stream_stops_draining_a_page_after_slow_consumer_deadline(
             )
         ]
     )
+    config = RunEventStreamConfig(max_connection_seconds=60)
     stream = stream_owned_events(
         store,
         uuid4(),
         "owner-a",
         after_sequence=0,
-        config=RunEventStreamConfig(max_connection_seconds=60),
+        config=config,
+        deadline=connection_deadline(config),
     )
 
     assert await anext(stream) == encode_event(_transition(1))
@@ -202,6 +207,12 @@ async def test_stream_emits_exactly_one_comment_per_idle_heartbeat_interval(
     empty = RunEventPage(events=(), terminal=False, last_sequence=0)
     store = FakeStore([empty, empty, empty, empty, empty])
 
+    config = RunEventStreamConfig(
+        heartbeat_seconds=2,
+        poll_seconds=1,
+        max_connection_seconds=5,
+        page_size=1,
+    )
     frames = [
         frame
         async for frame in stream_owned_events(
@@ -209,12 +220,8 @@ async def test_stream_emits_exactly_one_comment_per_idle_heartbeat_interval(
             uuid4(),
             "owner-a",
             after_sequence=0,
-            config=RunEventStreamConfig(
-                heartbeat_seconds=2,
-                poll_seconds=1,
-                max_connection_seconds=5,
-                page_size=1,
-            ),
+            config=config,
+            deadline=connection_deadline(config),
         )
     ]
 
@@ -234,6 +241,7 @@ async def test_stream_terminal_page_closes_without_poll_or_heartbeat(
         [RunEventPage(events=(_terminal(1),), terminal=True, last_sequence=1)]
     )
 
+    config = RunEventStreamConfig()
     frames = [
         frame
         async for frame in stream_owned_events(
@@ -241,7 +249,8 @@ async def test_stream_terminal_page_closes_without_poll_or_heartbeat(
             uuid4(),
             "owner-a",
             after_sequence=0,
-            config=RunEventStreamConfig(),
+            config=config,
+            deadline=connection_deadline(config),
         )
     ]
 
@@ -269,12 +278,14 @@ async def test_stream_cancellation_releases_pending_read_without_mutating_run() 
                 self.cleaned.set()
 
     store = BlockingStore()
+    config = RunEventStreamConfig()
     stream: AsyncIterator[bytes] = stream_owned_events(
         store,
         uuid4(),
         "owner-a",
         after_sequence=0,
-        config=RunEventStreamConfig(),
+        config=config,
+        deadline=connection_deadline(config),
     )
     pending = asyncio.create_task(anext(stream))
     await store.entered.wait()
@@ -302,6 +313,7 @@ async def test_stream_deadline_cancels_a_stalled_owner_read() -> None:
                 self.cleaned.set()
 
     store = StalledStore()
+    config = RunEventStreamConfig(max_connection_seconds=0.01)
 
     async def collect() -> list[bytes]:
         return [
@@ -311,7 +323,8 @@ async def test_stream_deadline_cancels_a_stalled_owner_read() -> None:
                 uuid4(),
                 "owner-a",
                 after_sequence=0,
-                config=RunEventStreamConfig(max_connection_seconds=0.01),
+                config=config,
+                deadline=connection_deadline(config),
             )
         ]
 
@@ -331,6 +344,7 @@ async def test_stream_closes_silently_when_owner_store_fails(
     monkeypatch.setattr(sse, "_sleep", clock.sleep)
     store = FakeStore([RuntimeError("secret-postgres-host-and-query")])
 
+    config = RunEventStreamConfig()
     frames = [
         frame
         async for frame in stream_owned_events(
@@ -338,7 +352,8 @@ async def test_stream_closes_silently_when_owner_store_fails(
             uuid4(),
             "owner-a",
             after_sequence=0,
-            config=RunEventStreamConfig(),
+            config=config,
+            deadline=connection_deadline(config),
         )
     ]
 
@@ -379,9 +394,11 @@ async def test_bounded_response_sends_final_empty_body_after_idle_expiry() -> No
     async def send(message: dict[str, Any]) -> None:
         messages.append(message)
 
+    config = RunEventStreamConfig(max_connection_seconds=0.01)
     response = BoundedStreamingResponse(
         iterator,
-        max_connection_seconds=0.01,
+        deadline=connection_deadline(config),
+        finalize_seconds=config.finalize_seconds,
         media_type="text/event-stream",
     )
 
@@ -430,12 +447,15 @@ async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> No
             )
         ]
     )
+    config = RunEventStreamConfig(max_connection_seconds=0.05)
+    deadline = connection_deadline(config)
     source = stream_owned_events(
         store,
         run_id,
         "owner-a",
         after_sequence=0,
-        config=RunEventStreamConfig(),
+        config=config,
+        deadline=deadline,
     )
     iterator = ClosingIterator(source)
     body_attempts = 0
@@ -451,10 +471,11 @@ async def test_bounded_response_cancels_stalled_send_and_closes_iterator() -> No
         finally:
             body_cancellations += 1
 
-    max_connection_seconds = 0.05
+    max_connection_seconds = config.max_connection_seconds
     response = BoundedStreamingResponse(
         iterator,
-        max_connection_seconds=max_connection_seconds,
+        deadline=deadline,
+        finalize_seconds=config.finalize_seconds,
         media_type="text/event-stream",
     )
 

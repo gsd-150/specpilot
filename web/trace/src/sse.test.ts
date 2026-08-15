@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { RunEvent } from "./api";
-import { MAX_SSE_FRAME_BYTES, streamRunEvents } from "./sse";
+import { eventFingerprint, MAX_SSE_FRAME_BYTES, streamRunEvents } from "./sse";
 
 const RUN_ID = "123e4567-e89b-42d3-a456-426614174000";
 
@@ -54,6 +54,21 @@ async function collect(fetcher: typeof fetch, afterSequence = 0, token?: string)
   return events;
 }
 
+async function collectResumed(
+  fetcher: typeof fetch,
+  event: RunEvent,
+): Promise<RunEvent[]> {
+  const events: RunEvent[] = [];
+  for await (const received of streamRunEvents(RUN_ID, {
+    fetcher,
+    afterSequence: event.sequence,
+    afterFingerprint: eventFingerprint(event),
+  })) {
+    events.push(received);
+  }
+  return events;
+}
+
 describe("streamRunEvents", () => {
   it("decodes UTF-8 and CRLF split across chunks and ignores comments", async () => {
     const text = `: 雪\r\n${frame(transition(1), "\r\n")}`;
@@ -74,6 +89,23 @@ describe("streamRunEvents", () => {
     const fetcher = vi.fn().mockResolvedValue(responseFromChunks(encodedChunks(text, [3, 29, 91])));
 
     await expect(collect(fetcher)).resolves.toEqual([transition(1), transition(2)]);
+  });
+
+  it("suppresses only the identical replayed cursor across a reconnect", async () => {
+    const accepted = transition(1);
+    const fetcher = vi.fn().mockResolvedValue(responseFromChunks(encodedChunks(
+      `${frame(accepted)}${frame(transition(2))}`,
+    )));
+
+    await expect(collectResumed(fetcher, accepted)).resolves.toEqual([transition(2)]);
+  });
+
+  it("rejects a conflicting replayed cursor across a reconnect", async () => {
+    const accepted = transition(1);
+    const conflict = { ...accepted, previous_status: null };
+    const fetcher = vi.fn().mockResolvedValue(responseFromChunks(encodedChunks(frame(conflict))));
+
+    await expect(collectResumed(fetcher, accepted)).rejects.toThrow("invalid SSE sequence conflict");
   });
 
   it.each(["+1", "01", " 1", "1 ", "-1", "1.0", "10001", ""])(

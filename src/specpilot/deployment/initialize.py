@@ -56,6 +56,11 @@ from specpilot.corpus.freezing import (
 from specpilot.corpus.indexable import IndexTextPolicy
 from specpilot.corpus.walk import document_identity
 from specpilot.embedding.throughput import PIPELINE_VERSION
+from specpilot.ingestion._secure_fs import (
+    directory_open_flags,
+    open_directory_path,
+    revalidate_directory_path,
+)
 from specpilot.ingestion.rfc import RfcByteSnapshot, VerifiedRfc, verify_rfc_snapshot
 from specpilot.manifests._secure_records import SecureRecordDirectory
 from specpilot.manifests.corpus_store import CorpusManifestStore
@@ -213,14 +218,66 @@ def _read_bounded(
     code: str,
     private: bool = False,
 ) -> bytes:
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if not no_follow:
-        _refuse(code)
+    parent_descriptor: int | None = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | no_follow)
-    except OSError:
+        parent_descriptor = open_directory_path(path.parent, create=False)
+        revalidate_directory_path(path.parent, parent_descriptor)
+        data = _read_bounded_at(
+            parent_descriptor,
+            path.name,
+            max_bytes=max_bytes,
+            code=code,
+            private=private,
+        )
+        revalidate_directory_path(path.parent, parent_descriptor)
+        return data
+    except InitializationRefusal:
+        raise
+    except (OSError, RuntimeError, ValueError):
         _refuse(code)
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+
+
+def _file_state(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_bounded_at(
+    directory_descriptor: int,
+    name: str,
+    *,
+    max_bytes: int,
+    code: str,
+    private: bool = False,
+) -> bytes:
+    descriptor: int | None = None
     try:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        nonblocking = getattr(os, "O_NONBLOCK", 0)
+        if (
+            not no_follow
+            or not nonblocking
+            or not name
+            or name != Path(name).name
+            or name in {".", ".."}
+            or max_bytes < 0
+        ):
+            _refuse(code)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | no_follow | nonblocking,
+            dir_fd=directory_descriptor,
+        )
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
@@ -244,24 +301,18 @@ def _read_bounded(
             remaining -= len(chunk)
         data = b"".join(chunks)
         after = os.fstat(descriptor)
-        stable = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_nlink,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        ) == (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_nlink,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
+        named = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
         )
-        if len(data) > max_bytes or len(data) != before.st_size or not stable:
+        if (
+            len(data) > max_bytes
+            or len(data) != before.st_size
+            or _file_state(before) != _file_state(after)
+            or _file_state(after) != _file_state(named)
+            or not stat.S_ISREG(named.st_mode)
+        ):
             _refuse(code)
         return data
     except InitializationRefusal:
@@ -269,7 +320,8 @@ def _read_bounded(
     except OSError:
         _refuse(code)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _verified_rfc_bytes(data: bytes) -> VerifiedRfc:
@@ -666,22 +718,161 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
     return result
 
 
-def _private_directory(path: Path, *, code: str) -> None:
-    try:
-        status = path.stat(follow_symlinks=False)
-    except OSError:
-        _refuse(code)
-    if not stat.S_ISDIR(status.st_mode) or stat.S_IMODE(status.st_mode) != 0o700:
-        _refuse(code)
+def _private_directory_status(value: os.stat_result) -> bool:
+    return stat.S_ISDIR(value.st_mode) and stat.S_IMODE(value.st_mode) == 0o700
 
 
-def _read_private_file(path: Path, *, max_bytes: int, code: str) -> bytes:
-    return _read_bounded(
-        path,
-        max_bytes=max_bytes,
-        code=code,
-        private=True,
+@dataclass(frozen=True, slots=True)
+class _PinnedRealDirectories:
+    input_root: Path
+    output_root: Path
+    input_fd: int
+    source_manifest_fd: int
+    sources_fd: int
+    model_fd: int
+    output_fd: int
+    input_states: tuple[tuple[str, tuple[int, ...]], ...]
+
+    def revalidate(self) -> None:
+        """Require every input name to retain its originally pinned inode."""
+        try:
+            revalidate_directory_path(self.input_root, self.input_fd)
+            revalidate_directory_path(self.output_root, self.output_fd)
+            input_status = os.fstat(self.input_fd)
+            if (
+                not _private_directory_status(input_status)
+                or _file_state(input_status) != dict(self.input_states)["."]
+            ):
+                raise OSError("real input root changed")
+            for name, descriptor in (
+                ("source-manifests", self.source_manifest_fd),
+                ("sources", self.sources_fd),
+                ("model", self.model_fd),
+            ):
+                opened = os.fstat(descriptor)
+                named = os.stat(
+                    name,
+                    dir_fd=self.input_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not _private_directory_status(opened)
+                    or _file_state(opened) != dict(self.input_states)[name]
+                    or _file_state(named) != _file_state(opened)
+                ):
+                    raise OSError("real input child changed")
+            if not _private_directory_status(os.fstat(self.output_fd)):
+                raise OSError("real output root changed")
+        except (OSError, RuntimeError, ValueError):
+            _refuse("real_corpus_unavailable")
+
+
+def _open_private_child(parent_descriptor: int, name: str) -> int:
+    descriptor = os.open(
+        name,
+        directory_open_flags(),
+        dir_fd=parent_descriptor,
     )
+    opened = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if (
+        not _private_directory_status(opened)
+        or _file_state(opened) != _file_state(named)
+    ):
+        os.close(descriptor)
+        raise OSError("private child identity mismatch")
+    return descriptor
+
+
+@contextmanager
+def _pinned_real_directories(
+    input_root: Path, output_root: Path
+) -> Iterator[_PinnedRealDirectories]:
+    descriptors: list[int] = []
+    try:
+        input_fd = open_directory_path(input_root, create=False)
+        descriptors.append(input_fd)
+        if not _private_directory_status(os.fstat(input_fd)):
+            raise OSError("real input root is not private")
+        children: dict[str, int] = {}
+        for name in ("source-manifests", "sources", "model"):
+            child = _open_private_child(input_fd, name)
+            descriptors.append(child)
+            children[name] = child
+        output_fd = open_directory_path(output_root, create=False)
+        descriptors.append(output_fd)
+        if not _private_directory_status(os.fstat(output_fd)):
+            raise OSError("real output root is not private")
+        states = ((".", _file_state(os.fstat(input_fd))),) + tuple(
+            (name, _file_state(os.fstat(children[name])))
+            for name in ("source-manifests", "sources", "model")
+        )
+        pinned = _PinnedRealDirectories(
+            input_root=input_root,
+            output_root=output_root,
+            input_fd=input_fd,
+            source_manifest_fd=children["source-manifests"],
+            sources_fd=children["sources"],
+            model_fd=children["model"],
+            output_fd=output_fd,
+            input_states=states,
+        )
+        pinned.revalidate()
+        yield pinned
+    except InitializationRefusal:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        _refuse("real_corpus_unavailable")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+@contextmanager
+def _staged_source_manifest_store(
+    pinned: _PinnedRealDirectories,
+) -> Iterator[tuple[ManifestStore, tuple[str, ...]]]:
+    """Capture descriptor-read manifests before any path-based consumer runs."""
+    source_path = pinned.input_root / "source-manifests"
+    try:
+        with SecureRecordDirectory.from_fd(
+            source_path,
+            pinned.source_manifest_fd,
+        ) as records:
+            source_ids = records.content_ids()
+            captured = tuple(
+                (
+                    source_id,
+                    records.read(
+                        f"{source_id}.json",
+                        max_bytes=256 * 1024,
+                    ),
+                )
+                for source_id in source_ids
+            )
+        pinned.revalidate()
+    except (OSError, RuntimeError, ValueError):
+        _refuse("real_corpus_unavailable")
+
+    with TemporaryDirectory(prefix="specpilot-real-manifests-") as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        root_descriptor = open_directory_path(root, create=False)
+        try:
+            for source_id, data in captured:
+                descriptor = os.open(
+                    f"{source_id}.json",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=root_descriptor,
+                )
+                try:
+                    _write_all(descriptor, data)
+                finally:
+                    os.close(descriptor)
+        finally:
+            os.close(root_descriptor)
+        yield ManifestStore(root), source_ids
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -779,16 +970,15 @@ def _observe_real_collection(
 def _initialize_new_real(
     request: RealInitializationRequest,
     *,
-    source_dir: Path,
+    pinned: _PinnedRealDirectories,
+    source_store: ManifestStore,
+    stored_source_ids: tuple[str, ...],
     corpus_dir: Path,
-    sources_dir: Path,
     model_dir: Path,
 ) -> CorpusManifest:
-    with SecureRecordDirectory.open(source_dir, create=False) as records:
-        stored_source_ids = records.content_ids()
+    pinned.revalidate()
     if not stored_source_ids:
         _refuse("real_corpus_unavailable")
-    source_store = ManifestStore(source_dir)
     stored_sources = tuple(
         source_store.read_source(source_id) for source_id in stored_source_ids
     )
@@ -815,11 +1005,12 @@ def _initialize_new_real(
         if not isinstance(source_manifest, RfcSourceManifest):
             _refuse("real_corpus_unavailable")
         source_id = source_manifest.manifest_id
-        source_path = sources_dir / f"{source_id}.xml"
-        source_bytes = _read_private_file(
-            source_path,
+        source_bytes = _read_bounded_at(
+            pinned.sources_fd,
+            f"{source_id}.xml",
             max_bytes=RfcLimits().max_bytes,
             code="real_corpus_unavailable",
+            private=True,
         )
         if hashlib.sha256(source_bytes).hexdigest() != source_manifest.xml_sha256:
             _refuse("corpus_source_mismatch")
@@ -841,11 +1032,14 @@ def _initialize_new_real(
         RfcLimits(),
         IndexTextPolicy(),
     )
-    dense_bytes = _read_private_file(
-        request.corpus_dir / "dense-points.jsonl",
+    dense_bytes = _read_bounded_at(
+        pinned.input_fd,
+        "dense-points.jsonl",
         max_bytes=_MAX_DENSE_POINTS_BYTES,
         code="real_dense_points_invalid",
+        private=True,
     )
+    pinned.revalidate()
     points, inventory_root = _decode_dense_points(
         dense_bytes,
         corpus,
@@ -887,6 +1081,7 @@ def _initialize_new_real(
         )
         assert created_at is not None
         with _staged_source_bindings(tuple(source_snapshots)) as sources:
+            pinned.revalidate()
             result = freeze_corpus(
                 FreezeCorpusRequest(
                     sources=sources,
@@ -899,6 +1094,7 @@ def _initialize_new_real(
                 source_store=source_store,
                 corpus_store=corpus_store,
             )
+            pinned.revalidate()
         frozen = True
         manifest = result.manifest
     except BaseException:
@@ -927,78 +1123,107 @@ def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
         _refuse("real_corpus_dir_not_absolute")
     if not request.corpus_manifest_dir.is_absolute():
         _refuse("real_corpus_manifest_dir_not_absolute")
-    _private_directory(request.corpus_dir, code="real_corpus_unavailable")
-    _private_directory(
-        request.corpus_manifest_dir,
-        code="real_corpus_unavailable",
-    )
-    input_root = request.corpus_dir.resolve(strict=True)
-    output_root = request.corpus_manifest_dir.resolve(strict=True)
-    ready_root = request.ready_dir.resolve(strict=False)
-    if output_root.is_relative_to(input_root) or ready_root.is_relative_to(input_root):
-        _refuse("real_corpus_output_overlaps_input")
-    source_dir = request.corpus_dir / "source-manifests"
-    corpus_dir = request.corpus_manifest_dir
-    sources_dir = request.corpus_dir / "sources"
-    model_dir = request.corpus_dir / "model"
-    for directory in (source_dir, sources_dir, model_dir):
-        _private_directory(directory, code="real_corpus_unavailable")
     try:
-        with SecureRecordDirectory.open(corpus_dir, create=False) as records:
-            corpus_ids = records.content_ids(allowed_non_records=frozenset({".locks"}))
-        if not corpus_ids:
-            manifest = _initialize_new_real(
-                request,
-                source_dir=source_dir,
-                corpus_dir=corpus_dir,
-                sources_dir=sources_dir,
-                model_dir=model_dir,
-            )
-        else:
-            corpus_store = CorpusManifestStore(corpus_dir)
-            stored = tuple(corpus_store.read(corpus_id) for corpus_id in corpus_ids)
-            predecessor_ids = {
-                item.predecessor_manifest_id
-                for item in stored
-                if item.predecessor_manifest_id is not None
-            }
-            heads = tuple(
-                item for item in stored if item.manifest_id not in predecessor_ids
-            )
-            if len(heads) != 1:
-                _refuse("real_corpus_not_frozen")
-            manifest = heads[0]
-        source_snapshots = tuple(
-            (
-                manifest_id,
-                _read_private_file(
-                    sources_dir / f"{manifest_id}.xml",
-                    max_bytes=RfcLimits().max_bytes,
-                    code="real_corpus_unavailable",
-                ),
-            )
-            for manifest_id in manifest.source_manifest_ids
-        )
-        with _staged_source_bindings(source_snapshots) as bindings:
-            verified = verify_corpus(
-                VerifyCorpusRequest(
-                    manifest_id=manifest.manifest_id,
-                    sources=bindings,
-                    model_dir=model_dir,
-                    qdrant_url=request.qdrant_url,
-                ),
-                source_store=ManifestStore(source_dir),
-                corpus_store=CorpusManifestStore(corpus_dir),
-            )
-            verified.close()
+        # Preserve the stable overlap refusal before validating the input-tree
+        # inventory. This check has no side effects; the same identities are
+        # checked again after the root and output descriptors are pinned.
+        initial_input_root = request.corpus_dir.resolve(strict=True)
+        initial_output_root = request.corpus_manifest_dir.resolve(strict=True)
+        initial_ready_root = request.ready_dir.resolve(strict=False)
+        if initial_output_root.is_relative_to(
+            initial_input_root
+        ) or initial_ready_root.is_relative_to(initial_input_root):
+            _refuse("real_corpus_output_overlaps_input")
+        with _pinned_real_directories(
+            request.corpus_dir,
+            request.corpus_manifest_dir,
+        ) as pinned:
+            input_root = request.corpus_dir.resolve(strict=True)
+            output_root = request.corpus_manifest_dir.resolve(strict=True)
+            ready_root = request.ready_dir.resolve(strict=False)
+            pinned.revalidate()
+            if output_root.is_relative_to(
+                input_root
+            ) or ready_root.is_relative_to(input_root):
+                _refuse("real_corpus_output_overlaps_input")
+            corpus_dir = request.corpus_manifest_dir
+            model_dir = request.corpus_dir / "model"
+            with _staged_source_manifest_store(pinned) as (
+                source_store,
+                stored_source_ids,
+            ):
+                with SecureRecordDirectory.from_fd(
+                    corpus_dir,
+                    pinned.output_fd,
+                ) as records:
+                    corpus_ids = records.content_ids(
+                        allowed_non_records=frozenset({".locks"})
+                    )
+                pinned.revalidate()
+                if not corpus_ids:
+                    manifest = _initialize_new_real(
+                        request,
+                        pinned=pinned,
+                        source_store=source_store,
+                        stored_source_ids=stored_source_ids,
+                        corpus_dir=corpus_dir,
+                        model_dir=model_dir,
+                    )
+                else:
+                    corpus_store = CorpusManifestStore(corpus_dir)
+                    stored = tuple(
+                        corpus_store.read(corpus_id) for corpus_id in corpus_ids
+                    )
+                    pinned.revalidate()
+                    predecessor_ids = {
+                        item.predecessor_manifest_id
+                        for item in stored
+                        if item.predecessor_manifest_id is not None
+                    }
+                    heads = tuple(
+                        item
+                        for item in stored
+                        if item.manifest_id not in predecessor_ids
+                    )
+                    if len(heads) != 1:
+                        _refuse("real_corpus_not_frozen")
+                    manifest = heads[0]
+                source_snapshots = tuple(
+                    (
+                        manifest_id,
+                        _read_bounded_at(
+                            pinned.sources_fd,
+                            f"{manifest_id}.xml",
+                            max_bytes=RfcLimits().max_bytes,
+                            code="real_corpus_unavailable",
+                            private=True,
+                        ),
+                    )
+                    for manifest_id in manifest.source_manifest_ids
+                )
+                pinned.revalidate()
+                with _staged_source_bindings(source_snapshots) as bindings:
+                    verified = verify_corpus(
+                        VerifyCorpusRequest(
+                            manifest_id=manifest.manifest_id,
+                            sources=bindings,
+                            model_dir=model_dir,
+                            qdrant_url=request.qdrant_url,
+                        ),
+                        source_store=source_store,
+                        corpus_store=CorpusManifestStore(corpus_dir),
+                    )
+                    verified.close()
+                pinned.revalidate()
+                marker = _marker_for(manifest, "real")
+                try:
+                    return ReadyMarkerStore(request.ready_dir).publish(marker)
+                except (OSError, ValueError):
+                    _refuse("ready_marker_mismatch")
     except InitializationRefusal:
         raise
     except CorpusManifestRefusal as error:
         _refuse(error.code)
     except (OSError, ValueError, RuntimeError):
         _refuse("real_corpus_unavailable")
-    marker = _marker_for(manifest, "real")
-    try:
-        return ReadyMarkerStore(request.ready_dir).publish(marker)
-    except (OSError, ValueError):
-        _refuse("ready_marker_mismatch")
+    raise AssertionError("unreachable")

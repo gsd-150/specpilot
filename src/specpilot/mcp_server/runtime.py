@@ -67,6 +67,9 @@ class RuntimeConfig(BaseModel):
     ready_dir: Path | None = None
     ready_id: Sha256 | None = None
     mode: Literal["fixture", "real"] | None = None
+    # This cannot be loaded from the process environment. It exists only for
+    # isolated unit construction that does not model a deployable service.
+    allow_missing_ready_for_tests: bool = False
     sources: Annotated[tuple[_RuntimeSource, ...], Field(min_length=1, max_length=12)]
     allowed_hosts: Annotated[tuple[_ExactIdentity, ...], Field(min_length=1)] = (
         LOOPBACK_HOSTS
@@ -101,16 +104,14 @@ class RuntimeConfig(BaseModel):
         deployed = self.corpus_manifest_dir == Path("/run/specpilot/corpus") and (
             self.source_manifest_dir == Path("/run/specpilot/manifests")
         )
-        if (self.ready_dir is None) != (self.ready_id is None):
-            raise ValueError(
-                "ready marker path and identity must be configured together"
-            )
-        if self.ready_id is not None and self.mode is None:
-            raise ValueError("ready marker requires an exact runtime mode")
-        if deployed and (
-            self.ready_dir != Path("/run/specpilot/ready") or self.ready_id is None
-        ):
-            raise ValueError("deployed runtime requires an exact ready marker")
+        ready_values = (self.ready_dir, self.ready_id, self.mode)
+        if self.allow_missing_ready_for_tests:
+            if any(value is not None for value in ready_values):
+                raise ValueError("test-only markerless runtime must omit ready values")
+        elif any(value is None for value in ready_values):
+            raise ValueError("production runtime requires an exact ready marker")
+        if deployed and self.ready_dir != Path("/run/specpilot/ready"):
+            raise ValueError("deployed runtime requires the fixed ready marker path")
         if deployed:
             root = _DEPLOYED_SOURCE_ROOT.resolve()
             for source in self.sources:
@@ -180,9 +181,10 @@ def load_runtime_services(config: RuntimeConfig) -> McpToolServices:
         config.corpus_manifest_id
     )
     source_ids = tuple(source.manifest_id for source in config.sources)
-    if config.ready_dir is not None and config.ready_id is not None:
-        if config.mode is None:
-            raise ValueError("ready marker requires an exact runtime mode")
+    if not config.allow_missing_ready_for_tests:
+        assert config.ready_dir is not None
+        assert config.ready_id is not None
+        assert config.mode is not None
         require_ready_corpus(
             ready_dir=config.ready_dir,
             ready_id=config.ready_id,

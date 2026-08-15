@@ -40,8 +40,9 @@ def _candidate_fields() -> dict[str, object]:
         "l2_locked_count": 12,
         "deep_review_count": 12,
         "pooling_count": 60,
-        "l2_adv_dev_count": 1,
-        "l2_adv_locked_count": 1,
+        "l2_adv_dev_count": 6,
+        "l2_adv_locked_count": 10,
+        "l2_adv_registration_sha256": "f" * 64,
         "l2_adv_overlap_report_sha256": HASHES["overlap"],
         "scoring_route_id": "dev-calibrated-v1",
         "dev_scoring_evidence_sha256": HASHES["evidence"],
@@ -56,6 +57,27 @@ def _rewrite(path: Path, update: dict[str, object]) -> None:
     body = json.loads(path.read_text(encoding="utf-8"))
     body.update(update)
     path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _advanced_registration(
+    *, dev_count: int = 6, locked_count: int = 10
+) -> dict[str, object]:
+    return {
+        "schema_version": "l2-adv-registration/v1",
+        "dev": {
+            "item_ids": [f"adv-dev-{index}" for index in range(1, dev_count + 1)],
+            "families": [f"family-dev-{index}" for index in range(1, dev_count + 1)],
+        },
+        "locked": {
+            "item_ids": [
+                f"adv-locked-{index}" for index in range(1, locked_count + 1)
+            ],
+            "families": [
+                f"family-locked-{index}" for index in range(1, locked_count + 1)
+            ],
+        },
+        "overlap_report_sha256": HASHES["overlap"],
+    }
 
 
 def _swap_name_after_open(
@@ -109,6 +131,14 @@ def test_contract_recursively_rejects_prose_bearing_keys(forbidden: str) -> None
     fields["extensions"] = {"safe": [{forbidden: "must never be stored"}]}
 
     with pytest.raises(ValidationError, match="forbidden evaluation key"):
+        EvaluationRunSpecCandidate.model_validate(fields)
+
+
+def test_candidate_contract_rejects_even_opaque_extension_payloads() -> None:
+    fields = _candidate_fields()
+    fields["extensions"] = {"payload": "locked output bytes are not extensible"}
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         EvaluationRunSpecCandidate.model_validate(fields)
 
 
@@ -177,12 +207,22 @@ def test_candidate_refuses_incomplete_aggregate_status_without_writing(
     [
         (
             "locked",
-            {"item_ids": ["adv-dev-1"], "families": ["other"]},
+            {
+                "item_ids": ["adv-dev-1"]
+                + [f"adv-locked-{index}" for index in range(2, 11)],
+                "families": [
+                    f"family-locked-{index}" for index in range(1, 11)
+                ],
+            },
             "l2_adv_id_overlap",
         ),
         (
             "locked",
-            {"item_ids": ["other"], "families": ["family-dev"]},
+            {
+                "item_ids": [f"adv-locked-{index}" for index in range(1, 11)],
+                "families": ["family-dev-1"]
+                + [f"family-locked-{index}" for index in range(2, 11)],
+            },
             "l2_adv_family_overlap",
         ),
     ],
@@ -198,6 +238,69 @@ def test_candidate_refuses_overlapping_l2_advanced_sets(
 
     assert captured.value.code == code
     assert not paths["candidate_dir"].exists()
+
+
+@pytest.mark.parametrize(("dev_count", "locked_count"), [(1, 1), (5, 10), (6, 9)])
+def test_candidate_refuses_unregistered_l2_advanced_cardinality(
+    tmp_path: Path, dev_count: int, locked_count: int
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    paths["l2_adv_status"].write_text(
+        json.dumps(
+            _advanced_registration(
+                dev_count=dev_count, locked_count=locked_count
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "l2_adv_cardinality_mismatch"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_refuses_unpaired_l2_advanced_item_and_family_identities(
+    tmp_path: Path,
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    registration = _advanced_registration()
+    assert isinstance(registration["dev"], dict)
+    registration["dev"]["families"] = registration["dev"]["families"][:-1]
+    paths["l2_adv_status"].write_text(
+        json.dumps(registration), encoding="utf-8"
+    )
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "invalid_l2_adv_status"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_binds_exact_registered_l2_advanced_identities(
+    tmp_path: Path,
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    registration = _advanced_registration()
+    canonical = json.dumps(
+        registration,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    paths["l2_adv_status"].write_bytes(canonical)
+
+    report = build_candidate(_inputs(paths))
+
+    candidate = json.loads(report.artifact_path.read_text(encoding="utf-8"))
+    assert candidate["l2_adv_dev_count"] == 6
+    assert candidate["l2_adv_locked_count"] == 10
+    assert candidate["l2_adv_registration_sha256"] == hashlib.sha256(
+        canonical
+    ).hexdigest()
 
 
 def test_candidate_refuses_missing_identity_and_dev_scoring_evidence(
@@ -304,8 +407,8 @@ def test_candidate_is_atomic_content_addressed_and_reports_counts_only(
         "l2": 20,
         "deep_review": 12,
         "pooling": 60,
-        "l2_adv_dev": 1,
-        "l2_adv_locked": 1,
+        "l2_adv_dev": 6,
+        "l2_adv_locked": 10,
     }
     assert list(paths["candidate_dir"].iterdir()) == [report.artifact_path]
     assert (

@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RunEvent, RunStatus, RunView } from "./api";
-import { StreamProtocolError, streamRunEvents } from "./sse";
+import { eventFingerprint, StreamProtocolError, streamRunEvents } from "./sse";
 import { useRunStream } from "./useRunStream";
 
 vi.mock("./sse", async (importOriginal) => ({
@@ -125,6 +125,7 @@ describe("useRunStream", () => {
 
     await act(async () => vi.advanceTimersByTimeAsync(250));
     expect(mockedStream.mock.calls[1]![1]!.afterSequence).toBe(2);
+    expect(mockedStream.mock.calls[1]![1]!.afterFingerprint).toBe(eventFingerprint(transition(2)));
   });
 
   it("stops permanently after a terminal stream event", async () => {

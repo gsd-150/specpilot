@@ -56,6 +56,10 @@ class RunEventStreamConfig:
         ):
             raise ValueError("invalid_stream_config")
 
+    @property
+    def finalize_seconds(self) -> float:
+        return min(self.max_connection_seconds / 2, _FINALIZE_MAX_SECONDS)
+
 
 class BoundedStreamingResponse(StreamingResponse):
     """Streaming response whose deadline includes iterator and ASGI send waits."""
@@ -64,17 +68,23 @@ class BoundedStreamingResponse(StreamingResponse):
         self,
         content: AsyncIterable[bytes],
         *,
-        max_connection_seconds: float,
+        deadline: float,
+        finalize_seconds: float,
         status_code: int = 200,
         headers: Mapping[str, str] | None = None,
         media_type: str | None = None,
         background: BackgroundTask | None = None,
     ) -> None:
         if (
-            isinstance(max_connection_seconds, bool)
-            or not isinstance(max_connection_seconds, (int, float))
-            or not math.isfinite(max_connection_seconds)
-            or max_connection_seconds <= 0
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+            or deadline <= _monotonic()
+            or isinstance(finalize_seconds, bool)
+            or not isinstance(finalize_seconds, (int, float))
+            or not math.isfinite(finalize_seconds)
+            or finalize_seconds <= 0
+            or finalize_seconds >= deadline - _monotonic()
         ):
             raise ValueError("invalid_stream_config")
         super().__init__(
@@ -84,15 +94,12 @@ class BoundedStreamingResponse(StreamingResponse):
             media_type=media_type,
             background=background,
         )
-        self._max_connection_seconds = max_connection_seconds
-        self._finalize_seconds = min(
-            max_connection_seconds / 2, _FINALIZE_MAX_SECONDS
-        )
+        self._deadline = deadline
+        self._finalize_seconds = finalize_seconds
 
     async def stream_response(self, send: Send) -> None:
         """Close normally on expiry, including when client send backpressure stalls."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._max_connection_seconds
+        deadline = self._deadline
         stream_deadline = deadline - self._finalize_seconds
         iterator = self.body_iterator.__aiter__()
         started = False
@@ -144,7 +151,7 @@ class BoundedStreamingResponse(StreamingResponse):
 async def _await_before[T](
     deadline: float, operation: Callable[[], Awaitable[T]]
 ) -> T:
-    remaining = deadline - asyncio.get_running_loop().time()
+    remaining = deadline - _monotonic()
     if remaining <= 0:
         raise TimeoutError
     async with asyncio.timeout(remaining):
@@ -197,10 +204,10 @@ async def stream_owned_events(
     *,
     after_sequence: int,
     config: RunEventStreamConfig,
+    deadline: float,
 ) -> AsyncIterator[bytes]:
     """Poll one owner-bound page at a time until terminal, failure, or deadline."""
     started_at = _monotonic()
-    deadline = started_at + config.max_connection_seconds
     heartbeat_at = started_at + config.heartbeat_seconds
     cursor = after_sequence
 
@@ -253,7 +260,19 @@ async def stream_owned_events(
 __all__ = [
     "BoundedStreamingResponse",
     "RunEventStreamConfig",
+    "connection_deadline",
     "encode_event",
     "parse_last_event_id",
+    "remaining_connection_seconds",
     "stream_owned_events",
 ]
+
+
+def connection_deadline(config: RunEventStreamConfig) -> float:
+    """Establish the one absolute lifetime shared by preflight and body work."""
+    return _monotonic() + config.max_connection_seconds
+
+
+def remaining_connection_seconds(deadline: float) -> float:
+    """Return the time still available on an established connection lifetime."""
+    return deadline - _monotonic()

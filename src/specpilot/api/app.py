@@ -27,7 +27,9 @@ from specpilot.api.dependencies import ApiRuntime
 from specpilot.api.sse import (
     BoundedStreamingResponse,
     RunEventStreamConfig,
+    connection_deadline,
     parse_last_event_id,
+    remaining_connection_seconds,
     stream_owned_events,
 )
 from specpilot.api.static import install_trace_routes
@@ -62,7 +64,11 @@ class ApiLifecycleUnavailable(RuntimeError):
         super().__init__(_LIFECYCLE_UNAVAILABLE)
 
 
-def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
+def create_app(
+    *,
+    runtime: ApiRuntime | None = None,
+    stream_config: RunEventStreamConfig | None = None,
+) -> FastAPI:
     if runtime is None:
         return _unconfigured_app()
 
@@ -70,7 +76,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     lifespan_users = 0
     lifecycle_state = "new"
     started_hooks = 0
-    stream_config = RunEventStreamConfig()
+    stream_config = stream_config or RunEventStreamConfig()
 
     async def close_worker() -> None:
         nonlocal lifecycle_state, started_hooks
@@ -365,6 +371,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
         session: SessionClaims = Depends(dependency=claims),  # noqa: B008
     ) -> BoundedStreamingResponse:
+        deadline = connection_deadline(stream_config)
         try:
             cursor = parse_last_event_id(last_event_id)
         except ValueError:
@@ -372,12 +379,16 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 status_code=422, detail="invalid_last_event_id"
             ) from None
         try:
-            page = await runtime.store.read_events_owned(
-                run_id,
-                session.session_id,
-                after_sequence=cursor,
-                limit=stream_config.page_size,
-            )
+            remaining = remaining_connection_seconds(deadline)
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                page = await runtime.store.read_events_owned(
+                    run_id,
+                    session.session_id,
+                    after_sequence=cursor,
+                    limit=stream_config.page_size,
+                )
         except RunStoreValidationError:
             raise HTTPException(
                 status_code=422, detail="invalid_last_event_id"
@@ -386,6 +397,9 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
             raise _service_unavailable() from None
         if page is None:
             raise HTTPException(status_code=404, detail="run_not_found")
+        finalize_seconds = stream_config.finalize_seconds
+        if remaining_connection_seconds(deadline) <= finalize_seconds:
+            raise _service_unavailable()
         return BoundedStreamingResponse(
             stream_owned_events(
                 runtime.store,
@@ -393,8 +407,10 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 session.session_id,
                 after_sequence=cursor,
                 config=stream_config,
+                deadline=deadline,
             ),
-            max_connection_seconds=stream_config.max_connection_seconds,
+            deadline=deadline,
+            finalize_seconds=finalize_seconds,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )

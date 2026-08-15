@@ -25,6 +25,7 @@ networks:
 
 volumes:
   postgres-data:
+  provider-cache:
   qdrant-data:
 
 services:
@@ -107,6 +108,7 @@ services:
       - ${SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST}:/run/specpilot/manifests:ro
       - ${SPECPILOT_MCP_SOURCE_DATA_DIR_HOST}:/run/specpilot/sources:ro
       - ${SPECPILOT_READY_DIR_HOST}:/run/specpilot/ready:ro
+      - provider-cache:/run/specpilot/provider-cache
     environment:
       SPECPILOT_API_PROFILE: ${SPECPILOT_API_PROFILE}
       SPECPILOT_API_DSN: ${SPECPILOT_API_DSN}
@@ -119,6 +121,8 @@ services:
       SPECPILOT_API_PROMPT_HASH: ${SPECPILOT_API_PROMPT_HASH}
       SPECPILOT_API_COMPLIANCE_PROMPT_HASH: ${SPECPILOT_API_COMPLIANCE_PROMPT_HASH}
       SPECPILOT_API_VERIFIER_PROMPT_HASH: ${SPECPILOT_API_VERIFIER_PROMPT_HASH}
+      SPECPILOT_API_CACHE_DIR: ${SPECPILOT_API_CACHE_DIR:-}
+      SPECPILOT_API_CACHE_TTL_SECONDS: ${SPECPILOT_API_CACHE_TTL_SECONDS:-}
       SPECPILOT_MCP_CORPUS_MANIFEST_DIR: /run/specpilot/corpus
       SPECPILOT_MCP_CORPUS_MANIFEST_ID: ${SPECPILOT_MCP_CORPUS_MANIFEST_ID}
       SPECPILOT_MCP_SOURCE_MANIFEST_DIR: /run/specpilot/manifests

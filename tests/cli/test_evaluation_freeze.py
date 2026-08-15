@@ -50,8 +50,8 @@ def test_candidate_cli_emits_only_path_hash_and_aggregate_counts(
         "deep_review": 12,
         "l1": 40,
         "l2": 20,
-        "l2_adv_dev": 1,
-        "l2_adv_locked": 1,
+        "l2_adv_dev": 6,
+        "l2_adv_locked": 10,
         "pooling": 60,
     }
     assert "question" not in captured.out.casefold()

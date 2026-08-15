@@ -10,6 +10,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+import specpilot.deployment.initialize as initialize_module
 from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.deployment.initialize import (
     FixtureInitializationRequest,
@@ -569,6 +570,45 @@ def test_real_initialization_builds_only_the_derived_absent_collection(
                     snapshot_name=snapshot.name,
                     wait=True,
                 )
+            admin.delete_collection(synthetic.collection)
+        admin.close()
+
+
+def test_real_initialization_refuses_input_root_swap_before_collection_write(
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, synthetic = _new_real_request(
+        tmp_path,
+        qdrant_url,
+        monkeypatch,
+        number="990008",
+    )
+    original_initialize = initialize_module._initialize_new_real
+
+    def swap_root_then_initialize(*args: object, **kwargs: object):
+        pinned = tmp_path / "real-input-pinned"
+        request.corpus_dir.rename(pinned)
+        shutil.copytree(pinned, request.corpus_dir)
+        return original_initialize(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        initialize_module,
+        "_initialize_new_real",
+        swap_root_then_initialize,
+    )
+    admin = QdrantClient(url=qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(InitializationRefusal) as raised:
+            initialize_real(request)
+
+        assert raised.value.code == "real_corpus_unavailable"
+        assert not admin.collection_exists(synthetic.collection)
+        with pytest.raises(FileNotFoundError):
+            ReadyMarkerStore(request.ready_dir).read()
+    finally:
+        if admin.collection_exists(synthetic.collection):
             admin.delete_collection(synthetic.collection)
         admin.close()
 

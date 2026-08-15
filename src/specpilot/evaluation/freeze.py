@@ -25,7 +25,7 @@ from specpilot.contracts.evaluation import (
     canonical_evaluation_bytes,
     reject_evaluation_prose_keys,
 )
-from specpilot.contracts.manifests import Sha256
+from specpilot.contracts.manifests import Identifier, Sha256
 from specpilot.ingestion._secure_fs import (
     open_directory_path,
     revalidate_directory_path,
@@ -120,8 +120,8 @@ class _PoolingStatus(_ClosedStatus):
 
 
 class _AdvancedSplit(_ClosedStatus):
-    item_ids: tuple[str, ...] = Field(min_length=1)
-    families: tuple[str, ...] = Field(min_length=1)
+    item_ids: tuple[Identifier, ...] = Field(min_length=1)
+    families: tuple[Identifier, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _unique_members(self) -> Self:
@@ -129,10 +129,13 @@ class _AdvancedSplit(_ClosedStatus):
             raise ValueError("advanced item is repeated")
         if len(set(self.families)) != len(self.families):
             raise ValueError("advanced family is repeated")
+        if len(self.item_ids) != len(self.families):
+            raise ValueError("advanced items and families must be paired")
         return self
 
 
 class _AdvancedStatus(_ClosedStatus):
+    schema_version: Literal["l2-adv-registration/v1"]
     dev: _AdvancedSplit
     locked: _AdvancedSplit
     overlap_report_sha256: Sha256
@@ -367,6 +370,8 @@ def build_candidate(inputs: EvaluationFreezeInputs) -> EvaluationFreezeReport:
         or pooling.adjudicated_items != pooling.registered_items
     ):
         raise EvaluationFreezeError("pooling_unsealed")
+    if len(advanced.dev.item_ids) != 6 or len(advanced.locked.item_ids) != 10:
+        raise EvaluationFreezeError("l2_adv_cardinality_mismatch")
     if set(advanced.dev.item_ids) & set(advanced.locked.item_ids):
         raise EvaluationFreezeError("l2_adv_id_overlap")
     if set(advanced.dev.families) & set(advanced.locked.families):
@@ -392,8 +397,11 @@ def build_candidate(inputs: EvaluationFreezeInputs) -> EvaluationFreezeReport:
         l2_locked_count=progress.l2.completed_locked,
         deep_review_count=deep.completed,
         pooling_count=pooling.adjudicated_items,
-        l2_adv_dev_count=len(advanced.dev.item_ids),
-        l2_adv_locked_count=len(advanced.locked.item_ids),
+        l2_adv_dev_count=6,
+        l2_adv_locked_count=10,
+        l2_adv_registration_sha256=_sha256(
+            canonical_evaluation_bytes(advanced)
+        ),
         l2_adv_overlap_report_sha256=advanced.overlap_report_sha256,
         scoring_route_id=scoring.selected_route,
         dev_scoring_evidence_sha256=scoring.evidence_sha256,
