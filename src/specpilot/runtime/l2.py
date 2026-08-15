@@ -151,9 +151,12 @@ class L2ComplianceAudit:
 @dataclass(frozen=True, slots=True)
 class L2EgressAudit:
     stage: EgressStage
-    reservation_id: str
+    reservation_id: str | None
     replayed: bool
     request_size: RequestSize | None
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +259,9 @@ async def _emit_exception_egress(
             reservation_id=error.reservation_id,
             replayed=error.replayed,
             request_size=getattr(error, "request_size", None),
+            cache_hit=bool(getattr(error, "cache_hit", False)),
+            cache_request_hash=getattr(error, "cache_request_hash", None),
+            cache_record_hash=getattr(error, "cache_record_hash", None),
         ),
     )
 
@@ -338,7 +344,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             await _emit_audit(context, L2PlanningAudit(planning))
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
-            reservations.append(planning.reservation_id)
+            _append_reservation(reservations, planning.reservation_id)
             await write(
                 CheckpointStage.PLANNED,
                 plan_id=planning.plan.plan_id,
@@ -378,7 +384,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             await _emit_audit(context, L2PlanningAudit(planning))
             if not context.lease_is_live():
                 return _abandoned(attempts, reservations, recovered, written)
-            reservations.append(planning.reservation_id)
+            _append_reservation(reservations, planning.reservation_id)
             await write(
                 CheckpointStage.PLANNED,
                 plan_id=planning.plan.plan_id,
@@ -475,7 +481,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
         await _emit_audit(context, L2ComplianceAudit(compliance))
         if not context.lease_is_live():
             return _abandoned(attempts, reservations, recovered, written)
-        reservations.append(compliance.reservation_id)
+        _append_reservation(reservations, compliance.reservation_id)
         if (
             checkpoint is not None
             and checkpoint.stage is CheckpointStage.EVIDENCE_COLLECTED
@@ -550,7 +556,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             if written:
                 checkpoint = written[-1]
             for semantic in semantics:
-                reservations.append(semantic.reservation_id)
+                _append_reservation(reservations, semantic.reservation_id)
                 semantic_outcomes.append((candidate.claim_id, semantic))
             if recovery is not None:
                 recovery_outcomes.append(recovery)
@@ -601,7 +607,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             error.code, attempts, reservations, recovered, written, egress=True
         )
     except ProviderAttemptError as error:
-        reservations.append(error.reservation_id)
+        _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:
             await write(
                 checkpoint.stage,
@@ -620,7 +626,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             checkpoints=tuple(written),
         )
     except TransportReplayError as error:
-        reservations.append(error.reservation_id)
+        _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:
             await write(
                 checkpoint.stage,
@@ -641,7 +647,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             written,
         )
     except InvalidComplianceReply as error:
-        reservations.append(error.reservation_id)
+        _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:
             checkpoint = await _advance(
                 context,
@@ -658,7 +664,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             "invalid_compliance_reply", attempts, reservations, recovered, written
         )
     except InvalidSemanticReply as error:
-        reservations.append(error.reservation_id)
+        _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:
             checkpoint = await _advance(
                 context,
@@ -675,7 +681,7 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             "invalid_semantic_reply", attempts, reservations, recovered, written
         )
     except InvalidToolPlan as error:
-        reservations.append(error.reservation_id)
+        _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:
             await write(
                 checkpoint.stage,
@@ -1047,10 +1053,9 @@ async def _one_claim(
             context,
             checkpoint,
             checkpoint.stage,
-            reservation_ids=[
-                *(str(item) for item in checkpoint.reservation_ids),
-                semantic.reservation_id,
-            ],
+            reservation_ids=_with_optional_reservation(
+                checkpoint, semantic.reservation_id
+            ),
             attempts=attempts,
             recovered=recovered,
             allow_same_stage=True,
@@ -1236,10 +1241,9 @@ async def _one_claim(
             context,
             checkpoint,
             checkpoint.stage,
-            reservation_ids=[
-                *(str(item) for item in checkpoint.reservation_ids),
-                semantic.reservation_id,
-            ],
+            reservation_ids=_with_optional_reservation(
+                checkpoint, semantic.reservation_id
+            ),
             attempts=attempts,
             recovered=True,
             allow_same_stage=True,
@@ -1443,6 +1447,20 @@ def _merged_reservations(
     for reservation_id in reservation_ids or ():
         if reservation_id not in values:
             values.append(reservation_id)
+    return values
+
+
+def _append_reservation(values: list[str], reservation_id: str | None) -> None:
+    """Cache hits are local reads and therefore never invent ledger identity."""
+    if reservation_id is not None and reservation_id not in values:
+        values.append(reservation_id)
+
+
+def _with_optional_reservation(
+    checkpoint: RunCheckpoint, reservation_id: str | None
+) -> list[str]:
+    values = [str(item) for item in checkpoint.reservation_ids]
+    _append_reservation(values, reservation_id)
     return values
 
 

@@ -33,6 +33,9 @@ class AnswerOutcome:
     request_size: RequestSize | None
     provider_error: str | None
     parse_fault: str | None
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 async def run_answer(
@@ -105,6 +108,9 @@ async def run_answer(
         request_size=receipt.request_size,
         provider_error=None,
         parse_fault=parse_fault,
+        cache_hit=receipt.cache_hit,
+        cache_request_hash=receipt.cache_request_hash,
+        cache_record_hash=receipt.cache_record_hash,
     )
 
 

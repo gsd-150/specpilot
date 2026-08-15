@@ -51,18 +51,31 @@ _TOOL_MODELS = (
 class InvalidToolPlan(Exception):
     """The provider returned content that is not one bounded ToolPlan."""
 
-    __slots__ = ("replayed", "request_size", "reservation_id")
+    __slots__ = (
+        "cache_hit",
+        "cache_record_hash",
+        "cache_request_hash",
+        "replayed",
+        "request_size",
+        "reservation_id",
+    )
 
     def __init__(
         self,
         *,
-        reservation_id: str,
+        reservation_id: str | None,
         replayed: bool,
         request_size: RequestSize,
+        cache_hit: bool = False,
+        cache_request_hash: str | None = None,
+        cache_record_hash: str | None = None,
     ) -> None:
         self.reservation_id = reservation_id
         self.replayed = replayed
         self.request_size = request_size
+        self.cache_hit = cache_hit
+        self.cache_request_hash = cache_request_hash
+        self.cache_record_hash = cache_record_hash
         super().__init__("invalid_tool_plan")
 
 
@@ -83,9 +96,12 @@ class PlannerResult:
     """A valid plan plus the real sanitized planning receipt metadata."""
 
     plan: ToolPlan
-    reservation_id: str
+    reservation_id: str | None
     replayed: bool
     request_size: RequestSize
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 class Planner:
@@ -142,6 +158,9 @@ class Planner:
                 reservation_id=receipt.reservation_id,
                 replayed=receipt.replayed,
                 request_size=receipt.request_size,
+                cache_hit=receipt.cache_hit,
+                cache_request_hash=receipt.cache_request_hash,
+                cache_record_hash=receipt.cache_record_hash,
             )
             raise error
         return PlannerResult(
@@ -149,6 +168,9 @@ class Planner:
             reservation_id=receipt.reservation_id,
             replayed=receipt.replayed,
             request_size=receipt.request_size,
+            cache_hit=receipt.cache_hit,
+            cache_request_hash=receipt.cache_request_hash,
+            cache_record_hash=receipt.cache_record_hash,
         )
 
 

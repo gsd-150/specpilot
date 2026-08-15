@@ -104,6 +104,7 @@ def test_run_event_kind_allowlist_is_exact() -> None:
         "candidate_summary",
         "evidence_summary",
         "egress_summary",
+        "cache_summary",
         "usage_summary",
         "answer_outcome",
             "verifier_summary",
@@ -114,6 +115,36 @@ def test_run_event_kind_allowlist_is_exact() -> None:
             "resume_summary",
             "terminal",
     }
+
+
+def test_cache_summary_is_closed_to_opaque_hashes_only() -> None:
+    contracts = _contracts()
+    event = contracts.CacheSummaryEvent(
+        sequence=4,
+        hit=True,
+        stage="planning",
+        request_hash="a" * 64,
+        record_hash="b" * 64,
+    )
+
+    assert event.model_dump(mode="json") == {
+        "kind": "cache_summary",
+        "sequence": 4,
+        "hit": True,
+        "stage": "planning",
+        "request_hash": "a" * 64,
+        "record_hash": "b" * 64,
+    }
+    for update in (
+        {"hit": "true"},
+        {"request_hash": "not-a-hash"},
+        {"record_hash": "not-a-hash"},
+        {"response": "source prose"},
+    ):
+        with pytest.raises(ValidationError):
+            contracts.CacheSummaryEvent.model_validate(
+                {**event.model_dump(mode="json"), **update}
+            )
 
 
 @pytest.mark.parametrize(

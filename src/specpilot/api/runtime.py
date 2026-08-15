@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
@@ -16,7 +17,7 @@ import httpx
 import psycopg
 from fastapi import FastAPI
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from specpilot.agents.compliance import ComplianceAgent, ComplianceContext
 from specpilot.agents.evidence import EvidenceAgent
@@ -39,6 +40,7 @@ from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.runtime import load_runtime_config as load_mcp_config
 from specpilot.mcp_server.runtime import load_runtime_services
 from specpilot.providers.base import _ProviderAdapter
+from specpilot.providers.cache import CacheNamespace, LocalResponseCache
 from specpilot.providers.fake import FakeProvider
 from specpilot.providers.http import MAIN_ROUTE, HttpChatAdapter, resolve_credential
 from specpilot.providers.transport import PolicyBoundTransport
@@ -81,6 +83,8 @@ class ApiRuntimeConfig(BaseModel):
     configuration_hash: _Sha256
     prompt_id: _Identifier
     prompt_hash: _Sha256
+    cache_directory: Path | None = None
+    cache_ttl_seconds: Annotated[int, Field(gt=0)] | None = None
 
     @model_validator(mode="after")
     def _validate_exact_external_identities(self) -> Self:
@@ -115,6 +119,10 @@ class ApiRuntimeConfig(BaseModel):
             "localhost",
         }:
             raise ValueError("fixture API must bind to loopback")
+        if (self.cache_directory is None) != (self.cache_ttl_seconds is None):
+            raise ValueError("cache directory and positive TTL are configured together")
+        if self.cache_directory is not None and not self.cache_directory.is_absolute():
+            raise ValueError("cache directory must be absolute")
         return self
 
 
@@ -127,15 +135,13 @@ def load_runtime_config() -> ApiRuntimeConfig:
             "dsn": os.environ.get("SPECPILOT_API_DSN"),
             "mcp_url": os.environ.get("SPECPILOT_API_MCP_URL"),
             "session_secret": os.environ.get("SPECPILOT_API_SESSION_SECRET"),
-            "session_audience": os.environ.get(
-                "SPECPILOT_API_SESSION_AUDIENCE"
-            ),
+            "session_audience": os.environ.get("SPECPILOT_API_SESSION_AUDIENCE"),
             "bind_host": os.environ.get("SPECPILOT_API_BIND_HOST"),
-            "configuration_hash": os.environ.get(
-                "SPECPILOT_API_CONFIGURATION_HASH"
-            ),
+            "configuration_hash": os.environ.get("SPECPILOT_API_CONFIGURATION_HASH"),
             "prompt_id": os.environ.get("SPECPILOT_API_PROMPT_ID"),
             "prompt_hash": os.environ.get("SPECPILOT_API_PROMPT_HASH"),
+            "cache_directory": os.environ.get("SPECPILOT_API_CACHE_DIR"),
+            "cache_ttl_seconds": os.environ.get("SPECPILOT_API_CACHE_TTL_SECONDS"),
         }
     )
 
@@ -286,12 +292,31 @@ def _assemble_runtime(
 
     policy = EgressPolicy.load()
     adapter, provider_hook = _provider(config.profile, route.provider_id)
+    cache = (
+        None
+        if config.cache_directory is None
+        else LocalResponseCache(
+            config.cache_directory,
+            ttl_seconds=cast(int, config.cache_ttl_seconds),
+        )
+    )
+    cache_namespace = (
+        None
+        if cache is None
+        else CacheNamespace(
+            configuration_hash=config.configuration_hash,
+            prompt_id=config.prompt_id,
+            prompt_hash=config.prompt_hash,
+            source_manifest_id=source.manifest_id,
+            corpus_manifest_id=mcp_config.corpus_manifest_id,
+        )
+    )
     transport = PolicyBoundTransport(
         enforcer=EgressPolicyEnforcer(policy, manifests=source_store),
-        ledger=PostgresEgressLedger(
-            config.dsn, policy=policy, manifests=source_store
-        ),
+        ledger=PostgresEgressLedger(config.dsn, policy=policy, manifests=source_store),
         adapters=(adapter,),
+        cache=cache,
+        cache_namespace=cache_namespace,
     )
     http_client = mcp_http_client or httpx.AsyncClient(trust_env=False)
     mcp_client = StreamableMcpClient(config.mcp_url, http_client=http_client)
@@ -549,9 +574,7 @@ def _assemble_runtime(
         ):
             return replace(
                 job,
-                l2_context=replace(
-                    job.l2_context, pending_semantic_recovery=True
-                ),
+                l2_context=replace(job.l2_context, pending_semantic_recovery=True),
             )
         return job
 

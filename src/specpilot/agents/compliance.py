@@ -30,7 +30,7 @@ from specpilot.contracts.verdict import (
     normalized_claim_id,
 )
 from specpilot.egress.ledger import RequestSize
-from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.providers.transport import PolicyBoundTransport, TransportReceipt
 
 _MAX_L2_EXCERPTS = 12
 
@@ -38,18 +38,31 @@ _MAX_L2_EXCERPTS = 12
 class InvalidComplianceReply(Exception):
     """The provider response cannot become an untrusted candidate batch."""
 
-    __slots__ = ("replayed", "request_size", "reservation_id")
+    __slots__ = (
+        "cache_hit",
+        "cache_record_hash",
+        "cache_request_hash",
+        "replayed",
+        "request_size",
+        "reservation_id",
+    )
 
     def __init__(
         self,
         *,
-        reservation_id: str,
+        reservation_id: str | None,
         replayed: bool,
         request_size: RequestSize,
+        cache_hit: bool = False,
+        cache_request_hash: str | None = None,
+        cache_record_hash: str | None = None,
     ) -> None:
         self.reservation_id = reservation_id
         self.replayed = replayed
         self.request_size = request_size
+        self.cache_hit = cache_hit
+        self.cache_request_hash = cache_request_hash
+        self.cache_record_hash = cache_record_hash
         super().__init__("invalid_compliance_reply")
 
 
@@ -68,9 +81,12 @@ class ComplianceContext:
 class ComplianceOutcome:
     batch: ComplianceBatch
     candidates: tuple[IdentifiedCandidate, ...]
-    reservation_id: str
+    reservation_id: str | None
     replayed: bool
     request_size: RequestSize
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 class ComplianceAgent:
@@ -91,7 +107,7 @@ class ComplianceAgent:
                 item.excerpt for item in _bounded_unique_evidence(evidence)
             ),
         )
-        batch, reservation_id, replayed, request_size = await _send_and_parse(
+        batch, receipt = await _send_and_parse(
             self._transport,
             EgressRequest(
                 evaluation_root_id=context.evaluation_root_id,
@@ -108,9 +124,12 @@ class ComplianceAgent:
         )
         if batch is None:
             error = InvalidComplianceReply(
-                reservation_id=reservation_id,
-                replayed=replayed,
-                request_size=request_size,
+                reservation_id=receipt.reservation_id,
+                replayed=receipt.replayed,
+                request_size=receipt.request_size,
+                cache_hit=receipt.cache_hit,
+                cache_request_hash=receipt.cache_request_hash,
+                cache_record_hash=receipt.cache_record_hash,
             )
             raise error
         return ComplianceOutcome(
@@ -121,9 +140,12 @@ class ComplianceAgent:
                 )
                 for candidate in batch.candidates
             ),
-            reservation_id=reservation_id,
-            replayed=replayed,
-            request_size=request_size,
+            reservation_id=receipt.reservation_id,
+            replayed=receipt.replayed,
+            request_size=receipt.request_size,
+            cache_hit=receipt.cache_hit,
+            cache_request_hash=receipt.cache_request_hash,
+            cache_record_hash=receipt.cache_record_hash,
         )
 
 
@@ -131,14 +153,10 @@ async def _send_and_parse(
     transport: PolicyBoundTransport,
     request: EgressRequest,
     idempotency_key: str,
-) -> tuple[ComplianceBatch | None, str, bool, RequestSize]:
+) -> tuple[ComplianceBatch | None, TransportReceipt]:
     receipt = await transport.send(request, idempotency_key=idempotency_key)
-    reservation_id = receipt.reservation_id
-    replayed = receipt.replayed
-    request_size = receipt.request_size
     batch = _parse_content(receipt.response.content)
-    del receipt
-    return batch, reservation_id, replayed, request_size
+    return batch, receipt
 
 
 def _parse_content(content: str) -> ComplianceBatch | None:

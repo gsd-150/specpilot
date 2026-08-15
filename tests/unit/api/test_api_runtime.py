@@ -133,6 +133,34 @@ def test_real_runtime_forbids_demo_host_constraint_only_for_fixture(
     assert load_runtime_config().profile == "real"
 
 
+def test_response_cache_is_disabled_by_default_and_requires_explicit_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _set_valid(monkeypatch)
+    config = load_runtime_config()
+    assert config.cache_directory is None
+    assert config.cache_ttl_seconds is None
+
+    monkeypatch.setenv("SPECPILOT_API_CACHE_DIR", str(tmp_path / "cache"))
+    with pytest.raises(ValidationError):
+        load_runtime_config()
+    monkeypatch.setenv("SPECPILOT_API_CACHE_TTL_SECONDS", "604800")
+    enabled = load_runtime_config()
+    assert enabled.cache_directory == tmp_path / "cache"
+    assert enabled.cache_ttl_seconds == 604800
+
+
+@pytest.mark.parametrize("ttl", ["0", "-1"])
+def test_response_cache_rejects_nonpositive_ttl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, ttl: str
+) -> None:
+    _set_valid(monkeypatch)
+    monkeypatch.setenv("SPECPILOT_API_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("SPECPILOT_API_CACHE_TTL_SECONDS", ttl)
+    with pytest.raises(ValidationError):
+        load_runtime_config()
+
+
 def test_real_route_binds_provider_and_exact_endpoint_purpose() -> None:
     _require_real_route("deepseek", "online-main-deepseek-v4-flash-api")
 

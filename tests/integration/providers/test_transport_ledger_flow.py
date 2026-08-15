@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -10,6 +11,11 @@ from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
 from specpilot.egress.postgres import PostgresEgressLedger
+from specpilot.providers.cache import (
+    CacheNamespace,
+    LocalResponseCache,
+    ResponseCacheError,
+)
 from specpilot.providers.fake import FakeProvider
 from specpilot.providers.transport import (
     PolicyBoundTransport,
@@ -47,6 +53,29 @@ def transport(dsn: str, *providers: FakeProvider) -> PolicyBoundTransport:
     )
 
 
+def cached_transport(
+    dsn: str,
+    provider: FakeProvider,
+    cache: LocalResponseCache,
+) -> PolicyBoundTransport:
+    request = request_with(distinct_excerpt(1))
+    return PolicyBoundTransport(
+        enforcer=EgressPolicyEnforcer(
+            fixture_policy(), manifests=fixture_store(), clock=lambda: NOW
+        ),
+        ledger=real_ledger(dsn),
+        adapters=(provider,),
+        cache=cache,
+        cache_namespace=CacheNamespace(
+            configuration_hash="a" * 64,
+            prompt_id="l1-answer-v1",
+            prompt_hash="b" * 64,
+            source_manifest_id=request.version.source_manifest_id,
+            corpus_manifest_id=request.version.corpus_manifest_id,
+        ),
+    )
+
+
 def request_with(*excerpts):
     return egress_request(payload=l1_payload(evidence_excerpts=excerpts))
 
@@ -71,6 +100,65 @@ async def test_a_full_send_records_one_reservation_and_one_attempt(
     assert (
         await scalar(clean_ledger, "SELECT state FROM egress_reservation")
     ) == "succeeded"
+
+
+async def test_cache_hit_prepares_policy_but_skips_reservation_and_adapter(
+    clean_ledger: str, tmp_path: Path
+) -> None:
+    provider = FakeProvider()
+    cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
+    line = cached_transport(clean_ledger, provider, cache)
+    request = request_with(distinct_excerpt(1))
+
+    miss = await line.send(request, idempotency_key="first")
+    hit = await line.send(request, idempotency_key="second")
+
+    assert miss.cache_hit is False
+    assert miss.reservation_id is not None
+    assert miss.cache_record_hash is not None
+    assert hit.cache_hit is True
+    assert hit.reservation_id is None
+    assert hit.cache_record_hash == miss.cache_record_hash
+    assert hit.response == miss.response
+    assert provider.call_count == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 1
+
+
+async def test_cache_hit_cannot_bypass_prepare(
+    clean_ledger: str, tmp_path: Path
+) -> None:
+    provider = FakeProvider()
+    cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
+    line = cached_transport(clean_ledger, provider, cache)
+    request = request_with(distinct_excerpt(1))
+    await line.send(request, idempotency_key="first")
+    invalid = request.model_copy(update={"model_id": "other-model"})
+
+    with pytest.raises(Exception) as caught:
+        await line.send(invalid, idempotency_key="second")
+
+    assert getattr(caught.value, "code", None) == "no_adapter_for_route"
+    assert provider.call_count == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
+
+
+async def test_cache_fault_fails_closed_before_reservation(
+    clean_ledger: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeProvider()
+    cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
+    line = cached_transport(clean_ledger, provider, cache)
+
+    def fail_get(*args: object) -> None:
+        raise ResponseCacheError("cache_record_invalid")
+
+    monkeypatch.setattr(cache, "get", fail_get)
+    with pytest.raises(ResponseCacheError, match="cache_record_invalid"):
+        await line.send(request_with(distinct_excerpt(1)), idempotency_key="first")
+
+    assert provider.call_count == 0
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 0
 
 
 async def test_a_retry_under_a_new_key_is_charged_transmitted_usage_again(
@@ -176,9 +264,7 @@ async def test_cancelled_possible_send_is_recorded_and_seals_real_run(
     provider = MaybeSentProvider()
     line = transport(clean_ledger, provider)
     task = asyncio.create_task(
-        line.send(
-            request_with(distinct_excerpt(1)), idempotency_key="evidence-1"
-        )
+        line.send(request_with(distinct_excerpt(1)), idempotency_key="evidence-1")
     )
     await entered.wait()
 
@@ -222,9 +308,7 @@ async def test_a_fallback_provider_records_a_second_route_disclosure(
         await scalar(clean_ledger, "SELECT count(*) FROM egress_route_disclosure")
     ) == 2, "one excerpt seen by two providers is two route disclosures"
     assert (
-        await scalar(
-            clean_ledger, "SELECT unique_excerpts FROM egress_corpus_ledger"
-        )
+        await scalar(clean_ledger, "SELECT unique_excerpts FROM egress_corpus_ledger")
     ) == 1, "but it is still one piece of source text out of the corpus"
 
 

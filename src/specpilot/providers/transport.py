@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 
-from specpilot.contracts.egress import EgressRequest
+from specpilot.contracts.egress import EgressRequest, ReservationRequest
 from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import (
     AttemptOutcome,
@@ -18,6 +20,12 @@ from specpilot.providers.base import (
     ProviderError,
     ProviderResponse,
     _ProviderAdapter,
+)
+from specpilot.providers.cache import (
+    CacheKey,
+    CacheNamespace,
+    LocalResponseCache,
+    ResponseCacheError,
 )
 from specpilot.providers.fake import FakeProvider
 
@@ -48,9 +56,12 @@ class TransportReceipt:
     """The complete, sanitized result of one policy-bound provider attempt."""
 
     response: ProviderResponse
-    reservation_id: str
+    reservation_id: str | None
     replayed: bool
     request_size: RequestSize
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 class ProviderAttemptError(Exception):
@@ -107,9 +118,15 @@ class PolicyBoundTransport:
         enforcer: EgressPolicyEnforcer,
         ledger: EgressLedger,
         adapters: Iterable[_ProviderAdapter],
+        cache: LocalResponseCache | None = None,
+        cache_namespace: CacheNamespace | None = None,
     ) -> None:
+        if (cache is None) != (cache_namespace is None):
+            raise ValueError("cache and cache namespace must be configured together")
         self.__enforcer = enforcer
         self.__ledger = ledger
+        self.__cache = cache
+        self.__cache_namespace = cache_namespace
         self.__adapters = {
             (adapter.provider_id, adapter.model_id): adapter for adapter in adapters
         }
@@ -126,6 +143,24 @@ class PolicyBoundTransport:
 
         counter = adapter.token_counter
         reservation_request = self.__enforcer.prepare(request, counter)
+        cache_key = self.__cache_key(reservation_request)
+        if self.__cache is not None:
+            assert cache_key is not None
+            cached = self.__cache.get(cache_key)
+            if cached is not None:
+                cached_response = cached.response
+                return TransportReceipt(
+                    response=cached_response,
+                    reservation_id=None,
+                    replayed=False,
+                    request_size=RequestSize(
+                        request_tokens=cached_response.metadata.prompt_tokens,
+                        request_bytes=cached_response.metadata.request_bytes,
+                    ),
+                    cache_hit=True,
+                    cache_request_hash=cache_key.request_hash,
+                    cache_record_hash=cached.record_hash,
+                )
         reservation = await self.__ledger.check_and_reserve(
             reservation_request,
             counter,
@@ -199,11 +234,52 @@ class PolicyBoundTransport:
             AttemptOutcome.SUCCEEDED,
             duration_ms=_elapsed_ms(started),
         )
+        cache_record_hash: str | None = None
+        if self.__cache is not None:
+            assert cache_key is not None
+            cached = self.__cache.put(
+                cache_key,
+                response,
+                run_id=request.run_id,
+                session_id=request.evaluation_root_id,
+            )
+            cache_record_hash = cached.record_hash
         return TransportReceipt(
             response=response,
             reservation_id=reservation.reservation_id,
             replayed=reservation.replayed,
             request_size=request_size,
+            cache_hit=False,
+            cache_request_hash=(None if cache_key is None else cache_key.request_hash),
+            cache_record_hash=cache_record_hash,
+        )
+
+    def __cache_key(self, request: ReservationRequest) -> CacheKey | None:
+        if self.__cache_namespace is None:
+            return None
+        # ``prepare`` returns the closed ReservationRequest contract. Keeping
+        # this helper after prepare prevents malformed or unauthorized request
+        # bytes from becoming a cache oracle.
+        namespace = self.__cache_namespace
+        if (
+            namespace.source_manifest_id != request.version.source_manifest_id
+            or namespace.corpus_manifest_id != request.version.corpus_manifest_id
+        ):
+            raise ResponseCacheError("cache_namespace_mismatch")
+        payload = json.dumps(
+            request.projected_payload.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return CacheKey.create(
+            namespace=namespace,
+            provider_id=request.route.provider_id,
+            model_id=request.model_id,
+            stage=request.stage,
+            policy_hash=self.__enforcer.policy_hash,
+            request_hash=hashlib.sha256(payload).hexdigest(),
         )
 
     async def __record_after_send(

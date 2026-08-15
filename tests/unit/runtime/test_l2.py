@@ -87,6 +87,7 @@ def passed(item: Evidence) -> DeterministicResult:
 class Planner:
     calls: int = 0
     contexts: list[object] = None  # type: ignore[assignment]
+    cache_hit: bool = False
 
     def __post_init__(self) -> None:
         self.contexts = []
@@ -96,9 +97,16 @@ class Planner:
         self.contexts.append(context)
         return PlannerResult(
             plan=FakePlan(),  # type: ignore[arg-type]
-            reservation_id="00000000-0000-0000-0000-000000000001",
+            reservation_id=(
+                None
+                if self.cache_hit
+                else "00000000-0000-0000-0000-000000000001"
+            ),
             replayed=False,
             request_size=RequestSize(request_tokens=1, request_bytes=1),
+            cache_hit=self.cache_hit,
+            cache_request_hash="1" * 64 if self.cache_hit else None,
+            cache_record_hash="a" * 64 if self.cache_hit else None,
         )
 
 
@@ -126,6 +134,7 @@ class EvidenceAgent:
 class Compliance:
     candidate: IdentifiedCandidate
     calls: int = 0
+    cache_hit: bool = False
 
     async def evaluate(
         self, description: str, evidence: tuple[Evidence, ...], context: object
@@ -134,9 +143,16 @@ class Compliance:
         return ComplianceOutcome(
             batch=ComplianceBatch(candidates=(self.candidate.candidate,)),
             candidates=(self.candidate,),
-            reservation_id="00000000-0000-0000-0000-000000000002",
+            reservation_id=(
+                None
+                if self.cache_hit
+                else "00000000-0000-0000-0000-000000000002"
+            ),
             replayed=False,
             request_size=RequestSize(request_tokens=1, request_bytes=1),
+            cache_hit=self.cache_hit,
+            cache_request_hash="2" * 64 if self.cache_hit else None,
+            cache_record_hash="b" * 64 if self.cache_hit else None,
         )
 
 
@@ -165,6 +181,7 @@ class Semantic:
     replies: list[bool]
     calls: int = 0
     claim_ids: list[str] = None  # type: ignore[assignment]
+    cache_hit: bool = False
 
     def __post_init__(self) -> None:
         self.claim_ids = []
@@ -191,9 +208,16 @@ class Semantic:
                 reason="supported" if supports else "unsupported",
                 rationale="ephemeral fixture rationale",
             ),
-            reservation_id=f"00000000-0000-0000-0000-00000000000{self.calls + 2}",
+            reservation_id=(
+                None
+                if self.cache_hit
+                else f"00000000-0000-0000-0000-00000000000{self.calls + 2}"
+            ),
             replayed=False,
             request_size=RequestSize(request_tokens=1, request_bytes=1),
+            cache_hit=self.cache_hit,
+            cache_request_hash="3" * 64 if self.cache_hit else None,
+            cache_record_hash="c" * 64 if self.cache_hit else None,
         )
 
 
@@ -345,6 +369,28 @@ async def test_l2_runs_both_gates_and_returns_a_verified_metadata_result() -> No
     assert outcome.recovery_attempted is False
     assert made.planner.contexts[0].idempotency_key == "run-1-planning-initial-g0"  # type: ignore[attr-defined]
     assert made.planner.contexts[0].reconstruction_generation == 0  # type: ignore[attr-defined]
+
+
+async def test_l2_cache_hits_never_enter_checkpoint_reservation_ids() -> None:
+    item = evidence()
+    writer = StatefulWriter()
+    semantic = Semantic([True], cache_hit=True)
+    made = context(deterministic=lambda *_: passed(item), semantic=semantic)
+    made = dataclass_replace(
+        made,
+        planner=Planner(cache_hit=True),
+        compliance_agent=Compliance(candidate(item), cache_hit=True),
+        checkpoint_factory=checkpoint,
+        checkpoint_writer=writer,
+    )
+    from specpilot.runtime.l2 import run_l2_attempt
+
+    outcome = await run_l2_attempt(made)
+
+    assert outcome.results[0].verification_status.value == "verified"
+    assert outcome.reservation_ids == ()
+    assert writer.current is not None
+    assert writer.current.reservation_ids == ()
 
 
 async def test_deterministic_failure_recovers_once_then_reruns_every_gate() -> None:

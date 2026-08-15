@@ -178,6 +178,26 @@ def _refuse(code: str, exit_code: int = EXIT_REFUSED) -> int:
     return exit_code
 
 
+def _cache_retention(arguments: argparse.Namespace) -> int:
+    from specpilot.providers.cache import LocalResponseCache, ResponseCacheError
+
+    try:
+        cache = LocalResponseCache(
+            arguments.directory, ttl_seconds=arguments.ttl_seconds
+        )
+        if arguments.command == "delete-run":
+            deleted = cache.delete_run(arguments.run_id)
+        elif arguments.command == "delete-session":
+            deleted = cache.delete_session(arguments.session_id)
+        else:
+            deleted = cache.delete_expired()
+    except ResponseCacheError as error:
+        return _refuse(error.code, EXIT_IO)
+    except ValueError:
+        return _refuse("invalid_cache_arguments", EXIT_USAGE)
+    return _emit({"deleted": deleted})
+
+
 def _source_inputs(
     arguments: argparse.Namespace,
 ) -> tuple[CorpusSourceInput, ...] | str:
@@ -3280,6 +3300,28 @@ def _parser() -> argparse.ArgumentParser:
     route.add_argument("--ledger-dsn", default=None)
     route.set_defaults(handler=_route_smoke)
 
+    cache = commands.add_parser("cache").add_subparsers(
+        dest="command", required=True
+    )
+    delete_run = cache.add_parser("delete-run")
+    delete_run.add_argument("--directory", type=Path, required=True)
+    delete_run.add_argument("--ttl-seconds", type=_positive_int_argument, required=True)
+    delete_run.add_argument("--run-id", required=True)
+    delete_run.set_defaults(handler=_cache_retention)
+    delete_session = cache.add_parser("delete-session")
+    delete_session.add_argument("--directory", type=Path, required=True)
+    delete_session.add_argument(
+        "--ttl-seconds", type=_positive_int_argument, required=True
+    )
+    delete_session.add_argument("--session-id", required=True)
+    delete_session.set_defaults(handler=_cache_retention)
+    delete_expired = cache.add_parser("delete-expired")
+    delete_expired.add_argument("--directory", type=Path, required=True)
+    delete_expired.add_argument(
+        "--ttl-seconds", type=_positive_int_argument, required=True
+    )
+    delete_expired.set_defaults(handler=_cache_retention)
+
     corpus = commands.add_parser("corpus").add_subparsers(
         dest="command", required=True
     )
@@ -3555,6 +3597,16 @@ def _sha256_argument(value: str) -> str:
     if _SHA256_ARGUMENT.fullmatch(value) is None:
         raise argparse.ArgumentTypeError("invalid SHA-256 identifier")
     return value
+
+
+def _positive_int_argument(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected a positive integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return parsed
 
 
 def _uuid_argument(value: str) -> str:

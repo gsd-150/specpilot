@@ -55,6 +55,9 @@ describe("decodeRun", () => {
 
   it.each([
     ["blocked egress with attempt metadata", { kind: "egress_summary", sequence: 1, stage: "planning", reservation_id: UUID, ledger_id: null, admitted: false, replayed: false, request_tokens: null, request_bytes: null, cost_microunits: null, error_code: "policy_blocked" }],
+    ["cache summary with an extra field", { kind: "cache_summary", sequence: 1, hit: true, stage: "planning", request_hash: HASH, record_hash: HASH, response: "hidden" }],
+    ["cache summary with a disguised hit", { kind: "cache_summary", sequence: 1, hit: "true", stage: "planning", request_hash: HASH, record_hash: HASH }],
+    ["cache summary with a non-hash identity", { kind: "cache_summary", sequence: 1, hit: true, stage: "planning", request_hash: "request", record_hash: HASH }],
     ["answered terminal with reason", { kind: "terminal", sequence: 1, status: "answered", reason: "provider_error" }],
     ["passed verifier check with fault", { kind: "verifier_summary", sequence: 1, checks: [{ evidence_id: HASH, passed: true, fault_code: "citation_fault" }], duration_ms: 1 }],
   ])("rejects invalid server invariant: %s", (_name, event) => {
@@ -70,13 +73,14 @@ describe("decodeRun", () => {
       { kind: "candidate_summary", sequence: 5, candidates: [{ candidate_id: "candidate-1", score: 0.5 }] },
       { kind: "evidence_summary", sequence: 6, evidence: [{ evidence_id: HASH, content_hash: HASH }] },
       { kind: "egress_summary", sequence: 7, stage: "planning", reservation_id: UUID, ledger_id: UUID, admitted: true, replayed: false, request_tokens: 2, request_bytes: 10, cost_microunits: null, error_code: null },
-      { kind: "usage_summary", sequence: 8, stage: "planning", prompt_tokens: 2, completion_tokens: 1, request_bytes: 10, duration_ms: 4, cost_microunits: 3 },
-      { kind: "answer_outcome", sequence: 9, verdict: "answered", refusal_reason: null, provider_error: null, reservation_id: UUID, replayed: false, parse_fault_code: null },
-      { kind: "verifier_summary", sequence: 10, checks: [{ evidence_id: HASH, passed: true, fault_code: null }], duration_ms: 2 },
-      { kind: "terminal", sequence: 11, status: "answered", reason: null },
+      { kind: "cache_summary", sequence: 8, hit: true, stage: "planning", request_hash: HASH, record_hash: "b".repeat(64) },
+      { kind: "usage_summary", sequence: 9, stage: "planning", prompt_tokens: 2, completion_tokens: 1, request_bytes: 10, duration_ms: 4, cost_microunits: 3 },
+      { kind: "answer_outcome", sequence: 10, verdict: "answered", refusal_reason: null, provider_error: null, reservation_id: UUID, replayed: false, parse_fault_code: null },
+      { kind: "verifier_summary", sequence: 11, checks: [{ evidence_id: HASH, passed: true, fault_code: null }], duration_ms: 2 },
+      { kind: "terminal", sequence: 12, status: "answered", reason: null },
     ];
     const decoded = decodeRun({ ...run(events), status: "answered", completed_at: "2026-08-12T00:00:02Z" });
-    expect(decoded.events.map((event) => event.kind)).toHaveLength(11);
+    expect(decoded.events.map((event) => event.kind)).toHaveLength(12);
   });
 
   it("accepts the current L2 and W4 event union emitted by Python models", () => {

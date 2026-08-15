@@ -27,6 +27,7 @@ from specpilot.runs.contracts import (
     AgentStepEvent,
     AgentStepPhase,
     AnswerOutcomeEvent,
+    CacheSummaryEvent,
     ComplianceSummaryEvent,
     EgressSummaryEvent,
     EvidenceRefSummary,
@@ -508,12 +509,7 @@ class RunWorker:
                 return
             await self._append(
                 job.run_id,
-                _admitted_egress_event(
-                    EgressStage.PLANNING,
-                    reservation_id=error.reservation_id,
-                    replayed=error.replayed,
-                    request_size=error.request_size,
-                ),
+                _outcome_egress_event(EgressStage.PLANNING, error),
             )
             if lease_lost.is_set():
                 return
@@ -686,20 +682,10 @@ def _l2_audit_batches(
             candidate_count=len(outcome.candidates),
             claim_ids=tuple(item.claim_id for item in outcome.candidates),
         )
-        egress = _admitted_egress_event(
-            EgressStage.COMPLIANCE,
-            reservation_id=outcome.reservation_id,
-            replayed=outcome.replayed,
-            request_size=outcome.request_size,
-        )
+        egress = _outcome_egress_event(EgressStage.COMPLIANCE, outcome)
         return (((compliance_summary, egress), egress),)
     if isinstance(audit, L2EgressAudit):
-        egress_event = _admitted_egress_event(
-            audit.stage,
-            reservation_id=audit.reservation_id,
-            replayed=audit.replayed,
-            request_size=audit.request_size,
-        )
+        egress_event = _outcome_egress_event(audit.stage, audit)
         return (((egress_event,), egress_event),)
     if isinstance(audit, L2DeterministicAudit):
         identity = _audit_identity_event(audit.audit_id, AgentName.VERIFIER)
@@ -724,12 +710,7 @@ def _l2_audit_batches(
             supports=semantic.decision.supports_verdict,
             reason=semantic.decision.reason.value,
         )
-        egress = _admitted_egress_event(
-            EgressStage.VERIFIER,
-            reservation_id=semantic.reservation_id,
-            replayed=semantic.replayed,
-            request_size=semantic.request_size,
-        )
+        egress = _outcome_egress_event(EgressStage.VERIFIER, semantic)
         return (((semantic_summary, egress), egress),)
     recovery = audit.outcome
     identity = _audit_identity_event(audit.audit_id, AgentName.EVIDENCE_AGENT)
@@ -815,12 +796,32 @@ def _agent_event(
     )
 
 
-def _planning_egress_event(result: PlannerResult) -> EgressSummaryEvent:
+def _planning_egress_event(result: PlannerResult) -> RunEvent:
+    return _outcome_egress_event(EgressStage.PLANNING, result)
+
+
+def _outcome_egress_event(stage: EgressStage, outcome: object) -> RunEvent:
+    cache_hit = bool(getattr(outcome, "cache_hit", False))
+    if cache_hit:
+        request_hash = getattr(outcome, "cache_request_hash", None)
+        record_hash = getattr(outcome, "cache_record_hash", None)
+        if not isinstance(request_hash, str) or not isinstance(record_hash, str):
+            raise ValueError("cache hit lacks opaque audit hashes")
+        return CacheSummaryEvent(
+            sequence=1,
+            hit=True,
+            stage=stage,
+            request_hash=request_hash,
+            record_hash=record_hash,
+        )
+    reservation_id = getattr(outcome, "reservation_id", None)
+    if not isinstance(reservation_id, str):
+        raise ValueError("egress outcome lacks reservation identity")
     return _admitted_egress_event(
-        EgressStage.PLANNING,
-        reservation_id=result.reservation_id,
-        replayed=result.replayed,
-        request_size=result.request_size,
+        stage,
+        reservation_id=reservation_id,
+        replayed=bool(getattr(outcome, "replayed", False)),
+        request_size=getattr(outcome, "request_size", None),
     )
 
 
@@ -862,15 +863,12 @@ def _blocked_egress_event(stage: EgressStage, error_code: str) -> EgressSummaryE
     )
 
 
-def _answer_egress_event(outcome: AnswerOutcome) -> EgressSummaryEvent | None:
+def _answer_egress_event(outcome: AnswerOutcome) -> RunEvent | None:
+    if outcome.cache_hit:
+        return _outcome_egress_event(EgressStage.EVIDENCE, outcome)
     if outcome.reservation_id is None:
         return None
-    return _admitted_egress_event(
-        EgressStage.EVIDENCE,
-        reservation_id=outcome.reservation_id,
-        replayed=outcome.replayed,
-        request_size=outcome.request_size,
-    )
+    return _outcome_egress_event(EgressStage.EVIDENCE, outcome)
 
 
 def _verifier_event(outcome: AnswerOutcome, *, started: float) -> VerifierSummaryEvent:

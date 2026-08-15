@@ -105,6 +105,7 @@ class RunEventKind(StrEnum):
     CANDIDATE_SUMMARY = "candidate_summary"
     EVIDENCE_SUMMARY = "evidence_summary"
     EGRESS_SUMMARY = "egress_summary"
+    CACHE_SUMMARY = "cache_summary"
     USAGE_SUMMARY = "usage_summary"
     ANSWER_OUTCOME = "answer_outcome"
     VERIFIER_SUMMARY = "verifier_summary"
@@ -234,6 +235,16 @@ class EgressSummaryEvent(_RunEventBase):
         return self
 
 
+class CacheSummaryEvent(_RunEventBase):
+    """Opaque evidence that a validated request avoided provider egress."""
+
+    kind: Literal[RunEventKind.CACHE_SUMMARY] = RunEventKind.CACHE_SUMMARY
+    hit: Annotated[bool, Field(strict=True)]
+    stage: EgressStage
+    request_hash: Sha256
+    record_hash: Sha256
+
+
 class UsageSummaryEvent(_RunEventBase):
     kind: Literal[RunEventKind.USAGE_SUMMARY] = RunEventKind.USAGE_SUMMARY
     stage: EgressStage
@@ -360,6 +371,7 @@ RunEvent = Annotated[
     | CandidateSummaryEvent
     | EvidenceSummaryEvent
     | EgressSummaryEvent
+    | CacheSummaryEvent
     | UsageSummaryEvent
     | AnswerOutcomeEvent
     | VerifierSummaryEvent
@@ -579,6 +591,7 @@ __all__ = [
     "ComplianceSummaryEvent",
     "DemoScenarioIdentity",
     "CandidateSummaryEvent",
+    "CacheSummaryEvent",
     "EgressSummaryEvent",
     "EvidenceRefSummary",
     "EvidenceSummaryEvent",

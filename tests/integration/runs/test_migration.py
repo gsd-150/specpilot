@@ -25,6 +25,7 @@ _EVENT_KINDS = {
     "candidate_summary",
     "evidence_summary",
     "egress_summary",
+    "cache_summary",
     "usage_summary",
     "answer_outcome",
     "verifier_summary",
@@ -95,6 +96,14 @@ def _valid_event_payloads() -> dict[str, dict[str, object]]:
             "request_bytes": 100,
             "cost_microunits": 3,
             "error_code": None,
+        },
+        "cache_summary": {
+            "kind": "cache_summary",
+            "sequence": 17,
+            "hit": True,
+            "stage": "evidence",
+            "request_hash": "c" * 64,
+            "record_hash": "d" * 64,
         },
         "usage_summary": {
             "kind": "usage_summary",
@@ -409,7 +418,7 @@ def test_raw_sql_accepts_every_closed_event_shape_and_raw_bm25_score(
             )
         assert connection.execute(
             "SELECT count(*) FROM specpilot_run_event WHERE run_id = %s", (run_id,)
-        ).fetchone() == (16,)
+        ).fetchone() == (17,)
 
 
 @pytest.mark.parametrize("container", ["candidates", "evidence", "checks"])
@@ -1007,6 +1016,59 @@ def test_migration_015_keeps_preexisting_rows_without_demo_identity(
                     "UPDATE specpilot_run "
                     "SET demo_scenario_id = 'unregistered' WHERE run_id = %s",
                     (run_id,),
+                )
+        finally:
+            connection.execute("RESET search_path")
+            connection.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+
+def test_migration_016_upgrades_015_and_admits_only_closed_cache_summary(
+    ledger_dsn: str,
+) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.errors import CheckViolation
+
+    from tests.conftest import MIGRATIONS_DIR
+
+    schema = f"test_w5_016_cache_{uuid.uuid4().hex}"
+    with psycopg.connect(ledger_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        try:
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+            )
+            for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                if migration.name >= "016_w5_cache_trace.sql":
+                    continue
+                connection.execute(migration.read_text(encoding="utf-8"))
+            run_id = _insert_run(connection)
+            connection.execute(
+                (MIGRATIONS_DIR / "016_w5_cache_trace.sql").read_text(
+                    encoding="utf-8"
+                )
+            )
+            payload = _valid_event_payloads()["cache_summary"]
+            _insert_event_payload(
+                connection,
+                run_id,
+                kind="cache_summary",
+                sequence=17,
+                payload=payload,
+            )
+            with pytest.raises(CheckViolation):
+                _insert_event_payload(
+                    connection,
+                    run_id,
+                    kind="cache_summary",
+                    sequence=18,
+                    payload={
+                        **payload,
+                        "sequence": 18,
+                        "response": "source prose",
+                    },
                 )
         finally:
             connection.execute("RESET search_path")

@@ -80,6 +80,11 @@ class EgressPolicyEnforcer:
         self._manifests = manifests
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    @property
+    def policy_hash(self) -> str:
+        """Expose only the immutable identity needed to bind a cache key."""
+        return self._policy.policy_hash
+
     def prepare(
         self,
         request: EgressRequest,

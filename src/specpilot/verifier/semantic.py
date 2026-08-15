@@ -21,7 +21,7 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.verdict import IdentifiedCandidate, SemanticDecision
 from specpilot.egress.ledger import RequestSize
-from specpilot.providers.transport import PolicyBoundTransport
+from specpilot.providers.transport import PolicyBoundTransport, TransportReceipt
 from specpilot.verifier.deterministic import DeterministicResult
 
 
@@ -35,18 +35,31 @@ class DeterministicVerificationRequired(Exception):
 class InvalidSemanticReply(Exception):
     """The semantic response failed its closed contract or evidence binding."""
 
-    __slots__ = ("replayed", "request_size", "reservation_id")
+    __slots__ = (
+        "cache_hit",
+        "cache_record_hash",
+        "cache_request_hash",
+        "replayed",
+        "request_size",
+        "reservation_id",
+    )
 
     def __init__(
         self,
         *,
-        reservation_id: str,
+        reservation_id: str | None,
         replayed: bool,
         request_size: RequestSize,
+        cache_hit: bool = False,
+        cache_request_hash: str | None = None,
+        cache_record_hash: str | None = None,
     ) -> None:
         self.reservation_id = reservation_id
         self.replayed = replayed
         self.request_size = request_size
+        self.cache_hit = cache_hit
+        self.cache_request_hash = cache_request_hash
+        self.cache_record_hash = cache_record_hash
         super().__init__("invalid_semantic_reply")
 
 
@@ -64,9 +77,12 @@ class SemanticContext:
 @dataclass(frozen=True, slots=True)
 class SemanticOutcome:
     decision: SemanticDecision
-    reservation_id: str
+    reservation_id: str | None
     replayed: bool
     request_size: RequestSize
+    cache_hit: bool = False
+    cache_request_hash: str | None = None
+    cache_record_hash: str | None = None
 
 
 class SemanticVerifier:
@@ -98,7 +114,7 @@ class SemanticVerifier:
             version=version,
             evidence_excerpts=tuple(item.excerpt for item in selected),
         )
-        decision, reservation_id, replayed, request_size = await _send_and_parse(
+        decision, receipt = await _send_and_parse(
             self._transport,
             EgressRequest(
                 evaluation_root_id=context.evaluation_root_id,
@@ -116,16 +132,22 @@ class SemanticVerifier:
         )
         if decision is None:
             error = InvalidSemanticReply(
-                reservation_id=reservation_id,
-                replayed=replayed,
-                request_size=request_size,
+                reservation_id=receipt.reservation_id,
+                replayed=receipt.replayed,
+                request_size=receipt.request_size,
+                cache_hit=receipt.cache_hit,
+                cache_request_hash=receipt.cache_request_hash,
+                cache_record_hash=receipt.cache_record_hash,
             )
             raise error
         return SemanticOutcome(
             decision=decision,
-            reservation_id=reservation_id,
-            replayed=replayed,
-            request_size=request_size,
+            reservation_id=receipt.reservation_id,
+            replayed=receipt.replayed,
+            request_size=receipt.request_size,
+            cache_hit=receipt.cache_hit,
+            cache_request_hash=receipt.cache_request_hash,
+            cache_record_hash=receipt.cache_record_hash,
         )
 
 
@@ -134,14 +156,10 @@ async def _send_and_parse(
     request: EgressRequest,
     idempotency_key: str,
     expected_evidence_ids: set[str],
-) -> tuple[SemanticDecision | None, str, bool, RequestSize]:
+) -> tuple[SemanticDecision | None, TransportReceipt]:
     receipt = await transport.send(request, idempotency_key=idempotency_key)
-    reservation_id = receipt.reservation_id
-    replayed = receipt.replayed
-    request_size = receipt.request_size
     decision = _parse_content(receipt.response.content, expected_evidence_ids)
-    del receipt
-    return decision, reservation_id, replayed, request_size
+    return decision, receipt
 
 
 def _parse_content(

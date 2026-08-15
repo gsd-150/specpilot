@@ -18,6 +18,7 @@ from specpilot.runs.contracts import (
     AgentStepEvent,
     AgentStepPhase,
     AnswerOutcomeEvent,
+    CacheSummaryEvent,
     EgressSummaryEvent,
     EvidenceSummaryEvent,
     PlanSummaryEvent,
@@ -102,6 +103,7 @@ class FakePlanner:
     entered: asyncio.Event = field(default_factory=asyncio.Event)
     block: asyncio.Event | None = None
     error: BaseException | None = None
+    cache_hit: bool = False
 
     async def plan(self, question: str, context: object) -> PlannerResult:
         self.calls += 1
@@ -112,9 +114,16 @@ class FakePlanner:
             raise self.error
         return PlannerResult(
             plan=FakePlan(),  # type: ignore[arg-type]
-            reservation_id="00000000-0000-0000-0000-000000000010",
+            reservation_id=(
+                None
+                if self.cache_hit
+                else "00000000-0000-0000-0000-000000000010"
+            ),
             replayed=False,
             request_size=RequestSize(request_tokens=11, request_bytes=111),
+            cache_hit=self.cache_hit,
+            cache_request_hash="a" * 64 if self.cache_hit else None,
+            cache_record_hash="b" * 64 if self.cache_hit else None,
         )
 
 
@@ -373,6 +382,28 @@ async def test_worker_claims_then_runs_each_stage_once_and_writes_typed_trace() 
     assert submitted.question not in repr(submitted)
     assert all(
         submitted.question not in event.model_dump_json() for event in store.events
+    )
+
+
+async def test_cached_planning_emits_cache_summary_without_egress_reservation() -> None:
+    made, store, *_ = worker(planner=FakePlanner(cache_hit=True))
+
+    await made.start()
+    await made.submit(job())
+    await wait_terminal(store)
+    await made.aclose()
+
+    cache_events = [
+        event for event in store.events if isinstance(event, CacheSummaryEvent)
+    ]
+    assert len(cache_events) == 1
+    assert cache_events[0].stage.value == "planning"
+    assert cache_events[0].request_hash == "a" * 64
+    assert cache_events[0].record_hash == "b" * 64
+    assert not any(
+        isinstance(event, EgressSummaryEvent)
+        and event.stage.value == "planning"
+        for event in store.events
     )
 
 
