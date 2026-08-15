@@ -97,6 +97,19 @@ def fixture_policy(**document_caps: dict[str, int]) -> EgressPolicy:
     return EgressPolicy.model_validate(fields)
 
 
+def test_fixture_policy_prices_only_the_committed_demo_document() -> None:
+    default = EgressPolicy.load()
+    fixture = EgressPolicy.load_fixture()
+
+    assert "ietf-rfc-9999" not in default.corpus_document_unique
+    assert set(fixture.corpus_document_unique) == {
+        *default.corpus_document_unique,
+        "ietf-rfc-9999",
+    }
+    cap = fixture.corpus_document_unique["ietf-rfc-9999"]
+    assert (cap.excerpts, cap.tokens, cap.bytes) == (64, 524_288, 524_288)
+
+
 def fixture_enforcer() -> EgressPolicyEnforcer:
     return EgressPolicyEnforcer(
         fixture_policy(), manifests=fixture_store(), clock=lambda: NOW

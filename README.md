@@ -165,9 +165,39 @@ policy hash, so an existing corpus ledger still needs the explicit migration
 003 successor and `egress rebind-policy` operation described above. No API
 startup performs migrations or policy rebinding.
 
-W3 uses bounded HTTP polling only. SSE, `/chat/{run_id}/events`, reconnect
-semantics, and SSE credential transport remain W5 work; this release contains
-no `EventSource` client or events endpoint.
+W5 upgrades that fallback to an owner-scoped SSE stream at
+`GET /runs/{run_id}/events`. The browser uses `fetch` streaming so credentials
+remain in an `Authorization` header or secure cookie, and resumes only through
+`Last-Event-ID`; credentials never enter the URL. Sequence gaps, conflicting
+replays, oversized frames, malformed UTF-8, and exhausted reconnects fail
+closed while preserving the last valid snapshot for manual refresh.
+
+The fixture profile exposes exactly four deterministic scenarios:
+`l1_answered`, `l2_answered`, `evidence_refused`, and
+`verifier_recovered`. They use committed vectors, a packaged fixture-only
+policy overlay, and `FakeProvider`; they demonstrate wiring and failure
+semantics, not answer quality. `fixture-init` publishes a deterministic
+successor authorized only for `fixture-provider/fixture-smoke`, then binds the
+corpus and ready marker to that successor. The default/real policy and exact
+real provider route remain unchanged.
+
+Run the complete engineering gate with explicit disposable services and an
+explicit Compose env file:
+
+```bash
+SPECPILOT_TEST_DSN=postgresql://... \
+SPECPILOT_TEST_QDRANT_URL=http://127.0.0.1:6333 \
+SPECPILOT_BROWSER_DSN=postgresql://.../specpilot_w5_task9_browser_scratch \
+SPECPILOT_COMPOSE_ENV_FILE=/absolute/path/to/fixture.env \
+make w5-check
+```
+
+The Task 9 browser fixture accepts that database name through an exact literal
+allowlist (the earlier `specpilot_w3_browser_test` name remains available for
+the standalone W3 browser gate); near matches and arbitrary environment names
+are rejected. The gate rejects service skips, renders demo/base/real Compose shapes, checks
+that base/real publish no host port, verifies the wheel, runs all five browser
+paths, and builds API, MCP, fixture-init, real-init, and ingestion images.
 
 ## W4 L2 gates, checkpointing, and owner-assisted recovery
 

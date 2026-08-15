@@ -1,0 +1,10 @@
+{
+  "corpus_document_unique": {
+    "ietf-rfc-9999": {
+      "bytes": 524288,
+      "excerpts": 64,
+      "tokens": 524288
+    }
+  },
+  "schema_version": "egress-fixture-policy-overlay/v1"
+}

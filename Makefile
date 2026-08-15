@@ -1,6 +1,8 @@
-.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant frontend-test frontend-build ingest-real
+.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant require-browser-dsn require-compose-env frontend-test frontend-build compose-check package-check image-check browser full-service w5-check ingest-real
 
 SPECPILOT_PYTHON ?= .venv/bin/python
+SPECPILOT_W5_TIMEOUT_SECONDS ?= 1800
+SPECPILOT_W5_RUN := perl -e 'alarm shift; exec @ARGV' $(SPECPILOT_W5_TIMEOUT_SECONDS)
 
 setup:
 	python -m venv .venv
@@ -51,13 +53,78 @@ require-qdrant:
 		echo "set SPECPILOT_TEST_QDRANT_URL; see compose.index.yaml"; \
 		exit 1; }
 
-fixture-smoke: require-dsn
+fixture-smoke: require-dsn require-qdrant
 	$(SPECPILOT_PYTHON) -m pytest tests/smoke -q -m fixture_smoke
 
 require-dsn:
 	@test -n "$$SPECPILOT_TEST_DSN" || { \
 		echo "set SPECPILOT_TEST_DSN to a throwaway PostgreSQL; see README"; \
 		exit 1; }
+
+require-browser-dsn:
+	@test -n "$$SPECPILOT_BROWSER_DSN" || { \
+		echo "set SPECPILOT_BROWSER_DSN to the fresh dedicated browser database"; \
+		exit 1; }
+
+require-compose-env:
+	@test -n "$$SPECPILOT_COMPOSE_ENV_FILE" || { \
+		echo "set SPECPILOT_COMPOSE_ENV_FILE to an explicit local fixture env file"; \
+		exit 1; }
+	@test -f "$$SPECPILOT_COMPOSE_ENV_FILE" || { \
+		echo "SPECPILOT_COMPOSE_ENV_FILE does not name a file"; \
+		exit 1; }
+
+# Render every deployment shape. The base and real configurations must remain
+# unpublished; their structural exposure assertions also live in the unit gate.
+compose-check: require-compose-env
+	docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" --profile demo config --quiet
+	docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.demo.yaml --profile demo config --quiet
+	docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile real config --quiet
+	@if docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" --profile real config | grep -q "published:"; then \
+		echo "base/real configuration publishes a host port"; exit 1; fi
+	@if docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile real config | grep -q "published:"; then \
+		echo "real override publishes a host port"; exit 1; fi
+
+package-check:
+	mkdir -p tmp/w5-dist
+	$(SPECPILOT_PYTHON) -m build --wheel --outdir tmp/w5-dist
+	$(SPECPILOT_PYTHON) -c 'import glob, zipfile; wheels=glob.glob("tmp/w5-dist/specpilot-*.whl"); assert len(wheels) == 1, wheels; names=set(zipfile.ZipFile(wheels[0]).namelist()); assert any(n.endswith("specpilot/api/static/trace/index.html") for n in names); assert any("specpilot/api/static/trace/assets/" in n for n in names); assert any(n.endswith("specpilot/egress/policies/default-v1.json") for n in names); assert any(n.endswith("specpilot/egress/policies/fixture-overlay-v1.json") for n in names)'
+
+image-check: require-compose-env
+	docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile demo --profile real --profile ingestion build api mcp fixture-init real-init ingestion
+
+browser: require-browser-dsn
+	PYTHONPATH="$(CURDIR):$(CURDIR)/src" \
+		SPECPILOT_PYTHON="$(SPECPILOT_PYTHON)" \
+		npm --prefix web/trace run test:browser
+
+# One invocation over the complete test tree. Capturing output lets the target
+# reject service skips explicitly instead of accepting pytest's exit status 0.
+full-service: require-dsn require-qdrant
+	@report=$$(mktemp -t specpilot-w5-pytest.XXXXXX); status=0; \
+	$(SPECPILOT_W5_RUN) env PYTHONPATH="$(CURDIR):$(CURDIR)/src" \
+		$(SPECPILOT_PYTHON) -m pytest --import-mode=importlib -q -rs \
+		>"$$report" 2>&1 || status=$$?; \
+	cat "$$report"; \
+	if test "$$status" -ne 0; then rm -f "$$report"; exit "$$status"; fi; \
+	if grep -Eq '[0-9]+ skipped|SKIPPED' "$$report"; then \
+		echo "W5 refuses a full-service run with skipped tests"; \
+		rm -f "$$report"; exit 1; \
+	fi; \
+	rm -f "$$report"
+
+# This is intentionally a recipe rather than prerequisites: each phase gets a
+# hard wall-clock bound and the ordered log shows which evidence surface failed.
+# The complete tree includes the four registered fixture scenarios over SSE.
+w5-check:
+	$(SPECPILOT_W5_RUN) $(MAKE) check
+	$(SPECPILOT_W5_RUN) $(MAKE) frontend-test
+	$(SPECPILOT_W5_RUN) $(MAKE) frontend-build
+	$(SPECPILOT_W5_RUN) $(MAKE) compose-check
+	$(SPECPILOT_W5_RUN) $(MAKE) package-check
+	$(SPECPILOT_W5_RUN) $(MAKE) full-service
+	$(SPECPILOT_W5_RUN) $(MAKE) browser
+	$(SPECPILOT_W5_RUN) $(MAKE) image-check
 
 ingest-real:
 	@test -n "$(CORPUS_DIR)" || { echo "set CORPUS_DIR to an absolute path"; exit 1; }

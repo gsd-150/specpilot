@@ -10,6 +10,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+from specpilot.contracts.manifests import ProviderRouteBinding, ProviderUse
 from specpilot.deployment.initialize import (
     FixtureInitializationRequest,
     InitializationRefusal,
@@ -23,6 +24,7 @@ from specpilot.manifests.corpus_store import (
     CollectionFrozenError,
     CorpusManifestStore,
 )
+from specpilot.manifests.store import ManifestStore
 from specpilot.retrieval.dense import DenseIndexWriter
 from tests.integration.qdrant.test_corpus_freeze import (
     SyntheticCorpus,
@@ -115,6 +117,20 @@ def test_fixture_initializes_exact_collection_and_replays_without_upsert(
     assert second == first
     assert first.mode == "fixture"
     assert ReadyMarkerStore(fixture_request.ready_dir).read() == first
+    source_id = first.source_manifest_ids[0]
+    source = ManifestStore(fixture_request.source_manifest_dir).read_source(source_id)
+    fixture = json.loads(
+        (fixture_request.fixture_dir / "fixture-manifest.json").read_text()
+    )
+    route = ProviderRouteBinding(
+        provider_id="fixture-provider",
+        endpoint_purpose="fixture-smoke",
+        use=ProviderUse.ONLINE_MAIN,
+    )
+    assert source_id != fixture["source"]["manifest_id"]
+    assert source.predecessor_manifest_id == fixture["source"]["manifest_id"]
+    assert source.provider_route_binding == route
+    assert source.authorizes(route, at=source.created_at)
 
 
 def test_fixture_refuses_partial_existing_collection_without_repair(

@@ -74,6 +74,20 @@
 
 ## Current state — 2026-08-15
 
+> **[W5 engineering gate closed｜2026-08-15]** W5 SSE/reconnect, the closed
+> four-scenario fixture registry, packaged fixture/real initialization,
+> fixture-only policy selection, React trace flow, and the hard local/CI gate
+> are implemented. Fresh PostgreSQL plus Qdrant evidence records **2199 passed,
+> 0 skipped**; Playwright records **5/5 passed**; the rebuilt packaged API ran
+> all four scenarios over real HTTP/SSE with terminal states
+> answered/answered/refused/answered. Exact hashes, commands, timings, and the
+> Docker residual are in `docs/reports/w5-streaming-demo-and-freeze.md`.
+>
+> This closes the W5 engineering package only. Live-provider acceptance,
+> author-owned evaluation freeze decisions, dev diagnostics/calibration, and
+> every locked W6 run remain open. No locked output was read. Fixture runs
+> supply no answer-quality metric.
+
 > **[Superseding current-state snapshot]** This dated block supersedes the
 > 2026-08-13 status below without rewriting its historical record. The
 > restricted stores now report **L1 40/40**, **L2 20/20**, zero awaiting
@@ -229,6 +243,12 @@ real provider, credential, or model, and its own output says so.
      保留的是 SSE（`GET /chat/{run_id}/events`）、断线重连与 SSE 专属凭据传递，即在
      一个已经存在的页面上做升级，而不是从零建页面。四个 fixture 场景、
      demo/real init 与评测冻结不变。
+   - **[工程包已完成并实测｜2026-08-15]** SSE/断线续传、四个封闭 fixture
+     场景、fixture-init/real-init、demo/real 暴露边界、wheel/五镜像构建和零
+     service-skip CI gate 已完成；fresh PostgreSQL + Qdrant 为 **2199 passed,
+     0 skipped**，浏览器为 **5/5**。作者负责的评分路线/prompt/threshold/
+     `run_spec` 冻结与 dev diagnostics 未由自动化代行，继续保持开放；W6 locked
+     集仍未运行。
 
 8. **W6 — Locked evaluation and release evidence**
    - First-run the locked L1/L2 and L2-adv test sets.

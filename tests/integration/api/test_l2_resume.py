@@ -237,6 +237,7 @@ async def test_owner_resume_preserves_checkpoint_accounting_across_worker_loss(
             "request_id": str(uuid4()),
             "evaluation_root_id": "l2-resume-root",
             "task_level": "L2",
+            "scenario_id": "l2_answered",
             "source_manifest_id": runtime.binding.source_manifest_id,
             "corpus_manifest_id": runtime.binding.corpus_manifest_id,
         }

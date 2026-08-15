@@ -47,7 +47,12 @@ from tests.helpers.corpus_manifest_factory import corpus_draft
 from tests.unit.corpus.test_tool_metadata import TOOL_RFC_XML
 from tests.unit.manifests.test_source_manifest import assessment
 
-_DATABASE = "specpilot_w3_browser_test"
+_DATABASE_PATHS = frozenset(
+    {
+        "/specpilot_w3_browser_test",
+        "/specpilot_w5_task9_browser_scratch",
+    }
+)
 _DOCUMENT_ID = "ietf-rfc-9110"
 
 
@@ -137,7 +142,7 @@ def _require_browser_dsn() -> str:
     if parsed.scheme not in {"postgresql", "postgres"}:
         raise RuntimeError("browser fixture DSN is required")
     if (
-        parsed.path != f"/{_DATABASE}"
+        parsed.path not in _DATABASE_PATHS
         or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
         or parsed.query
         or parsed.fragment
@@ -285,7 +290,7 @@ def create_fixture_app() -> Any:
         transport=httpx.ASGITransport(app=mcp_app),
         base_url="http://127.0.0.1:8080",
     )
-    policy = EgressPolicy.load()
+    policy = EgressPolicy.load_fixture()
     _seed_epoch(dsn, manifest.manifest_id, policy.policy_hash)
     environment = {
         "SPECPILOT_API_PROFILE": "fixture",

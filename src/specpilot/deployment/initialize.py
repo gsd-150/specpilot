@@ -9,7 +9,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Literal, Never
@@ -25,7 +25,18 @@ from specpilot.contracts.corpus_manifest import (
     ParseQaEvidence,
     QdrantSnapshotBinding,
 )
-from specpilot.contracts.manifests import RfcSourceManifest, RfcSourceManifestDraft
+from specpilot.contracts.manifests import (
+    AuthorizationConclusion,
+    ComplianceAssessment,
+    EvidenceSnapshot,
+    OutboundLimitAssessment,
+    ProviderPolicyAssessment,
+    ProviderRouteBinding,
+    ProviderUse,
+    RfcSourceManifest,
+    RfcSourceManifestDraft,
+    SourceTermsAssessment,
+)
 from specpilot.contracts.rfc import RfcLimits
 from specpilot.corpus.clauses import EXCLUDED_SECTIONS, ClauseLimits
 from specpilot.corpus.dense_inventory import (
@@ -67,6 +78,11 @@ _MAX_FIXTURE_MANIFEST_BYTES = 64 * 1024
 _MAX_DENSE_POINTS_BYTES = 32 * 1024 * 1024
 _QDRANT_OPERATION_TIMEOUT_SECONDS = 10
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_FIXTURE_ROUTE = ProviderRouteBinding(
+    provider_id="fixture-provider",
+    endpoint_purpose="fixture-smoke",
+    use=ProviderUse.ONLINE_MAIN,
+)
 
 
 class InitializationRefusal(ValueError):
@@ -393,6 +409,7 @@ def _observe_fixture(
 
 def _fixture_intent(
     bundle: _FixtureBundle,
+    source_manifest_id: str,
     schema: object,
     point_count: int,
     inventory_root: str,
@@ -401,7 +418,7 @@ def _fixture_intent(
 
     parameters = bundle.bm25.parameters
     return CorpusManifestIntent(
-        source_manifest_ids=(bundle.manifest.source.manifest_id,),
+        source_manifest_ids=(source_manifest_id,),
         versions=_current_versions(),
         embedding_weights_sha256=bundle.manifest.embedding_weights_sha256,
         bm25=Bm25Binding(
@@ -418,7 +435,7 @@ def _fixture_intent(
         inventory_root_sha256=inventory_root,
         parse_qa=(
             ParseQaEvidence(
-                source_manifest_id=bundle.manifest.source.manifest_id,
+                source_manifest_id=source_manifest_id,
                 evidence_sha256=hashlib.sha256(
                     b"specpilot/fixture-parse-qa/v1\x1f"
                     + bundle.manifest.source.sha256.encode("ascii")
@@ -444,11 +461,12 @@ def _marker_for(
 def _verify_fixture_marker(
     request: FixtureInitializationRequest,
     bundle: _FixtureBundle,
+    source_manifest_id: str,
     marker: ReadyMarker,
 ) -> ReadyMarker:
     if (
         marker.mode != "fixture"
-        or marker.source_manifest_ids != (bundle.manifest.source.manifest_id,)
+        or marker.source_manifest_ids != (source_manifest_id,)
         or marker.collection_name != bundle.manifest.collection_name
         or marker.point_count != bundle.manifest.dense_points.point_count
         or marker.inventory_root_sha256 != bundle.inventory_root_sha256
@@ -480,6 +498,52 @@ def _verify_fixture_marker(
     return marker
 
 
+def _fixture_assessment(created_at: datetime) -> ComplianceAssessment:
+    """Return deterministic synthetic evidence for the committed fake route only."""
+    at = created_at.astimezone(UTC)
+    premise = "Only committed synthetic fixture excerpts may reach the fake provider."
+    snapshot_hash = hashlib.sha256(
+        b"specpilot/fixture-only-compliance-evidence/v1"
+    ).hexdigest()
+    snapshot = EvidenceSnapshot.model_validate(
+        {
+            "snapshot_url": "https://example.test/specpilot/fixture-only-evidence",
+            "snapshot_sha256": snapshot_hash,
+            "captured_at": at,
+        }
+    )
+    return ComplianceAssessment(
+        source_terms=SourceTermsAssessment(
+            terms_snapshot=snapshot,
+            summary="Synthetic fixture terms for offline packaged-demo verification.",
+            uncertainty=("This evidence must never authorize a live provider.",),
+        ),
+        provider_policy=ProviderPolicyAssessment(
+            policy_snapshot=snapshot,
+            retention_summary="The fake provider stores no fixture requests.",
+            training_summary="The fake provider performs no training.",
+            region_summary="The fake provider runs inside the local test boundary.",
+            subprocessor_summary="The fake provider has no subprocessors.",
+            uncertainty=("This evidence applies only to the fake fixture route.",),
+        ),
+        outbound_limit=OutboundLimitAssessment(
+            premise=premise,
+            premise_sha256=hashlib.sha256(premise.encode("utf-8")).hexdigest(),
+        ),
+        author_conclusion=AuthorizationConclusion(
+            authorized=True,
+            authorization_statement=(
+                "This synthetic fixture authorizes only the exact fake provider route."
+            ),
+            author_id="fixture-only-synthetic-author",
+            provider_id=_FIXTURE_ROUTE.provider_id,
+            endpoint_purpose=_FIXTURE_ROUTE.endpoint_purpose,
+            authored_at=at,
+            expires_at=datetime(2036, 8, 15, tzinfo=UTC),
+        ),
+    )
+
+
 def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
     """Validate committed fixture bytes before touching Qdrant, then seal once."""
     bundle = _load_fixture_bundle(request.fixture_dir)
@@ -494,6 +558,15 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
         _refuse("fixture_source_manifest_mismatch")
     if stored_source.manifest_id != bundle.manifest.source.manifest_id:
         _refuse("fixture_source_manifest_mismatch")
+    try:
+        authorized_source = source_store.create_successor_v2(
+            stored_source,
+            assessment=_fixture_assessment(bundle.manifest.source.created_at),
+            route_binding=_FIXTURE_ROUTE,
+            created_at=bundle.manifest.source.created_at,
+        )
+    except (OSError, ValueError):
+        _refuse("fixture_source_manifest_mismatch")
 
     ready_store = ReadyMarkerStore(request.ready_dir)
     try:
@@ -503,7 +576,9 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
     except (OSError, ValueError):
         _refuse("ready_marker_mismatch")
     if existing_marker is not None:
-        return _verify_fixture_marker(request, bundle, existing_marker)
+        return _verify_fixture_marker(
+            request, bundle, authorized_source.manifest_id, existing_marker
+        )
 
     corpus_store = CorpusManifestStore(request.corpus_manifest_dir)
     admin = QdrantClient(
@@ -532,7 +607,13 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
         schema, point_count, inventory_root = _observe_fixture(
             bundle, request.qdrant_url
         )
-        intent = _fixture_intent(bundle, schema, point_count, inventory_root)
+        intent = _fixture_intent(
+            bundle,
+            authorized_source.manifest_id,
+            schema,
+            point_count,
+            inventory_root,
+        )
         with corpus_store.acquire_freeze_lease(
             bundle.manifest.collection_name
         ) as freeze_lease:

@@ -239,7 +239,7 @@ async def _runtime(
         transport=httpx.ASGITransport(app=mcp_app),
         base_url="http://127.0.0.1:8080",
     )
-    policy = EgressPolicy.load()
+    policy = EgressPolicy.load_fixture()
     await _seed_epoch(dsn, corpus_id, policy.policy_hash)
     secret = "e2e-session-secret-material-at-least-32-bytes"
     environment = {

@@ -298,7 +298,7 @@ def _assemble_runtime(
     if config.profile == "real":
         _require_real_route(route.provider_id, route.endpoint_purpose)
 
-    policy = EgressPolicy.load()
+    policy = _policy_for_profile(config.profile)
     adapter, provider_hook = _provider(config.profile, route.provider_id)
     cache = (
         None
@@ -736,6 +736,10 @@ def _require_real_route(provider_id: str, endpoint_purpose: str) -> None:
         MAIN_ROUTE.endpoint_purpose,
     ):
         raise ValueError("source route does not match the real main endpoint")
+
+
+def _policy_for_profile(profile: Literal["fixture", "real"]) -> EgressPolicy:
+    return EgressPolicy.load_fixture() if profile == "fixture" else EgressPolicy.load()
 
 
 async def _postgres_health(dsn: str) -> bool:

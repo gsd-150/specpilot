@@ -12,6 +12,7 @@ from specpilot.contracts.egress import CapSnapshot, CapVector, NormalizedExcerpt
 
 _POLICY_PACKAGE = "specpilot.egress.policies"
 _DEFAULT_POLICY_NAME = "default-v1.json"
+_FIXTURE_POLICY_OVERLAY_NAME = "fixture-overlay-v1.json"
 
 
 class MissingDocumentCap(LookupError):
@@ -68,6 +69,32 @@ class EgressPolicy(_PolicyModel):
         if not isinstance(raw, dict):
             raise ValueError("egress policy root must be a mapping")
         return cls.model_validate(raw)
+
+    @classmethod
+    def load_fixture(cls) -> EgressPolicy:
+        """Load the default policy plus the one committed synthetic document.
+
+        The overlay is intentionally unavailable through ``load`` so the real
+        profile cannot acquire test-only disclosure capacity by default.
+        """
+        default = cls.load()
+        try:
+            raw = json.loads(_packaged_policy_text(_FIXTURE_POLICY_OVERLAY_NAME))
+        except json.JSONDecodeError as error:
+            raise ValueError("fixture policy overlay must be JSON") from error
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version",
+            "corpus_document_unique",
+        }:
+            raise ValueError("fixture policy overlay has unexpected fields")
+        if raw["schema_version"] != "egress-fixture-policy-overlay/v1":
+            raise ValueError("fixture policy overlay version is unsupported")
+        caps = raw["corpus_document_unique"]
+        if not isinstance(caps, dict) or set(caps) != {"ietf-rfc-9999"}:
+            raise ValueError("fixture policy overlay must price only the demo document")
+        merged = dict(default.corpus_document_unique)
+        merged["ietf-rfc-9999"] = CapVector.model_validate(caps["ietf-rfc-9999"])
+        return default.model_copy(update={"corpus_document_unique": merged})
 
     @property
     def policy_hash(self) -> str:
@@ -127,6 +154,11 @@ class EgressPolicy(_PolicyModel):
 def _default_policy_text() -> str:
     """Read the policy that ships inside the installed package, not the repo tree."""
     resource = resources.files(_POLICY_PACKAGE).joinpath(_DEFAULT_POLICY_NAME)
+    return resource.read_text(encoding="utf-8")
+
+
+def _packaged_policy_text(name: str) -> str:
+    resource = resources.files(_POLICY_PACKAGE).joinpath(name)
     return resource.read_text(encoding="utf-8")
 
 

@@ -536,7 +536,7 @@ async def test_owner_event_read_refuses_corrupted_rows_without_raw_json(
             await connection.execute(
                 "ALTER TABLE specpilot_run_event ADD CONSTRAINT "
                 "specpilot_run_event_payload_check CHECK "
-                "(specpilot_valid_run_event(kind, sequence, payload))"
+                "(specpilot_valid_w4_run_event(kind, sequence, payload))"
             )
             await connection.commit()
 
@@ -1165,7 +1165,7 @@ async def test_corrupted_event_metadata_fails_closed_without_raw_json(
             await connection.execute(
                 "ALTER TABLE specpilot_run_event ADD CONSTRAINT "
                 "specpilot_run_event_payload_check CHECK "
-                "(specpilot_valid_run_event(kind, sequence, payload))"
+                "(specpilot_valid_w4_run_event(kind, sequence, payload))"
             )
             await connection.commit()
 

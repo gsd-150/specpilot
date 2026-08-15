@@ -16,6 +16,7 @@ from specpilot.api.contracts import ChatRequest
 from specpilot.api.runtime import (
     ApiRuntimeConfig,
     _McpClientHook,
+    _policy_for_profile,
     _register_demo_script,
     _require_real_route,
     create_runtime_app,
@@ -37,6 +38,14 @@ API_ENV = {
     "SPECPILOT_API_COMPLIANCE_PROMPT_HASH": "c" * 64,
     "SPECPILOT_API_VERIFIER_PROMPT_HASH": "d" * 64,
 }
+
+
+def test_runtime_selects_fixture_overlay_without_widening_real_policy() -> None:
+    fixture = _policy_for_profile("fixture")
+    real = _policy_for_profile("real")
+
+    assert "ietf-rfc-9999" in fixture.corpus_document_unique
+    assert "ietf-rfc-9999" not in real.corpus_document_unique
 
 
 @pytest.fixture(autouse=True)

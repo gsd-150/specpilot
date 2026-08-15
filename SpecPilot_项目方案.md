@@ -997,7 +997,7 @@ L2 主集的 12 例 locked（4/4/4）是三类混淆矩阵的最小可用规模�
 | W2 | 完成两份规范的 parent-child 切分与 §4.1 QA；建 Qdrant 和本地 dense/BM25/RRF 基线，实现 pooling 所需的本地 search/get；建立只读 corpus snapshot；完成剩余 L1/L2 gold、一次性 pooling 与分组拆分 | 两份规范全部入库且 QA 过阻断线；corpus_manifest/collection 不可变；W2 末锁定 L1/L2。locked query 只运行 pooling-only 基线，不算指标、不跑混合/端到端链路，保存候选 hash 与裁决日志 |
 | W3 | 把 W0 的出站账本接入真实主链（W0 只在测试 transport 上验证过）；把五个只读能力封装为 MCP；完成 FastAPI L1、单 Agent 基线、Orchestrator、Evidence Agent、预算与基础轨迹；完成 L1 自动 judge 校准或人工评分流程演练；构造 6 个 L2-adv-dev 与 10 个 L2-adv-test | L1 API 返回带 manifest 的引用；账本在真实主链上的原子 reservation/恢复测试通过；五个 MCP 工具可复跑；L1 dev 评分记录完成；L2-adv dev/test 互斥且 test hash 在 Verifier 调优前冻结 |
 | W4 | 完成 Compliance Agent、Verifier、retrieval-recovery package、最小 checkpoint/run ownership、拒答与异常恢复；用代表性 L2 dev 输出校准自动 judge 或演练人工协议；只在各 dev 集运行完整评测 | L2 跑通；坏参数、空检索、超时、循环、预算、出站越权和 gate 失败测试通过；L2 dev 评分记录完成；**产出明确标为开发集的首批真实数字** |
-| W5 | 完成 SSE 与最小 trace 页、demo/real profiles、fixture-init/real-init、CI 与离线 demo；时间允许时完成 dev diagnostics（dense-only、H-flat/H-tree、职责分离）；在 dev 对两组核心对照 dry run；冻结默认链路、评分路线/prompt、阈值与 evaluation `run_spec` | demo 幂等运行四个预注册场景；real-init 可验证/恢复指定 manifest 的索引；核心对照脚本在 dev 通过；`run_spec` hash 与最终 corpus_manifest_id 冻结；未完成的 dev diagnostics 明确转 backlog |
+| W5 | 完成 SSE 与最小 trace 页、demo/real profiles、fixture-init/real-init、CI 与离线 demo；时间允许时完成 dev diagnostics（dense-only、H-flat/H-tree、职责分离）；在 dev 对两组核心对照 dry run；冻结默认链路、评分路线/prompt、阈值与 evaluation `run_spec`。**[工程状态｜2026-08-15]** SSE、四场景、初始化、profile 暴露边界、wheel/五镜像与零跳过硬 gate 已完成；作者冻结与 dev diagnostics 仍开放。 | demo 已幂等运行四个预注册场景，fresh 服务树 2199 passed/0 skipped，浏览器 5/5；real-init 已构建并由集成测试覆盖。核心对照 dev dry run、作者选择的 `run_spec`/评分路线冻结仍须单独完成；locked 输出保持 W6 首次运行边界。 |
 | W6 | 首次运行 L1/L2 主锁定测试与 L2-adv-test；两组核心对照各做 3 次配对复跑；封存逐次 evaluation_run_manifest 与最终 report manifest；完成自动 judge 的人工审计或纯人工主评分、冷缓存成本/延迟、README、报告、视频和简历材料 | 测试结果未反向调参；主指标与核心对照给出原始计数；每个数字可追溯至不可变 report/run manifest；所选评分路线完成；公开仓库、版本化报告、视频和发布说明齐全 |
 
 Dify 展示不占用 W0–W6 任何周次，统一放在首发发布后的 backlog。周期内提前完成某项工作形成的机动时间，只用于补标注、失败分析、自动化测试或报告，不得临时扩张范围。
@@ -1179,7 +1179,7 @@ W4 末的中期节点（§11.1）可以先写入一版，但必须逐项标注�
 
 ## 十六、下一步
 
-> **[状态校正｜2026-08-13]** 下方三项是原开工前动作，现已完成。“需求跨连续段落”的通用 gold 规则已在 Task 12 写明：问题优先收窄到一个 clause 完整回答；承载规范性关键词的段落不可省略；确实需要两段时 gold 就记两个。剩余 20 条 L1 locked proposal 也已起草并通过自动校验，当前作者专属下一步是 Task 7 choice review；通过后 L1 才从正式 20/40 变为 40/40。随后补上 `gold_section_paths` 与 Gold ID 的 source-path 一致性校验，完成 L2 dev 8 条与现有 3 条的 adjudication，再继续 L2 locked 与对应 pooling。工程线可与标注并行进入 W4/W5：L2/Compliance 与 Verifier、checkpoint recovery，随后是 SSE/reconnect 和完整 fixture demo matrix。W6 locked evaluation 仍保持首次运行边界，不用 locked 输出反向调参。
+> **[状态校正｜2026-08-15]** W4 的 L2/Compliance、Verifier、checkpoint recovery 与 W5 的 SSE/reconnect、完整 fixture demo matrix、packaged init 和硬 CI gate 均已完成工程验证。当前自动化证据为 fresh PostgreSQL + Qdrant 2199 passed/0 skipped、浏览器 5/5；它只证明工程链路，不证明回答质量。真实 provider 验收、作者负责的评分路线/prompt/threshold/`run_spec` 冻结和未完成 dev diagnostics 仍开放。W6 locked evaluation 保持首次运行边界，未读取输出，也不得用于反向调参。
 
 1. 用户复核本方案的任务边界、评测规模和 7 周排期；
 2. 复核通过后，编写逐文件、逐测试的实施计划；
