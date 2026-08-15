@@ -621,7 +621,7 @@ L1 关键点覆盖率这类指标无法用字符串匹配算出来，需要一�
 >
 > **[已完成｜2026-08-15 judge 评分链路交付]** 已交付：评分契约（含 `JudgePayload.query` 输入补全）、版本化+哈希的 judge prompt 与回复 schema、§8.3.2 校准数学（两套标签分别报一致率/Cohen's kappa/混淆矩阵/严重错误交叉表，绝不合并）、§8.4 答案指标聚合（逐题 KPRecall、Macro-KPRecall、unsupported/gold-contradiction 率、严重错误题数）、judge 记录与人工标签的 content-addressed 存储、无正文的冻结证据文件构造器，以及 `judge calibrate / labels-template / labels-add / score` 四条 CLI。建设期间跨 join 回归测试抓出一个真实缺陷：prompt 要求 `key_points` 字段而 parser 契约名为 `key_point_hits`——正是「契约与离开的字节不一致」这一类。快速门禁 1993 通过、126 个源文件 strict mypy 干净；套件零真实调用。剩余作者事项：dev 跑题、人工标签、真实 judge 调用与校准验收。
 >
-> **[已实测｜2026-08-16 L1 dev 首跑与校准]** 13 个可回答 L1 dev 实跑：9 答 4 拒。judge 校准证据（9 case，prompt v1，glm-5.2）：采分点 n=18 一致率与 kappa 均 1.0；claim n=12 一致率 0.917、kappa 0.0（judge 全判 supported 的边际坍缩所致，唯一分歧在 008 的 SHOULD 强度 claim；severe 标志 12/12 一致）——四样数字必须并报，单看任一都会误读。四个拒答分三类并**记录不改**：002 检索漏（dense 第 6 名差一名进 top-5，改动即动冻结 manifest 的 retrieval protocol）；010 跨锚点已知局限（两条 gold 只能检回一条，即 `all_required_hit_rate=0` 的唯一一例）；011/016 模型侧保守（gold 完整且 rank 1 已展示仍拒答，fail-closed 属设计行为）。完整诊断见 `docs/reports/2026-08-16-l1-dev-refusal-diagnosis.md`。校准覆盖口径：证据代表 9/13 可回答 dev，报告必须如实披露，不得写成 13/13。
+> **[已实测｜2026-08-16 L1 dev 首跑与校准]** 13 个可回答 L1 dev 实跑：9 答 4 拒，其中 1 例（l1-dev-001）是作者 08-13 已退隐的题——首版跑题脚本未过滤退隐项，已修正并从校准集中剔除。**重校准证据覆盖 8/12 个在册可回答 dev**（prompt v1，glm-5.2）：采分点 n=16 一致率与 kappa 均 1.0；claim n=10 一致率 0.9、kappa 0.0（judge 全判 supported 的边际坍缩所致，唯一分歧在 008 的 SHOULD 强度 claim；severe 标志 10/10 一致）——四样数字必须并报，单看任一都会误读。四个拒答分三类并**记录不改**：002 检索漏（dense 第 6 名差一名进 top-5，改动即动冻结 manifest 的 retrieval protocol）；010 跨锚点已知局限（两条 gold 只能检回一条，即 `all_required_hit_rate=0` 的唯一一例）；011/016 模型侧保守（gold 完整且 rank 1 已展示仍拒答，fail-closed 属设计行为）。完整诊断见 `docs/reports/2026-08-16-l1-dev-refusal-diagnosis.md`。
 
 需要区分两类指标，它们的算法完全不同，不要混为一谈：
 

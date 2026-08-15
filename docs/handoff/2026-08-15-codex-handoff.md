@@ -48,11 +48,13 @@ author labels → `labels-add` → `judge calibrate` (evidence + hash) →
 ## L1 dev calibration — 2026-08-16
 
 The first author-run dev pass answered 9 of 13 answerable L1 dev cases and
-refused 4. Judge calibration over the 9 (prompt v1, glm-5.2): key points n=18,
-agreement 1.0, kappa 1.0; claims n=12, agreement 0.917, kappa 0.0 (unbalanced
-marginals — the judge rated every claim supported; the single disagreement is
-l1-dev-008's SHOULD-strength claim), severe-flag agreement 12/12. The evidence
-sha256 is `392900c592f881102d90597ffd34ec6f9e5c51449fa7e9be45ccaa36fb51117a`;
+refused 4; one of the 9 was the item the author had already retired on
+2026-08-13 (l1-dev-001), so the calibration was rebuilt over the **8 live**
+cases. Judge calibration (prompt v1, glm-5.2): key points n=16, agreement 1.0,
+kappa 1.0; claims n=10, agreement 0.9, kappa 0.0 (unbalanced marginals — the
+judge rated every claim supported; the single disagreement is l1-dev-008's
+SHOULD-strength claim), severe-flag agreement 10/10. The evidence sha256 is
+`a611f7fa3dcec9627ea62a34dbf73e62539843a5e809ce1ab5aa8214c0d7baac`;
 `dev-scoring-status.json` carries route `judge_calibrated` and split `dev`.
 
 The four refusals are diagnosed and deliberately left unfixed — see

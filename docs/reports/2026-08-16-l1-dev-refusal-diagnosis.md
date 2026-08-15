@@ -9,8 +9,14 @@ tuned the system.
 
 ## Calibration coverage
 
-The judge calibration evidence built on 2026-08-16 covers **9 of 13**
-answerable L1 dev cases. The four refusals are outside it: a refusal has no
+The judge calibration evidence built on 2026-08-16 covers **8 of 12**
+live answerable L1 dev cases. (The thirteenth answerable dev item,
+`l1-dev-001`, was retired by the author on 2026-08-13 — the question asks for
+the single respect a HEAD response differs from GET, while the corpus permits
+a second — and the first dev pass included it anyway because the dev-run dump
+script did not filter retired items. That defect is fixed, the retired case's
+record and labels were removed from the calibration stores, and the evidence
+below was rebuilt over the 8 live cases.) The four refusals are outside it: a refusal has no
 answer to score, and its disposition is recorded here instead. The dev set
 also contains 2 unanswerable cases, which the refusal metrics own rather than
 the judge.
@@ -71,10 +77,10 @@ outcome the refusal metrics measure, not a defect to paper over.
 Judge calibration over the 9 scored cases (prompt v1, model `glm-5.2`,
 route `offline_judge`):
 
-- key points: n = 18, agreement 18/18, Cohen's kappa 1.0;
-- answer claims: n = 12, agreement 11/12 (0.917), Cohen's kappa 0.0 with the
+- key points: n = 16, agreement 16/16, Cohen's kappa 1.0;
+- answer claims: n = 10, agreement 9/10 (0.9), Cohen's kappa 0.0 with the
   single disagreement on `l1-dev-008`'s SHOULD-strength claim (judge
-  `supported`, author `insufficient`), severe-flag agreement 12/12.
+  `supported`, author `insufficient`), severe-flag agreement 10/10.
 
 The claim kappa of 0.0 beside an agreement rate of 0.917 is the unbalanced-
 marginal kappa paradox — the judge rated every claim `supported`, so chance
@@ -82,4 +88,4 @@ agreement absorbed the observed agreement. §8.3.2 requires the four numbers
 together (rate, kappa, confusion, counts) precisely because any one of them
 misreads this distribution.
 
-The evidence file sha256 is `392900c592f881102d90597ffd34ec6f9e5c51449fa7e9be45ccaa36fb51117a`.
+The evidence file sha256 is `a611f7fa3dcec9627ea62a34dbf73e62539843a5e809ce1ab5aa8214c0d7baac` (rebuilt after the retirement correction; the earlier hash `392900c5…` covered the 9-case set that wrongly included the retired item).
