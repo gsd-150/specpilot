@@ -529,3 +529,31 @@ async def test_undisclosed_compliance_id_survives_fake_reply_unchanged() -> None
 
     assert parsed.candidates[0].evidence_ids == (undisclosed,)
     assert undisclosed not in {item.content_hash for item in payload.evidence_excerpts}
+
+
+def test_compliance_instructions_state_the_insufficient_evidence_rule() -> None:
+    """The cross-join guard for the closed candidate contract.
+
+    The contract refuses evidence ids on an insufficient candidate; the
+    instructions must tell the model the same rule, or the model returns the
+    natural-but-invalid shape (evidence examined, verdict insufficient) and
+    the first live run fails exactly as it did.
+    """
+    from specpilot.contracts.verdict import ComplianceBatch
+    from specpilot.providers.http import COMPLIANCE_REPLY_INSTRUCTIONS
+
+    assert "insufficient_evidence" in COMPLIANCE_REPLY_INSTRUCTIONS
+    assert "empty list" in COMPLIANCE_REPLY_INSTRUCTIONS
+    batch = ComplianceBatch.model_validate(
+        {
+            "candidates": [
+                {
+                    "claim": "undetermined claim",
+                    "proposed_verdict": "insufficient_evidence",
+                    "rationale": "the excerpts do not settle it",
+                    "evidence_ids": [],
+                }
+            ]
+        }
+    )
+    assert len(batch.candidates) == 1

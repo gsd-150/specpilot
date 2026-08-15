@@ -92,7 +92,10 @@ _PLANNING_SYSTEM_PROMPT = json.dumps(
 COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
     {
         "instruction": (
-            "Split into one to three atomic candidates and return JSON only."
+            "Split into one to three atomic candidates and return JSON only. "
+            "A candidate whose proposed_verdict is insufficient_evidence must "
+            "set evidence_ids to an empty list: the ids name evidence FOR a "
+            "claim, and an insufficient claim has none."
         ),
         "response_schema": ComplianceBatch.model_json_schema(),
     },
