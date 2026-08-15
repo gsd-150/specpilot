@@ -26,6 +26,12 @@ from specpilot.annotation.adversarial import (
     build_overlap_report,
     build_registration_status,
 )
+from specpilot.annotation.freeze_status import (
+    FreezeStatusError,
+    build_deep_review_status,
+    build_pooling_status,
+    build_progress_status,
+)
 from specpilot.annotation.progress import (
     PoolingAuditProgress,
     PoolingRunProgress,
@@ -3415,6 +3421,34 @@ def _annotation_progress(arguments: argparse.Namespace) -> int:
         return _refuse("invalid_annotation_record")
     except OSError:
         return _refuse("io_error", EXIT_IO)
+
+    if arguments.freeze_status_dir is not None:
+        # Projected from this same report rather than from a second pass, so
+        # the gate can never be handed a count the progress output disagrees
+        # with.
+        if gold_review is None:
+            return _refuse("deep_review_sample_undeclared", EXIT_USAGE)
+        try:
+            statuses = {
+                "progress-status.json": build_progress_status(report),
+                "deep-review-status.json": build_deep_review_status(
+                    expected=gold_review.deep_review_expected,
+                    recorded=gold_review.deep_review_recorded,
+                ),
+                "pooling-status.json": build_pooling_status(report),
+            }
+        except FreezeStatusError:
+            return _refuse("freeze_status_incomplete")
+        try:
+            arguments.freeze_status_dir.mkdir(parents=True, exist_ok=True)
+            for name, payload in statuses.items():
+                (arguments.freeze_status_dir / name).write_text(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+        except OSError:
+            return _refuse("io_error", EXIT_IO)
+
     return _emit(report.payload())
 
 
@@ -4349,6 +4383,9 @@ def _parser() -> argparse.ArgumentParser:
     progress.add_argument("--deep-review-rate", type=float, default=None)
     progress.add_argument("--deep-review-salt", default=None)
     progress.add_argument("--pool-dir", type=Path, default=None)
+    # Optional on purpose: the gate's three files are a projection of this
+    # same report, so asking for them never triggers a second count.
+    progress.add_argument("--freeze-status-dir", type=Path, default=None)
     progress.set_defaults(handler=_annotation_progress)
 
     template = annotation.add_parser("template")
