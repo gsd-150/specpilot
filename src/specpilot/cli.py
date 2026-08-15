@@ -1417,15 +1417,18 @@ async def _judge_score_async(arguments: argparse.Namespace) -> int:
         ledger=ledger,
         adapters=(cast(Any, adapter),),
     )
-    request = build_judge_request(
-        payload,
-        source_manifest=authorized,
-        corpus_manifest_id=corpus_manifest.manifest_id,
-        model_id=endpoint.model_id,
-        task_level=TaskLevel(arguments.task_level),
-        evaluation_root_id=arguments.evaluation_root_id,
-        run_id=arguments.run_id,
-    )
+    try:
+        request = build_judge_request(
+            payload,
+            source_manifest=authorized,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            model_id=endpoint.model_id,
+            task_level=TaskLevel(arguments.task_level),
+            evaluation_root_id=arguments.evaluation_root_id,
+            run_id=arguments.run_id,
+        )
+    except ValueError:
+        return _refuse("judge_request_invalid")
     try:
         receipt = await transport.send(
             request, idempotency_key=str(uuid.uuid4())
@@ -4024,7 +4027,7 @@ def _parser() -> argparse.ArgumentParser:
     judge_score = judge.add_parser("score")
     judge_score.add_argument("--payload", type=Path, required=True)
     judge_score.add_argument("--case-id", required=True)
-    judge_score.add_argument("--task-level", choices=["l1", "l2"], required=True)
+    judge_score.add_argument("--task-level", choices=["L1", "L2"], required=True)
     judge_score.add_argument("--prompt-version", required=True)
     judge_score.add_argument("--source-manifest", required=True)
     judge_score.add_argument("--manifest-dir", type=Path, required=True)
