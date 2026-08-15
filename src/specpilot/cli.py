@@ -198,6 +198,59 @@ def _cache_retention(arguments: argparse.Namespace) -> int:
     return _emit({"deleted": deleted})
 
 
+def _evaluation_report_payload(report: Any) -> dict[str, Any]:
+    return {
+        "status": report.status,
+        "path": str(report.artifact_path),
+        "hash": report.artifact_sha256,
+        "counts": report.counts,
+    }
+
+
+def _evaluation_freeze_candidate(arguments: argparse.Namespace) -> int:
+    from specpilot.evaluation.freeze import (
+        EvaluationFreezeError,
+        EvaluationFreezeInputs,
+        build_candidate,
+    )
+
+    try:
+        report = build_candidate(
+            EvaluationFreezeInputs(
+                repository=arguments.repository,
+                dependency_lock=arguments.dependency_lock,
+                progress_status=arguments.progress_status,
+                deep_review_status=arguments.deep_review_status,
+                pooling_status=arguments.pooling_status,
+                l2_adv_status=arguments.l2_adv_status,
+                identity_status=arguments.identity_status,
+                dev_scoring_status=arguments.dev_scoring_status,
+                candidate_dir=arguments.candidate_dir,
+                final_dir=arguments.candidate_dir / "final",
+            )
+        )
+    except EvaluationFreezeError as error:
+        return _refuse(error.code)
+    return _emit(_evaluation_report_payload(report))
+
+
+def _evaluation_freeze_confirm(arguments: argparse.Namespace) -> int:
+    from specpilot.evaluation.freeze import EvaluationFreezeError, finalize_candidate
+
+    try:
+        report = finalize_candidate(
+            arguments.candidate,
+            expected_hash=arguments.expected_hash,
+            author_id=arguments.author_id,
+            confirmed=arguments.confirm_freeze,
+            repository=arguments.repository,
+            output_dir=arguments.output_dir,
+        )
+    except EvaluationFreezeError as error:
+        return _refuse(error.code)
+    return _emit(_evaluation_report_payload(report))
+
+
 def _source_inputs(
     arguments: argparse.Namespace,
 ) -> tuple[CorpusSourceInput, ...] | str:
@@ -3322,6 +3375,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     delete_expired.set_defaults(handler=_cache_retention)
 
+    evaluation = commands.add_parser("evaluation").add_subparsers(
+        dest="evaluation_command", required=True
+    )
+    freeze_candidate = evaluation.add_parser("freeze-candidate")
+    freeze_candidate.add_argument("--repository", type=Path, required=True)
+    freeze_candidate.add_argument("--dependency-lock", type=Path, required=True)
+    freeze_candidate.add_argument("--progress-status", type=Path, required=True)
+    freeze_candidate.add_argument("--deep-review-status", type=Path, required=True)
+    freeze_candidate.add_argument("--pooling-status", type=Path, required=True)
+    freeze_candidate.add_argument("--l2-adv-status", type=Path, required=True)
+    freeze_candidate.add_argument("--identity-status", type=Path, required=True)
+    freeze_candidate.add_argument("--dev-scoring-status", type=Path, required=True)
+    freeze_candidate.add_argument("--candidate-dir", type=Path, required=True)
+    freeze_candidate.set_defaults(handler=_evaluation_freeze_candidate)
+
+    freeze_confirm = evaluation.add_parser("freeze-confirm")
+    freeze_confirm.add_argument("--candidate", type=Path, required=True)
+    freeze_confirm.add_argument("--expected-hash", type=_sha256_argument, required=True)
+    freeze_confirm.add_argument("--author-id", required=True)
+    freeze_confirm.add_argument("--confirm-freeze", action="store_true", required=True)
+    freeze_confirm.add_argument("--repository", type=Path, required=True)
+    freeze_confirm.add_argument("--output-dir", type=Path, required=True)
+    freeze_confirm.set_defaults(handler=_evaluation_freeze_confirm)
+
     corpus = commands.add_parser("corpus").add_subparsers(
         dest="command", required=True
     )
@@ -3639,13 +3716,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         ["corpus", "verify"],
     )
     is_egress_rebind_command = raw_arguments[:2] == ["egress", "rebind-policy"]
+    is_evaluation_freeze_command = raw_arguments[:2] in (
+        ["evaluation", "freeze-candidate"],
+        ["evaluation", "freeze-confirm"],
+    )
     sanitized_usage_code = (
         "invalid_corpus_manifest_arguments"
         if is_corpus_manifest_command
         else (
             "invalid_egress_rebind_policy_arguments"
             if is_egress_rebind_command
-            else None
+            else (
+                "invalid_evaluation_freeze_arguments"
+                if is_evaluation_freeze_command
+                else None
+            )
         )
     )
     if sanitized_usage_code is not None:
