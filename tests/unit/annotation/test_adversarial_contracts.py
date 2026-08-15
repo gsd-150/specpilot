@@ -3,11 +3,21 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from specpilot.contracts.annotation import Split, Verdict
+from specpilot.contracts.annotation import (
+    AnnotationOrigin,
+    GoldOrigin,
+    GoldOriginEvent,
+    Split,
+    Verdict,
+)
 from specpilot.contracts.l2_adv import AdversarialDimension, AdversarialGroup
 
 _NEGATIVE = "a proxy must reject the request when the field is absent"
 _POSITIVE = "an origin server must reject the request when the field is absent"
+_REVIEWED = (
+    GoldOriginEvent(origin=GoldOrigin.MODEL_PROPOSAL, producer="claude-opus-5"),
+    GoldOriginEvent(origin=GoldOrigin.HUMAN_SOURCE_REVIEW),
+)
 
 
 def _group(**overrides: object) -> AdversarialGroup:
@@ -23,9 +33,43 @@ def _group(**overrides: object) -> AdversarialGroup:
         "positive_claim": _POSITIVE,
         "supporting_clause_ids": ("b" * 64,),
         "proposed_verdict": Verdict.VIOLATING,
+        "content_origin": AnnotationOrigin.MODEL,
+        "label_origin": AnnotationOrigin.MIXED,
+        "construction_origins": _REVIEWED,
     }
     fields.update(overrides)
     return AdversarialGroup(**fields)  # type: ignore[arg-type]
+
+
+def test_a_group_records_how_it_was_built_and_who_checked_it() -> None:
+    group = _group()
+
+    assert group.content_origin is AnnotationOrigin.MODEL
+    assert group.construction_origins[0].producer == "claude-opus-5"
+    assert group.construction_origins[-1].origin is GoldOrigin.HUMAN_SOURCE_REVIEW
+
+
+def test_a_group_no_human_checked_against_the_source_is_refused() -> None:
+    """§8.2 isolation is the whole reason this subset can be reported.
+
+    A distractor is only adversarial if a person confirmed against the source
+    that it genuinely fails to support the claim. A proposal nobody checked is
+    a guess about the corpus, and a subset built from guesses measures the
+    proposer, not the Verifier.
+    """
+    with pytest.raises(ValidationError, match="human_source_review"):
+        _group(
+            construction_origins=(
+                GoldOriginEvent(
+                    origin=GoldOrigin.MODEL_PROPOSAL, producer="claude-opus-5"
+                ),
+            )
+        )
+
+
+def test_a_group_claiming_no_origin_at_all_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        _group(construction_origins=())
 
 
 def test_a_group_records_the_distractor_dimension_it_was_built_on() -> None:

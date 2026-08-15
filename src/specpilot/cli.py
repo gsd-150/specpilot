@@ -882,6 +882,12 @@ _L2_ADV_TEMPLATE: dict[str, Any] = {
     "positive_claim": "",
     "supporting_clause_ids": [],
     "proposed_verdict": "violating",
+    "content_origin": "human",
+    "label_origin": "human",
+    # The chain may open with a model proposal or a retrieval hit, but §8.2
+    # requires it to end at a person who checked the distractor against the
+    # source. A model-proposed group carries both entries, in that order.
+    "construction_origins": [{"origin": "human_source_review"}],
 }
 
 

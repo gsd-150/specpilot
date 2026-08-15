@@ -31,6 +31,9 @@ def _record(index: int, split: str) -> dict[str, object]:
         "positive_claim": f"the origin server must reject request {tag}",
         "supporting_clause_ids": [f"{base + 100:064x}"],
         "proposed_verdict": "violating",
+        "content_origin": "human",
+        "label_origin": "human",
+        "construction_origins": [{"origin": "human_source_review"}],
     }
 
 
@@ -74,6 +77,9 @@ def test_the_template_names_every_field_an_author_must_fill(
         "positive_claim",
         "supporting_clause_ids",
         "proposed_verdict",
+        "content_origin",
+        "label_origin",
+        "construction_origins",
     }
 
 

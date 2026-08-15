@@ -7,10 +7,17 @@ from specpilot.annotation.adversarial import (
     build_overlap_report,
     build_registration_status,
 )
-from specpilot.contracts.annotation import Split, Verdict
+from specpilot.contracts.annotation import (
+    AnnotationOrigin,
+    GoldOrigin,
+    GoldOriginEvent,
+    Split,
+    Verdict,
+)
 from specpilot.contracts.l2_adv import AdversarialDimension, AdversarialGroup
 
 _DIMENSIONS = tuple(AdversarialDimension)
+_REVIEWED = (GoldOriginEvent(origin=GoldOrigin.HUMAN_SOURCE_REVIEW),)
 
 
 def _group(index: int, split: Split) -> AdversarialGroup:
@@ -30,6 +37,9 @@ def _group(index: int, split: Split) -> AdversarialGroup:
         positive_claim=f"the origin server must reject request {tag}",
         supporting_clause_ids=(f"{base + 100:064x}",),
         proposed_verdict=Verdict.VIOLATING,
+        content_origin=AnnotationOrigin.HUMAN,
+        label_origin=AnnotationOrigin.HUMAN,
+        construction_origins=_REVIEWED,
     )
 
 

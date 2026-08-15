@@ -25,7 +25,14 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from specpilot.contracts.annotation import QuestionText, Split, Verdict
+from specpilot.contracts.annotation import (
+    AnnotationOrigin,
+    GoldOrigin,
+    GoldOriginEvent,
+    QuestionText,
+    Split,
+    Verdict,
+)
 from specpilot.contracts.manifests import Identifier, Sha256
 
 
@@ -77,7 +84,30 @@ class AdversarialGroup(BaseModel):
     positive_claim: QuestionText
     supporting_clause_ids: tuple[Sha256, ...] = Field(min_length=1)
     proposed_verdict: Verdict
+    content_origin: AnnotationOrigin
+    label_origin: AnnotationOrigin
+    construction_origins: tuple[GoldOriginEvent, ...] = Field(min_length=1)
     group_record_id: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _require_a_human_source_check(self) -> Self:
+        """§8.2 keeps the subset from measuring whoever proposed it.
+
+        A clause is only a distractor because a reader confirmed against the
+        source that it is topically close and still fails to support the claim.
+        Nothing downstream can recover that: the negative and the positive are
+        indistinguishable from a wrong pair until someone has read the clause.
+        The origin chain may start with a model proposal or a retrieval hit, but
+        it has to end at a person.
+        """
+        if not any(
+            event.origin is GoldOrigin.HUMAN_SOURCE_REVIEW
+            for event in self.construction_origins
+        ):
+            raise ValueError(
+                "an adversarial group requires a human_source_review origin"
+            )
+        return self
 
     @model_validator(mode="after")
     def _refuse_a_pair_built_from_one_claim(self) -> Self:
