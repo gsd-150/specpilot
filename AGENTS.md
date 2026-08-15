@@ -109,8 +109,13 @@ hypothetical, it happened on 2026-08-11.
 One live question through the whole gate (see "What is the author's" below):
 
 ```bash
-export SPECPILOT_MAIN_API_KEY='...' && bash tmp/ask.sh "your question"
+export SPECPILOT_MAIN_API_KEY='...' && bash scripts/ask.sh "your question"
 ```
+
+It lived under `tmp/`, which is gitignored, so this line pointed a fresh
+checkout at a file that was never in it. Every override the script reads has a
+default naming the frozen corpus, and it refuses without a key or a question
+rather than spending budget on either mistake.
 
 ## Invariants — breaking these is never a fix
 
