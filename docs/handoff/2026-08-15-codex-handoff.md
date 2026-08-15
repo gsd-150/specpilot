@@ -68,3 +68,17 @@ calibration coverage is 9/13 answerable dev cases and the report must say so.
 Still open before the freeze: the author's identity status and dependency
 lock, the L2 dev calibration (needs a run path and a judge-input shape
 decision), and the four-scenario demo matrix evidence.
+
+## L2 dev calibration — 2026-08-16 (canonical batch)
+
+The L2 chain's first live runs exposed five wire-contract defects (insufficient
+citation rule, budget arithmetic, citation echo, equality-vs-subset wording,
+determinate-must-cite) plus the author's memory-prohibition rule; each is fixed
+with a cross-join regression test. The canonical batch (`outcomes-72a27a57`,
+prompt identity verified on every case) scores **retrieval 8/8 gold-shown and
+verifier 8/8 correct**, under the recorded labelling standard (a claim is
+judged by whether the cited clause establishes its specific proposition).
+Combined 16-case judge calibration: key points n=40, agreement 0.975, kappa
+0.844; claims n=45, agreement 0.889, kappa 0.590; severe judge-only 3. Evidence
+sha256 `69b69c2b…`, status file rewritten under `judge_calibrated`. Full record:
+`docs/reports/2026-08-16-l2-chain-diagnosis.md`.
