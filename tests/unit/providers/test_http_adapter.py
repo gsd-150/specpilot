@@ -706,3 +706,38 @@ def test_compliance_instructions_state_both_verdict_obligations() -> None:
                 ]
             }
         )
+
+
+def test_every_stage_forbids_reasoning_from_specification_memory() -> None:
+    """The sixth rule that reached L1 and not the two L2 paths.
+
+    On l2-dev-003 the compliance model asserted that RFC 9112 requires the
+    connection to be closed after responding. No shown excerpt says so — the
+    case was given §6.1, §6.2, and the intermediary rule in §6.3, none of which
+    mentions closure. The claim came from the model's memory of the
+    specification, which L1 has always forbidden and neither L2 instruction did.
+
+    It is the most sheltered instance of the family so far. The candidate's
+    verdict was insufficient_evidence, whose contract requires an empty
+    evidence list, so the deterministic gate had nothing to check: citing
+    nothing is correct there. Earlier instances cited the wrong thing and were
+    killed on the wire; this one asserted an unshown requirement and cited
+    nothing at all, and no gate downstream can see it.
+    """
+    import json
+
+    from specpilot.answer.reply import REPLY_INSTRUCTIONS
+    from specpilot.providers.http import (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    )
+
+    bodies = [REPLY_INSTRUCTIONS]
+    for instructions in (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    ):
+        bodies.append(json.loads(instructions)["instruction"])
+
+    for body in bodies:
+        assert "from memory of the specification" in body

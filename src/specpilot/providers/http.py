@@ -105,7 +105,10 @@ COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
             "you above, copied in full, and never an identifier you were not "
             "shown. Cite the excerpts that bear on the candidate rather than "
             "every excerpt you were given; the ones that do not bear on it are "
-            "left out. A candidate whose proposed_verdict is compliant or "
+            "left out. Every requirement you rely on must come from a shown "
+            "excerpt: do not state what the specification requires from memory "
+            "of the specification, and say the excerpts do not settle it "
+            "instead. A candidate whose proposed_verdict is compliant or "
             "violating must cite at least one shown identifier: a determinate "
             "candidate is determinate because an excerpt supports it. A "
             "candidate whose proposed_verdict is insufficient_evidence must "
@@ -126,7 +129,8 @@ SEMANTIC_REPLY_INSTRUCTIONS = json.dumps(
             "return JSON only. Each excerpt is introduced by its identifier "
             "after the word Evidence. Cite an identifier only if that excerpt "
             "was given to you above, copied in full, and never an identifier "
-            "you were not shown."
+            "you were not shown. Judge from the shown excerpts alone and never "
+            "from memory of the specification."
         ),
         "response_schema": SemanticDecision.model_json_schema(),
     },
