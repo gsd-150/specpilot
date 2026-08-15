@@ -618,6 +618,8 @@ L1 关键点覆盖率这类指标无法用字符串匹配算出来，需要一�
 本节描述自动评分默认路线。若 W0 go/no-go 最终选择“人工评分、不调用云端/本地 judge”，则跳过 judge prompt 校准与 kappa，不得伪造一个评分器结果；开发集和锁定默认链的答案指标直接来自预注册人工标签，核心对照的答案类结果只有在额外人工审计后才能作为 headline。报告必须明确实际采用哪条路线。
 
 > **[已变更｜2026-08-15 评分路线决定]** 作者选定**自动评分路线（judge）**，不采用人工路线。该决定晚于 W0 go/no-go（后者只定了 provider 端点），在评测冻结前记录。后果：judge 模块与 §8.3.2 的 dev 校准必须在 freeze-candidate 之前完成并封存为 dev scoring 证据；W6 报告将含 dev kappa（工程准入信号）与锁定审计。注意：dev 人工标签（两套：逐采分点 hit/miss 与 answer-claim 三分类 + 严重错误标志）不因路线选择而减少——A 路线是在作者人工标签之上叠加评分器建设与校准，报告口径相应多出 judge 相关数字。
+>
+> **[已完成｜2026-08-15 judge 评分链路交付]** 已交付：评分契约（含 `JudgePayload.query` 输入补全）、版本化+哈希的 judge prompt 与回复 schema、§8.3.2 校准数学（两套标签分别报一致率/Cohen's kappa/混淆矩阵/严重错误交叉表，绝不合并）、§8.4 答案指标聚合（逐题 KPRecall、Macro-KPRecall、unsupported/gold-contradiction 率、严重错误题数）、judge 记录与人工标签的 content-addressed 存储、无正文的冻结证据文件构造器，以及 `judge calibrate / labels-template / labels-add / score` 四条 CLI。建设期间跨 join 回归测试抓出一个真实缺陷：prompt 要求 `key_points` 字段而 parser 契约名为 `key_point_hits`——正是「契约与离开的字节不一致」这一类。快速门禁 1993 通过、126 个源文件 strict mypy 干净；套件零真实调用。剩余作者事项：dev 跑题、人工标签、真实 judge 调用与校准验收。
 
 需要区分两类指标，它们的算法完全不同，不要混为一谈：
 

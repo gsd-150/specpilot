@@ -19,3 +19,28 @@ mistyped pooling choice re-prompts the reviewer and **does not end the pass**.
 Still open for W5/W6: SSE/reconnect, the four-scenario demo/profile matrix, the
 evaluation `run_spec`, and first locked evaluation. Do not use fixture evidence
 as a quality metric or as real-provider evidence.
+
+## Judge scoring — 2026-08-15
+
+The author chose the auto-judge route (recorded in §8.3) and the judge scoring
+path was delivered the same day. Shipped: the closed scoring contracts, the
+versioned/hashed judge prompt with its reply schema, the §8.3.2 calibration
+mathematics (per-label-set agreement, Cohen's kappa, confusion, severe-flag
+cross-tab), the §8.4 answer-metric aggregation, the content-addressed judge and
+human-label stores, the prose-free freeze evidence builder, and the
+`judge calibrate` / `labels-template` / `labels-add` / `score` CLI.
+
+- The quick gate after the delivery is **1993 unit + CLI passed**, Ruff clean,
+  strict mypy clean over **126 source files**. Fixture-only; no provider call
+  is exercised by the suite.
+- One real defect was caught during the build by the cross-join regression
+  test: the prompt asked for a `key_points` field the parser contract names
+  `key_point_hits` — the fault a contract-to-contract test cannot see.
+- `judge score` is an author-run real-provider command (judge credential in
+  the environment, `offline_judge` route authorization from the source
+  manifest). The dev runs, the human label sheets, real judge calls, and
+  calibration acceptance remain author-owned.
+
+The freeze path is now: dev runs → `judge score` → `labels-template` →
+author labels → `labels-add` → `judge calibrate` (evidence + hash) →
+`dev-scoring-status.json` → `freeze-candidate` → author `freeze-confirm`.

@@ -27,6 +27,32 @@ All status schemas are extra-forbidding. The keys `question`, `claim`,
 `excerpt`, `answer`, and `rationale` are recursively forbidden. A refusal is a
 stable code on stderr and creates no candidate.
 
+## Producing the dev scoring evidence (auto-judge route)
+
+The author chose the auto-judge route (2026-08-15), so `--dev-scoring-status`
+comes from a completed dev calibration, not from pre-registered human labels
+alone. The production order, with the author-owned steps named:
+
+1. **Dev runs** (author, real provider): one `VerifiedAnswer` per answerable
+   dev case, saved as `<case_id>.json` in an answers directory.
+2. **`judge score`** (author, real judge provider): one prepared judge payload
+   per case through the `offline_judge` route; a stored record per case.
+3. **`judge labels-template`**: one label sheet per case from the annotation
+   store, the judge records, and the answers directory.
+4. **Author labels** each sheet and **`judge labels-add`** stores it against
+   its record.
+5. **`judge calibrate`**: joins records and labels, refuses a mixed prompt or
+   model population, writes the prose-free evidence bytes, and prints the
+   evidence sha256 plus the two label sets' agreement and kappa.
+6. Build `dev-scoring-status.json` by hand:
+   `{"selected_route": "judge_calibrated", "evidence_sha256": "<sha256 of the
+   evidence file>", "split": "dev"}` — extra keys are refused, and none of the
+   prohibited keys may appear.
+
+The evidence file itself is also prose-free by construction (hashes, counts,
+agreement numbers, and the inlined calibration report only), so its bytes can
+be reviewed and re-derived at W6 without exposing case material.
+
 ## Generate a candidate
 
 Run from the clean repository whose commit will be frozen. Replace the paths
