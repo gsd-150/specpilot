@@ -17,6 +17,7 @@ record" invariant is preserved even though the artifact is gitignored.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,11 +28,40 @@ from specpilot.contracts.verdict import ComplianceVerdict, VerificationStatus
 from specpilot.runtime.l2 import L2Outcome
 
 L2_OUTCOME_SCHEMA_VERSION = "l2-outcome/v1"
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 _CLAIM_ID = re.compile(r"^[0-9a-f]{64}$")
 _CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _VERDICTS = frozenset(item.value for item in ComplianceVerdict)
 _VERIFICATION_STATUSES = frozenset(item.value for item in VerificationStatus)
+
+
+def build_prompt_identity() -> dict[str, str]:
+    """Hash the two L2 stage instructions as the wire renders them.
+
+    Which prompt produced a result was, until this existed, recoverable only by
+    comparing a commit timestamp against a file mtime — which answers nothing
+    when an edit lands minutes before a run, or is never committed, and leaves
+    the dev evidence a freeze rests on unable to say what produced it.
+
+    Imported from the module the transport renders from rather than copied.
+    A second copy is the defect class AGENTS.md records: a value present in the
+    code and absent from the bytes that left, with nothing afterwards able to
+    tell the two apart.
+    """
+    from specpilot.providers.http import (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    )
+
+    return {
+        "compliance_prompt_sha256": hashlib.sha256(
+            COMPLIANCE_REPLY_INSTRUCTIONS.encode("utf-8")
+        ).hexdigest(),
+        "verifier_prompt_sha256": hashlib.sha256(
+            SEMANTIC_REPLY_INSTRUCTIONS.encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def build_l2_outcome(
@@ -110,6 +140,7 @@ def build_l2_outcome(
         "search_scopes": search_scopes,
         "provider_error": outcome.provider_error,
         "parse_fault": outcome.parse_fault,
+        **build_prompt_identity(),
     }
     if outcome.raw_planning_reply is not None:
         artifact["raw_plan_reply"] = outcome.raw_planning_reply[:16384]
@@ -146,6 +177,15 @@ def validate_l2_outcome(payload: object) -> dict[str, Any]:
         raise ValueError("l2 outcome results must be a list")
     for result in results:
         _require_result(result)
+    for key in ("compliance_prompt_sha256", "verifier_prompt_sha256"):
+        value = payload.get(key)
+        # Optional so artifacts written before this existed still validate, but
+        # never accepted malformed: a prompt identity that is present and wrong
+        # is worse than an absent one, which at least prompts the question.
+        if value is not None and (
+            not isinstance(value, str) or _SHA256.fullmatch(value) is None
+        ):
+            raise ValueError(f"l2 outcome {key} must be a sha256 digest")
     for key in ("provider_error", "parse_fault", "raw_reply", "raw_plan_reply"):
         value = payload.get(key)
         if value is not None and not isinstance(value, str):
@@ -222,6 +262,7 @@ def write_l2_outcome(
 
 __all__ = [
     "L2_OUTCOME_SCHEMA_VERSION",
+    "build_prompt_identity",
     "build_l2_outcome",
     "validate_l2_outcome",
     "write_l2_outcome",

@@ -25,6 +25,7 @@ from specpilot.runtime.l2 import L2Outcome
 from specpilot.runtime.outcome_capture import (
     L2_OUTCOME_SCHEMA_VERSION,
     build_l2_outcome,
+    build_prompt_identity,
     validate_l2_outcome,
     write_l2_outcome,
 )
@@ -132,6 +133,9 @@ def test_build_l2_outcome_projects_candidates_and_prose_free_results() -> None:
         "search_scopes": [],
         "provider_error": None,
         "parse_fault": None,
+        # Whole-payload equality on purpose: a field added to the artifact must
+        # be added here too, so nothing reaches the judge that no test names.
+        **build_prompt_identity(),
     }
     validate_l2_outcome(payload)
 
