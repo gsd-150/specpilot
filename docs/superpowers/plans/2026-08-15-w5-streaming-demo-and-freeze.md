@@ -331,7 +331,7 @@ Run focused unit/CLI/Qdrant tests plus `docker compose config` for demo/real. Co
 - Modify: `src/specpilot/verifier/semantic.py`
 - Modify: `src/specpilot/runtime/worker.py`
 - Modify: `src/specpilot/runtime/l2.py`
-- Create: `migrations/015_w5_cache_trace.sql`
+- Create: `migrations/016_w5_cache_trace.sql`
 - Modify: `src/specpilot/api/runtime.py`
 - Modify: `src/specpilot/cli.py`
 - Create: `tests/unit/providers/test_response_cache.py`
@@ -366,9 +366,9 @@ are excluded from checkpoint `reservation_ids`, and emit one `CacheSummaryEvent`
 instead of an admitted `EgressSummaryEvent`. Existing miss/replay behavior and
 provider-error accounting remain byte-for-byte compatible.
 
-- [ ] **Step 5: Add migration 015**
+- [ ] **Step 5: Add migration 016**
 
-Add `cache_summary` to database kind/payload validators. Its exact keys are `kind`, `sequence`, `hit`, `stage`, `request_hash`, `record_hash`. Test fresh 001..015 and upgrade 014->015.
+Add `cache_summary` to database kind/payload validators. Its exact keys are `kind`, `sequence`, `hit`, `stage`, `request_hash`, `record_hash`. Test fresh 001..016 and upgrade 015->016.
 
 - [ ] **Step 6: Wire configuration and retention CLI**
 
