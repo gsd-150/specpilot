@@ -397,6 +397,19 @@ def test_packaged_sse_validator_binds_frame_fields_and_terminal_cardinality(
             raw_sse=without_recovery,
         )
 
+    duplicate_data = (
+        'id: 1\nevent: terminal\ndata: {"sequence":1,\n'
+        'data: "kind":"terminal","status":"answered"}\n\n'
+    )
+    with pytest.raises(AssertionError, match="exactly one data"):
+        gate.assert_scenario_events(
+            scenario_id="l1_answered",
+            expected_terminal="answered",
+            required_kinds={"terminal"},
+            private_marker="private-marker",
+            raw_sse=duplicate_data,
+        )
+
 
 @pytest.mark.parametrize(
     ("method", "path", "allowed"),

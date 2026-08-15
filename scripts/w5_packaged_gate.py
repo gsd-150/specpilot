@@ -754,9 +754,11 @@ def _parse_sse_frames(raw_sse: str) -> list[tuple[str, str, dict[str, Any]]]:
                 raise AssertionError("SSE frame contains an unexpected field")
         if not saw_field:
             continue
-        if len(ids) != 1 or len(events) != 1 or not data:
-            raise AssertionError("SSE frame requires one id, one event, and data")
-        payload = json.loads("\n".join(data))
+        if len(ids) != 1 or len(events) != 1 or len(data) != 1:
+            raise AssertionError(
+                "SSE frame requires one id, one event, and exactly one data line"
+            )
+        payload = json.loads(data[0])
         if not isinstance(payload, dict):
             raise AssertionError("SSE event is not an object")
         frames.append((ids[0], events[0], payload))
