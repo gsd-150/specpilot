@@ -53,6 +53,14 @@ The evidence file itself is also prose-free by construction (hashes, counts,
 agreement numbers, and the inlined calibration report only), so its bytes can
 be reviewed and re-derived at W6 without exposing case material.
 
+Coverage caveat recorded 2026-08-16: the first sealed evidence covers the
+**8 of 12 live answerable L1 dev cases** that produced answers (the retired
+`l1-dev-001` was removed after a dump-script defect let it through, and the
+four refusals carry no answer to score — see
+`docs/reports/2026-08-16-l1-dev-refusal-diagnosis.md`). L2 dev calibration is
+added as a second pass once the L2 run harness lands; the report must state
+whatever the sealed evidence actually covers and never a larger scope.
+
 ## Generate a candidate
 
 Run from the clean repository whose commit will be frozen. Replace the paths
