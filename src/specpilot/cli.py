@@ -100,6 +100,7 @@ from specpilot.corpus.clauses import (
     build_normative_index,
     iter_clause_texts,
 )
+from specpilot.corpus.dense_inventory import derived_corpus_sha256
 from specpilot.corpus.distractors import select_distractors
 from specpilot.corpus.freezing import (
     CorpusManifestRefusal,
@@ -122,6 +123,11 @@ from specpilot.deployment.initialize import (
     RealInitializationRequest,
     initialize_fixture,
     initialize_real,
+)
+from specpilot.egress.disclosure_audit import (
+    CorpusMismatchError,
+    build_disclosure_index,
+    resolve_disclosures,
 )
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
 from specpilot.egress.policy import EgressPolicy
@@ -4178,6 +4184,78 @@ def _route_smoke(arguments: argparse.Namespace) -> int:
     return asyncio.run(_route_smoke_async(arguments))
 
 
+def _egress_disclosures(arguments: argparse.Namespace) -> int:
+    """Report which clauses an evaluation root actually disclosed.
+
+    `citation_count: 0` alone cannot say whether the evidence path missed the
+    governing clause or the model was shown it and declined to cite it. Those
+    are different components with different fixes, and the model's own rationale
+    does not settle it — one that ignored a clause will state it was never given
+    one. The ledger settles it.
+    """
+    import psycopg
+
+    from specpilot.ingestion.rfc import load_verified_rfc
+
+    try:
+        manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError):
+        return _refuse("corpus_manifest_not_found")
+
+    clause_limits = ClauseLimits(excluded_sections=EXCLUDED_SECTIONS)
+    try:
+        documents = tuple(
+            (load_verified_rfc(path, RfcLimits()), clause_limits)
+            for path in arguments.xml
+        )
+        corpus = LocalCorpus.load(documents, RfcLimits())
+    except (OSError, ValueError, UnsafeRfcError):
+        return _refuse("corpus_unavailable")
+
+    try:
+        index = build_disclosure_index(
+            corpus.units(),
+            corpus_manifest_id=manifest.manifest_id,
+            expected_derived_sha256=manifest.derived_corpus_sha256,
+            derived_sha256=derived_corpus_sha256(corpus.units()),
+        )
+    except CorpusMismatchError:
+        return _refuse("corpus_digest_mismatch")
+
+    try:
+        with psycopg.connect(arguments.ledger_dsn) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT d.disclosure_id "
+                "FROM egress_reservation r "
+                "JOIN egress_reservation_disclosure d USING (reservation_id) "
+                "WHERE r.evaluation_root_id = %s",
+                (arguments.evaluation_root_id,),
+            ).fetchall()
+    except Exception:
+        return _refuse("ledger_unavailable", EXIT_IO)
+
+    resolved = resolve_disclosures([row[0] for row in rows], index)
+    return _emit(
+        {
+            "status": "reported",
+            "evaluation_root_id": arguments.evaluation_root_id,
+            "disclosed": len(rows),
+            "resolved": len(resolved.clauses),
+            "unresolved": len(resolved.unresolved),
+            "clause_ids": sorted({entry.clause_id for entry in resolved.clauses}),
+            "sections": sorted(
+                {
+                    entry.section_number
+                    for entry in resolved.clauses
+                    if entry.section_number
+                }
+            ),
+        }
+    )
+
+
 def _egress_rebind_policy(arguments: argparse.Namespace) -> int:
     return asyncio.run(_egress_rebind_policy_async(arguments))
 
@@ -4448,6 +4526,17 @@ def _parser() -> argparse.ArgumentParser:
         "--expected-policy-hash", type=_sha256_argument, required=True
     )
     rebind.set_defaults(handler=_egress_rebind_policy)
+
+    disclosures = egress.add_parser("disclosures")
+    disclosures.add_argument("--ledger-dsn", required=True)
+    disclosures.add_argument("--evaluation-root-id", required=True)
+    disclosures.add_argument("--corpus-manifest", required=True)
+    disclosures.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    # Repeatable: the bound corpus spans both renditions, and an index built
+    # from one resolves half the rows and reads as half the evidence.
+    disclosures.add_argument("--xml", type=Path, action="append", required=True,
+                             default=[])
+    disclosures.set_defaults(handler=_egress_disclosures)
 
     provider = commands.add_parser("provider").add_subparsers(
         dest="command", required=True
