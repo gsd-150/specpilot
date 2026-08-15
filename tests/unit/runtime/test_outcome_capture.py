@@ -117,6 +117,7 @@ def test_build_l2_outcome_projects_candidates_and_prose_free_results() -> None:
                 "claim": "The design satisfies the cited requirement.",
                 "proposed_verdict": "compliant",
                 "rationale": "The cited excerpt states the requirement.",
+                "evidence_ids": payload["candidates"][0]["evidence_ids"],
             }
         ],
         "results": [

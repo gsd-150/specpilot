@@ -59,6 +59,7 @@ def build_l2_outcome(
                     "claim": candidate.claim,
                     "proposed_verdict": candidate.proposed_verdict.value,
                     "rationale": candidate.rationale,
+                    "evidence_ids": list(candidate.evidence_ids),
                 }
             )
     results: list[dict[str, Any]] = [
