@@ -678,3 +678,31 @@ def test_the_l2_echo_rule_admits_a_subset_not_the_whole_shown_set() -> None:
         assert "only" in body
 
     assert max_items == 4
+
+
+def test_compliance_instructions_state_both_verdict_obligations() -> None:
+    """The determinate-citation obligation the fifth live fault exposed.
+
+    After the subset wording landed, the model started returning determinate
+    candidates with empty evidence lists — the instruction forbade the quota
+    and blessed empty lists for insufficient, but never said a determinate
+    candidate must cite at least one shown excerpt, which the contract
+    requires. This test pins the instruction beside that contract rule.
+    """
+    from specpilot.contracts.verdict import ComplianceBatch
+    from specpilot.providers.http import COMPLIANCE_REPLY_INSTRUCTIONS
+
+    assert "must cite at least one shown identifier" in COMPLIANCE_REPLY_INSTRUCTIONS
+    with __import__("pytest").raises(ValueError):
+        ComplianceBatch.model_validate(
+            {
+                "candidates": [
+                    {
+                        "claim": "determinate without evidence",
+                        "proposed_verdict": "compliant",
+                        "rationale": "r",
+                        "evidence_ids": [],
+                    }
+                ]
+            }
+        )

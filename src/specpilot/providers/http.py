@@ -105,10 +105,12 @@ COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
             "you above, copied in full, and never an identifier you were not "
             "shown. Cite the excerpts that bear on the candidate rather than "
             "every excerpt you were given; the ones that do not bear on it are "
-            "left out. A candidate whose proposed_verdict is "
-            "insufficient_evidence must set evidence_ids to an empty list: "
-            "the ids name evidence FOR a claim, and an insufficient claim "
-            "has none."
+            "left out. A candidate whose proposed_verdict is compliant or "
+            "violating must cite at least one shown identifier: a determinate "
+            "candidate is determinate because an excerpt supports it. A "
+            "candidate whose proposed_verdict is insufficient_evidence must "
+            "set evidence_ids to an empty list: the ids name evidence FOR a "
+            "claim, and an insufficient claim has none."
         ),
         "response_schema": ComplianceBatch.model_json_schema(),
     },
