@@ -87,9 +87,11 @@ compose-check: require-compose-env
 		echo "real override publishes a host port"; exit 1; fi
 
 package-check:
+	@test ! -L tmp || { echo "refusing symlinked package staging parent"; exit 1; }
+	rm -rf -- build tmp/w5-dist
 	mkdir -p tmp/w5-dist
 	$(SPECPILOT_PYTHON) -m build --wheel --outdir tmp/w5-dist
-	$(SPECPILOT_PYTHON) -c 'import glob, zipfile; wheels=glob.glob("tmp/w5-dist/specpilot-*.whl"); assert len(wheels) == 1, wheels; names=set(zipfile.ZipFile(wheels[0]).namelist()); assert any(n.endswith("specpilot/api/static/trace/index.html") for n in names); assert any("specpilot/api/static/trace/assets/" in n for n in names); assert any(n.endswith("specpilot/egress/policies/default-v1.json") for n in names); assert any(n.endswith("specpilot/egress/policies/fixture-overlay-v1.json") for n in names)'
+	$(SPECPILOT_PYTHON) scripts/w5_verify_wheel.py
 
 image-check: require-compose-env
 	COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile demo --profile real --profile ingestion build api mcp fixture-init real-init ingestion
