@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -48,6 +49,7 @@ from specpilot.contracts.annotation import (
     L2Annotation,
     ReviewDecision,
     ReviewOutcome,
+    Split,
     UnsupportedAnnotationSchemaError,
     annotation_model_for_schema,
 )
@@ -82,6 +84,7 @@ from specpilot.contracts.proposal import (
     proposal_for_schema,
 )
 from specpilot.contracts.rfc import RfcLimits, UnsafeRfcError
+from specpilot.contracts.scoring import HumanDevLabels
 from specpilot.corpus.clauses import (
     EXCLUDED_SECTIONS,
     Clause,
@@ -136,6 +139,16 @@ from specpilot.evaluation.retrieval import (
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
+from specpilot.judge.calibration import build_calibration_report
+from specpilot.judge.evidence import build_scoring_evidence
+from specpilot.judge.prompt import JUDGE_PROMPT_V1_BODY, JudgePrompt
+from specpilot.judge.store import HumanLabelStore, JudgeRecordStore
+from specpilot.judge.template import (
+    LabelTemplate,
+    TemplateClaim,
+    read_answer_file,
+    render_template,
+)
 from specpilot.manifests.canonical import canonical_json
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
@@ -1087,6 +1100,227 @@ def _annotation_adv_status(arguments: argparse.Namespace) -> int:
             "dimension_counts": dict(sorted(report.dimension_counts.items())),
             "overlap_report_sha256": status["overlap_report_sha256"],
         }
+    )
+
+
+_JUDGE_PROMPTS = (
+    JudgePrompt(
+        identifier="judge-answer-scorer",
+        version="1",
+        body=JUDGE_PROMPT_V1_BODY,
+    ),
+)
+
+
+def _resolve_judge_prompt(version: str, content_sha256: str) -> JudgePrompt | None:
+    """Resolve a record's prompt by version and hash, refusing ambiguity.
+
+    The record names the prompt by version and content hash, not identifier:
+    the hash is what was actually sent, and two registered prompts sharing a
+    version but differing in body would be an authoring error this refuses to
+    guess between.
+    """
+    for prompt in _JUDGE_PROMPTS:
+        if prompt.version == version and prompt.content_sha256 == content_sha256:
+            return prompt
+    return None
+
+
+def _write_private_file(path: Path, data: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("unable to write private file")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _judge_calibrate(arguments: argparse.Namespace) -> int:
+    """Join judge records and human labels, write the freeze evidence bytes.
+
+    Refuses a mixed calibration: records scored under different prompts or
+    models are different measurements, and merging them would produce a kappa
+    that describes neither.
+    """
+    records_store = JudgeRecordStore(arguments.records_dir)
+    labels_store = HumanLabelStore(arguments.labels_dir)
+    try:
+        records = tuple(records_store.iter_records())
+        labels = tuple(labels_store.iter_labels())
+    except (OSError, ValueError):
+        return _refuse("judge_records_unreadable")
+    if not records:
+        return _refuse("no_judge_records")
+    if len({record.prompt_version for record in records}) != 1 or len(
+        {record.prompt_hash for record in records}
+    ) != 1:
+        return _refuse("judge_prompt_mismatch")
+    if len({record.model_id for record in records}) != 1:
+        return _refuse("judge_model_mismatch")
+    prompt = _resolve_judge_prompt(
+        records[0].prompt_version, records[0].prompt_hash
+    )
+    if prompt is None:
+        return _refuse("judge_prompt_unresolvable")
+    report = build_calibration_report(records, labels)
+    try:
+        evidence = build_scoring_evidence(
+            route_id=arguments.route_id,
+            prompt=prompt,
+            model_id=records[0].model_id,
+            report=report,
+            judge_record_sha256s=records_store.record_ids(),
+            human_label_sha256s=labels_store.label_ids(),
+        )
+    except ValueError:
+        return _refuse("judge_evidence_invalid")
+    try:
+        _write_private_file(arguments.evidence_out, evidence)
+    except OSError:
+        return _refuse("evidence_not_written", EXIT_IO)
+    key_points = report.key_points
+    claims = report.claims
+    return _emit(
+        {
+            "status": "calibrated",
+            "evidence_sha256": hashlib.sha256(evidence).hexdigest(),
+            "route_id": arguments.route_id,
+            "prompt_version": prompt.version,
+            "model_id": records[0].model_id,
+            "case_count": report.case_count,
+            "excluded_cases_judge_only": report.excluded_cases_judge_only,
+            "excluded_cases_human_only": report.excluded_cases_human_only,
+            "key_points": {
+                "n": key_points.n,
+                "agreed": key_points.agreed,
+                "agreement_rate": key_points.agreement_rate,
+                "kappa": key_points.kappa,
+                "excluded_judge_only": key_points.excluded_judge_only,
+                "excluded_human_only": key_points.excluded_human_only,
+            },
+            "claims": {
+                "n": claims.n,
+                "agreed": claims.agreed,
+                "agreement_rate": claims.agreement_rate,
+                "kappa": claims.kappa,
+                "excluded_judge_only": claims.excluded_judge_only,
+                "excluded_human_only": claims.excluded_human_only,
+                "severe": {
+                    "both": claims.severe_both,
+                    "judge_only": claims.severe_judge_only,
+                    "human_only": claims.severe_human_only,
+                    "neither": claims.severe_neither,
+                },
+            },
+        }
+    )
+
+
+def _judge_labels_template(arguments: argparse.Namespace) -> int:
+    """Emit the author's label sheet per scored dev case.
+
+    Refuses when any input is missing or mismatched rather than emitting a
+    partial set: a template whose case is silently dropped would let the
+    author believe the calibration covers cases it does not.
+    """
+    records_store = JudgeRecordStore(arguments.records_dir)
+    annotation_store = AnnotationStore(arguments.annotations_dir)
+    try:
+        records = tuple(records_store.iter_records())
+        annotations = tuple(annotation_store.iter_records())
+    except (OSError, ValueError):
+        return _refuse("template_input_unreadable")
+    if not records:
+        return _refuse("no_judge_records")
+    roots = {
+        annotation.item_id: annotation
+        for annotation in annotations
+        if annotation.predecessor_annotation_id is None
+    }
+    templates: list[tuple[str, LabelTemplate]] = []
+    for record in records:
+        annotation = roots.get(record.case_id)
+        if annotation is None:
+            return _refuse("template_annotation_missing")
+        if annotation.split is not Split.DEV:
+            return _refuse("template_split_mismatch")
+        if annotation.expected_refusal:
+            return _refuse("template_unexpected_refusal")
+        gold_point_ids = {point.point_id for point in annotation.key_points}
+        record_point_ids = {hit.point_id for hit in record.output.key_point_hits}
+        if gold_point_ids != record_point_ids:
+            return _refuse("record_key_point_mismatch")
+        answer = read_answer_file(arguments.answers_dir / f"{record.case_id}.json")
+        if answer is None:
+            return _refuse("template_answer_missing")
+        templates.append(
+            (
+                record.case_id,
+                LabelTemplate(
+                    case_id=record.case_id,
+                    question=annotation.question,
+                    final_answer=answer,
+                    key_points=annotation.key_points,
+                    claims=tuple(
+                        TemplateClaim(claim_id=claim.claim_id, claim=claim.claim)
+                        for claim in record.output.answer_claims
+                    ),
+                ),
+            )
+        )
+    try:
+        arguments.out_dir.mkdir(parents=True, exist_ok=True)
+        arguments.out_dir.chmod(0o700)
+        for case_id, template in templates:
+            _write_private_file(
+                arguments.out_dir / f"{case_id}.json", render_template(template)
+            )
+    except OSError:
+        return _refuse("template_not_written", EXIT_IO)
+    return _emit({"status": "templated", "cases": len(templates)})
+
+
+def _judge_labels_add(arguments: argparse.Namespace) -> int:
+    """Validate and store one author label set against its judge record.
+
+    The label set must cover exactly the record's key points and claims, so a
+    calibration join never has to guess which label goes with which id.
+    """
+    try:
+        payload = json.loads(arguments.labels_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _refuse("labels_unreadable", EXIT_IO)
+    try:
+        labels = HumanDevLabels.model_validate(payload)
+    except ValidationError:
+        return _refuse("invalid_human_labels")
+    records_store = JudgeRecordStore(arguments.records_dir)
+    try:
+        records = tuple(records_store.iter_records())
+    except (OSError, ValueError):
+        return _refuse("judge_records_unreadable")
+    record = next((entry for entry in records if entry.case_id == labels.case_id), None)
+    if record is None:
+        return _refuse("labels_case_unknown")
+    if {entry.point_id for entry in labels.key_points} != {
+        hit.point_id for hit in record.output.key_point_hits
+    }:
+        return _refuse("labels_point_mismatch")
+    if {entry.claim_id for entry in labels.claims} != {
+        claim.claim_id for claim in record.output.answer_claims
+    }:
+        return _refuse("labels_claim_mismatch")
+    try:
+        label_id = HumanLabelStore(arguments.labels_dir).create(labels)
+    except (OSError, ValueError):
+        return _refuse("labels_not_stored", EXIT_IO)
+    return _emit(
+        {"status": "stored", "label_id": label_id, "case_id": labels.case_id}
     )
 
 
@@ -3109,6 +3343,7 @@ def _envelope_smoke(arguments: argparse.Namespace) -> int:
         model_id="fixture-model-v1",
         source_manifest=judge_manifest,
         payload=JudgePayload(
+            query="Synthetic fixture probe.",
             final_answer="Synthetic fixture answer.",
             scoring_points=(ScoringPoint(point_id="p1", text="Fixture point"),),
             gold_excerpts=tuple(_fixture_excerpt(100 + n, 512, 8192) for n in range(5)),
@@ -3405,6 +3640,7 @@ async def _route_smoke_async(arguments: argparse.Namespace) -> int:
     payload: Any
     if judging:
         payload = JudgePayload(
+            query="Synthetic fixture probe.",
             final_answer="Synthetic fixture answer.",
             scoring_points=(ScoringPoint(point_id="p1", text="Fixture point"),),
             gold_excerpts=(_fixture_excerpt(1, 4, 16),),
@@ -3615,6 +3851,30 @@ def _parser() -> argparse.ArgumentParser:
     freeze_confirm.add_argument("--repository", type=Path, required=True)
     freeze_confirm.add_argument("--output-dir", type=Path, required=True)
     freeze_confirm.set_defaults(handler=_evaluation_freeze_confirm)
+
+    judge = commands.add_parser("judge").add_subparsers(
+        dest="judge_command", required=True
+    )
+
+    judge_calibrate = judge.add_parser("calibrate")
+    judge_calibrate.add_argument("--records-dir", type=Path, required=True)
+    judge_calibrate.add_argument("--labels-dir", type=Path, required=True)
+    judge_calibrate.add_argument("--route-id", required=True)
+    judge_calibrate.add_argument("--evidence-out", type=Path, required=True)
+    judge_calibrate.set_defaults(handler=_judge_calibrate)
+
+    judge_template = judge.add_parser("labels-template")
+    judge_template.add_argument("--records-dir", type=Path, required=True)
+    judge_template.add_argument("--annotations-dir", type=Path, required=True)
+    judge_template.add_argument("--answers-dir", type=Path, required=True)
+    judge_template.add_argument("--out-dir", type=Path, required=True)
+    judge_template.set_defaults(handler=_judge_labels_template)
+
+    judge_add = judge.add_parser("labels-add")
+    judge_add.add_argument("--labels-file", type=Path, required=True)
+    judge_add.add_argument("--records-dir", type=Path, required=True)
+    judge_add.add_argument("--labels-dir", type=Path, required=True)
+    judge_add.set_defaults(handler=_judge_labels_add)
 
     corpus = commands.add_parser("corpus").add_subparsers(
         dest="command", required=True
