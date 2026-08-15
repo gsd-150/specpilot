@@ -18,6 +18,13 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
+from specpilot.annotation.adversarial import (
+    AdversarialGroupExistsError,
+    AdversarialGroupStore,
+    AdversarialRegistrationError,
+    build_overlap_report,
+    build_registration_status,
+)
 from specpilot.annotation.progress import (
     PoolingAuditProgress,
     PoolingRunProgress,
@@ -60,6 +67,7 @@ from specpilot.contracts.egress import (
     TocNode,
     VersionMetadata,
 )
+from specpilot.contracts.l2_adv import AdversarialGroup
 from specpilot.contracts.manifests import (
     ComplianceAssessment,
     ProviderRouteBinding,
@@ -127,6 +135,7 @@ from specpilot.evaluation.retrieval import (
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
 from specpilot.ingestion.rfc import VerifiedRfc, read_rfc_snapshot, verify_rfc_snapshot
+from specpilot.manifests.canonical import canonical_json
 from specpilot.manifests.corpus_store import CorpusManifestStore
 from specpilot.manifests.store import ManifestStore, UnsupportedManifestVersionError
 from specpilot.retrieval.bm25 import Bm25Index
@@ -857,6 +866,23 @@ _L2_TEMPLATE: dict[str, Any] = {
     "proposed_verdict": "compliant",
     "supports_verdict": True,
 }
+_L2_ADV_TEMPLATE: dict[str, Any] = {
+    "schema_version": "l2-adv-group/v1",
+    "group_id": "adv-dev-001",
+    "family": "",
+    "split": "dev",
+    # One of the five §8.1.1 axes. The axis is what makes a clause a distractor
+    # rather than an unrelated clause, so the report can only give a dimension
+    # distribution if every group names the one it was built on.
+    "dimension": "role_attribution",
+    "negative_claim_id": "adv-dev-001-neg",
+    "negative_claim": "",
+    "distractor_clause_ids": [],
+    "positive_claim_id": "adv-dev-001-pos",
+    "positive_claim": "",
+    "supporting_clause_ids": [],
+    "proposed_verdict": "violating",
+}
 
 
 def _annotation_template(arguments: argparse.Namespace) -> int:
@@ -870,6 +896,91 @@ def _annotation_template(arguments: argparse.Namespace) -> int:
     json.dump(template, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def _annotation_adv_template(arguments: argparse.Namespace) -> int:
+    """Print a skeleton §8.1.1 group.
+
+    Deliberately invalid in the same way the L1/L2 template is: both claims are
+    empty and neither clause list is filled, so the contract refuses it until
+    the author has built an actual pair.
+    """
+    json.dump(
+        _L2_ADV_TEMPLATE, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def _annotation_adv_add(arguments: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(arguments.record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _refuse("record_unreadable", EXIT_IO)
+    try:
+        group = AdversarialGroup.model_validate(payload)
+    except ValidationError:
+        return _refuse("invalid_adversarial_group")
+    try:
+        stored = AdversarialGroupStore(arguments.group_dir).create(group)
+    except AdversarialGroupExistsError:
+        return _refuse("adversarial_group_exists")
+    except (OSError, ValueError):
+        return _refuse("adversarial_group_not_stored", EXIT_IO)
+    return _emit(
+        {
+            "status": "stored",
+            "group_id": stored.group_id,
+            "split": stored.split.value,
+            "dimension": stored.dimension.value,
+            "group_record_id": stored.group_record_id,
+        }
+    )
+
+
+def _annotation_adv_status(arguments: argparse.Namespace) -> int:
+    """Build the overlap report always, the gate status only when it earns it.
+
+    The report is how the author sees which axis or count is short, so it is
+    written even on refusal. The status is an input to a freeze, so a partial or
+    overlapping registration must not leave one on disk to be picked up later.
+    """
+    store = AdversarialGroupStore(arguments.group_dir)
+    try:
+        groups = store.read_all()
+    except (OSError, ValueError):
+        return _refuse("adversarial_groups_unreadable", EXIT_IO)
+    if not groups:
+        return _refuse("l2_adv_registration_refused")
+
+    report = build_overlap_report(groups)
+    try:
+        arguments.report_out.write_bytes(canonical_json(report))
+    except OSError:
+        return _refuse("adversarial_report_not_written", EXIT_IO)
+
+    try:
+        status = build_registration_status(groups, report)
+    except AdversarialRegistrationError:
+        return _refuse("l2_adv_registration_refused")
+    try:
+        arguments.status_out.write_text(
+            json.dumps(status, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except OSError:
+        return _refuse("adversarial_status_not_written", EXIT_IO)
+
+    return _emit(
+        {
+            "status": "registered",
+            "dev": report.dev_count,
+            "locked": report.locked_count,
+            "clean": report.clean,
+            "dimension_counts": dict(sorted(report.dimension_counts.items())),
+            "overlap_report_sha256": status["overlap_report_sha256"],
+        }
+    )
 
 
 def _check_gold_against_source(
@@ -3640,6 +3751,20 @@ def _parser() -> argparse.ArgumentParser:
     pool_status.add_argument("--pool-dir", type=Path, required=True)
     pool_status.add_argument("--run-id", required=True)
     pool_status.set_defaults(handler=_annotation_pool_status)
+
+    adv_template = annotation.add_parser("adv-template")
+    adv_template.set_defaults(handler=_annotation_adv_template)
+
+    adv_add = annotation.add_parser("adv-add")
+    adv_add.add_argument("--record", type=Path, required=True)
+    adv_add.add_argument("--group-dir", type=Path, required=True)
+    adv_add.set_defaults(handler=_annotation_adv_add)
+
+    adv_status = annotation.add_parser("adv-status")
+    adv_status.add_argument("--group-dir", type=Path, required=True)
+    adv_status.add_argument("--status-out", type=Path, required=True)
+    adv_status.add_argument("--report-out", type=Path, required=True)
+    adv_status.set_defaults(handler=_annotation_adv_status)
 
     embedding = commands.add_parser("embedding").add_subparsers(
         dest="command", required=True
