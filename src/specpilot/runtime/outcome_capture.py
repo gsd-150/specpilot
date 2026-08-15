@@ -70,12 +70,43 @@ def build_l2_outcome(
         }
         for item in outcome.results
     ]
+    evidence_refs: list[dict[str, Any]] = []
+    seen_evidence: set[tuple[str, str]] = set()
+    for checkpoint in outcome.checkpoints:
+        for ref in checkpoint.evidence:
+            key = (ref.clause_id, ref.content_hash)
+            if key in seen_evidence:
+                continue
+            seen_evidence.add(key)
+            evidence_refs.append(
+                {
+                    "clause_id": ref.clause_id,
+                    "content_hash": ref.content_hash,
+                    "document_id": ref.document_id,
+                    "document_version": ref.document_version,
+                    "section_number": ref.section_number,
+                }
+            )
+    search_scopes: list[dict[str, Any]] = []
+    if outcome.planning is not None:
+        from specpilot.agents.contracts import SearchClausesStep
+
+        for step in outcome.planning.plan.steps:
+            if isinstance(step, SearchClausesStep):
+                search_scopes.append(
+                    {
+                        "step_id": step.step_id,
+                        "document_ids": step.args.document_ids,
+                    }
+                )
     artifact: dict[str, Any] = {
         "schema_version": L2_OUTCOME_SCHEMA_VERSION,
         "case_id": case_id,
         "design_description": design_description,
         "candidates": candidates,
         "results": results,
+        "evidence": evidence_refs,
+        "search_scopes": search_scopes,
         "provider_error": outcome.provider_error,
         "parse_fault": outcome.parse_fault,
     }

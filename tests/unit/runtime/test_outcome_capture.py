@@ -127,6 +127,8 @@ def test_build_l2_outcome_projects_candidates_and_prose_free_results() -> None:
                 "citation_count": 2,
             }
         ],
+        "evidence": [],
+        "search_scopes": [],
         "provider_error": None,
         "parse_fault": None,
     }
