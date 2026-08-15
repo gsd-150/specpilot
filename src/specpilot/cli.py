@@ -969,6 +969,48 @@ def _annotation_adv_template(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _adversarial_corpus_clause_ids(
+    arguments: argparse.Namespace,
+) -> set[str] | str:
+    """Every clause id the named frozen renditions actually contain.
+
+    A group's clause ids are 64 hex characters that nothing else in the record
+    derives, so a wrong one has exactly the shape of a right one. It survives
+    the contract, the store, and the registration status unchanged, and the
+    freeze gate never looks at clause ids at all — it counts items and
+    families. Checked against the source here or nowhere.
+
+    Sources are repeatable because an adversarial group routinely spans both
+    renditions: the document-attribution axis is built by citing one document
+    while asking about the other.
+    """
+    found: set[str] = set()
+    for source_spec in arguments.source:
+        manifest_id, separator, xml_path = source_spec.partition("=")
+        if not separator or not manifest_id or not xml_path:
+            return "invalid_source_specification"
+        scoped = argparse.Namespace(
+            manifest=manifest_id,
+            manifest_dir=arguments.manifest_dir,
+            xml=Path(xml_path),
+        )
+        source = _frozen_source(scoped)
+        if isinstance(source, str):
+            return source
+        try:
+            clauses = build_clauses(
+                source.document, RfcLimits(), _clause_limits(source.manifest)
+            )
+        except UnsafeRfcError as error:
+            return error.code.value
+        except OversizedClauseError:
+            return "clause_too_large"
+        except OSError:
+            return "io_error"
+        found.update(clause.clause_id for clause in clauses)
+    return found
+
+
 def _annotation_adv_add(arguments: argparse.Namespace) -> int:
     try:
         payload = json.loads(arguments.record.read_text(encoding="utf-8"))
@@ -978,6 +1020,14 @@ def _annotation_adv_add(arguments: argparse.Namespace) -> int:
         group = AdversarialGroup.model_validate(payload)
     except ValidationError:
         return _refuse("invalid_adversarial_group")
+
+    known = _adversarial_corpus_clause_ids(arguments)
+    if isinstance(known, str):
+        return _refuse_source(known)
+    cited = set(group.distractor_clause_ids) | set(group.supporting_clause_ids)
+    if not cited <= known:
+        return _refuse("adversarial_clause_not_in_corpus")
+
     try:
         stored = AdversarialGroupStore(arguments.group_dir).create(group)
     except AdversarialGroupExistsError:
@@ -3826,6 +3876,11 @@ def _parser() -> argparse.ArgumentParser:
     adv_add = annotation.add_parser("adv-add")
     adv_add.add_argument("--record", type=Path, required=True)
     adv_add.add_argument("--group-dir", type=Path, required=True)
+    adv_add.add_argument("--manifest-dir", type=Path, required=True)
+    # Repeatable `<manifest-id>=<xml-path>`. A group routinely cites both
+    # renditions at once, so one source is not enough here as it is for an
+    # annotation record.
+    adv_add.add_argument("--source", action="append", required=True, default=[])
     adv_add.set_defaults(handler=_annotation_adv_add)
 
     adv_status = annotation.add_parser("adv-status")

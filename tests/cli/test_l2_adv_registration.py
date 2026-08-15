@@ -6,6 +6,21 @@ from pathlib import Path
 import pytest
 
 from specpilot.cli import main
+from specpilot.contracts.rfc import RfcLimits
+from specpilot.corpus.clauses import EXCLUDED_SECTIONS, ClauseLimits, build_clauses
+from specpilot.ingestion.rfc import load_verified_rfc
+
+_ROOT = Path(__file__).resolve().parents[2]
+_MANIFEST_DIR = Path(
+    "/Users/chunxue/Documents/resume_project/specpilot/manifests/local/r0/source"
+)
+_RFC9110_ID = "af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691"
+_RFC9110_XML = _ROOT / "artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml"
+
+pytestmark = pytest.mark.skipif(
+    not _RFC9110_XML.exists() or not _MANIFEST_DIR.exists(),
+    reason="the frozen RFC 9110 rendition and its manifest store are required",
+)
 
 _DIMENSIONS = (
     "request_vs_response",
@@ -14,6 +29,22 @@ _DIMENSIONS = (
     "normative_strength",
     "received_vs_generated",
 )
+
+
+def _real_clause_ids() -> tuple[str, ...]:
+    """Clause ids the frozen rendition actually contains.
+
+    The fixtures index into these rather than inventing digests, so the CLI
+    tests exercise the corpus check instead of routing around it.
+    """
+    document = load_verified_rfc(_RFC9110_XML, RfcLimits())
+    clauses = build_clauses(
+        document, RfcLimits(), ClauseLimits(excluded_sections=EXCLUDED_SECTIONS)
+    )
+    return tuple(clause.clause_id for clause in clauses)
+
+
+_CLAUSES = _real_clause_ids() if _RFC9110_XML.exists() else ()
 
 
 def _record(index: int, split: str) -> dict[str, object]:
@@ -26,10 +57,10 @@ def _record(index: int, split: str) -> dict[str, object]:
         "dimension": _DIMENSIONS[index % len(_DIMENSIONS)],
         "negative_claim_id": f"adv-{tag}-neg",
         "negative_claim": f"the proxy must reject request {tag}",
-        "distractor_clause_ids": [f"{base:064x}"],
+        "distractor_clause_ids": [_CLAUSES[base % len(_CLAUSES)]],
         "positive_claim_id": f"adv-{tag}-pos",
         "positive_claim": f"the origin server must reject request {tag}",
-        "supporting_clause_ids": [f"{base + 100:064x}"],
+        "supporting_clause_ids": [_CLAUSES[(base + 100) % len(_CLAUSES)]],
         "proposed_verdict": "violating",
         "content_origin": "human",
         "label_origin": "human",
@@ -48,6 +79,10 @@ def _add(tmp_path: Path, group_dir: Path, record: dict[str, object]) -> int:
             str(path),
             "--group-dir",
             str(group_dir),
+            "--manifest-dir",
+            str(_MANIFEST_DIR),
+            "--source",
+            f"{_RFC9110_ID}={_RFC9110_XML}",
         ]
     )
 
@@ -233,3 +268,24 @@ def test_an_overlapping_registration_names_the_axis_that_failed(
     report = json.loads(report_out.read_text(encoding="utf-8"))
     assert report["checks"]["claim"]["disjoint"] is False
     assert not (tmp_path / "l2-adv-status.json").exists()
+
+
+def test_a_group_citing_a_clause_the_corpus_lacks_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The check that would have caught a fabricated digest.
+
+    A clause id is 64 hex characters that nothing in the record derives, so a
+    wrong one is indistinguishable from a right one by shape alone. A group
+    citing a clause the frozen corpus does not contain looks entirely normal in
+    the store and in the registration status, and the freeze gate never reads
+    clause ids at all — it counts items and families. Verified here or nowhere.
+    """
+    group_dir = tmp_path / "l2-adv"
+    record = _record(0, "dev")
+    record["distractor_clause_ids"] = ["f" * 64]
+
+    assert (
+        _add(tmp_path, group_dir, record) != 0
+    )
+    assert "adversarial_clause_not_in_corpus" in capsys.readouterr().err
