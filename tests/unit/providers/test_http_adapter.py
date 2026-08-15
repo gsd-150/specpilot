@@ -161,7 +161,7 @@ def test_planning_payload_uses_the_formal_json_only_contract() -> None:
     system = _system_prompt(payload)
 
     contract = json.loads(system)
-    assert contract["instruction"].endswith("JSON content only.")
+    assert contract["instruction"].endswith("within the budget.")
     assert contract["response_schema"]["title"] == "ToolPlan"
     assert "citations" not in system.lower()
 
@@ -557,3 +557,61 @@ def test_compliance_instructions_state_the_insufficient_evidence_rule() -> None:
         }
     )
     assert len(batch.candidates) == 1
+
+
+def test_planning_instructions_state_the_call_budget_rule() -> None:
+    """The cross-join guard for the bounded tool budget.
+
+    A step's take multiplies its call cost and the total must fit the budget,
+    but the model cannot infer that from a bare schema; the first live planner
+    returned a four-step plan costing 10 against a budget of 8. The
+    instruction now states the rule, and this test pins it beside the
+    validator that enforces it.
+    """
+    from specpilot.agents.contracts import validate_tool_plan
+    from specpilot.agents.planner import _tool_catalog
+    from specpilot.providers.http import _PLANNING_SYSTEM_PROMPT
+
+    assert "call budget" in _PLANNING_SYSTEM_PROMPT
+    assert "costs its take" in _PLANNING_SYSTEM_PROMPT
+    assert any(
+        "Maximum MCP calls" in tool.description for tool in _tool_catalog(8)
+    )
+    with __import__("pytest").raises(ValueError):
+        tool_plan = __import__(
+            "specpilot.agents.contracts", fromlist=["ToolPlan"]
+        ).ToolPlan
+        validate_tool_plan(  # pragma: no cover - shape checked by other tests
+            tool_plan.model_validate(
+                {
+                    "plan_id": "over-budget",
+                    "steps": [
+                        {
+                            "step_id": "s1",
+                            "tool": "search_clauses",
+                            "args": {
+                                "query": "q",
+                                "corpus_manifest_id": "a" * 64,
+                                "document_ids": ["ietf-rfc-9110"],
+                                "limit": 10,
+                            },
+                        },
+                        {
+                            "step_id": "s2",
+                            "tool": "get_clause",
+                            "depends_on": ["s1"],
+                            "args": {
+                                "corpus_manifest_id": "a" * 64,
+                                "document_id": "ietf-rfc-9110",
+                                "clauses": {
+                                    "kind": "step_result",
+                                    "step_id": "s1",
+                                    "take": 8,
+                                },
+                            },
+                        },
+                    ],
+                }
+            ),
+            max_call_cost=8,
+        )
