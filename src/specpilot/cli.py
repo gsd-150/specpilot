@@ -2712,6 +2712,354 @@ async def _answer_async(arguments: argparse.Namespace) -> int:
     )
 
 
+def _l2_compliance_prompt_hash() -> str:
+    from specpilot.providers.http import COMPLIANCE_REPLY_INSTRUCTIONS
+
+    return hashlib.sha256(COMPLIANCE_REPLY_INSTRUCTIONS.encode("utf-8")).hexdigest()
+
+
+def _l2_verifier_prompt_hash() -> str:
+    from specpilot.providers.http import SEMANTIC_REPLY_INSTRUCTIONS
+
+    return hashlib.sha256(SEMANTIC_REPLY_INSTRUCTIONS.encode("utf-8")).hexdigest()
+
+
+def _l2_configuration_hash() -> str:
+    """Bind the single-case checkpoint to the exact L2 stage prompts it sends.
+
+    The durable checkpoint carries ``configuration_hash`` so a resumed run can
+    detect that the prompts changed underneath it. An author-run case never
+    resumes, but the field is required and must be stable rather than invented,
+    so it is derived from the two L2 stage prompt bodies that actually reach the
+    provider.
+    """
+    return hashlib.sha256(
+        f"{_l2_compliance_prompt_hash()}\x1f{_l2_verifier_prompt_hash()}".encode()
+    ).hexdigest()
+
+
+def _authorized_l2_endpoint(route_name: str, manifest: Any) -> Any:
+    """Resolve the live main endpoint the L2 chain is authorized to reach.
+
+    Planning, compliance, and the semantic verifier all egress through the
+    online main route, so the same provider-identity check that guards ``answer``
+    guards them here. A manifest bound to a different provider or to the offline
+    judge route is refused before any payload is built.
+    """
+    from specpilot.providers.http import LIVE_ROUTES
+
+    endpoint = LIVE_ROUTES[route_name].endpoint
+    binding = manifest.provider_route_binding
+    if (
+        binding is None
+        or binding.provider_id != endpoint.provider_id
+        or binding.use is not ProviderUse.ONLINE_MAIN
+    ):
+        raise EgressPolicyViolation(
+            "route_unauthorized",
+            "selected L2 route is not authorized by the source manifest",
+        )
+    return endpoint
+
+
+def _l2_run(arguments: argparse.Namespace) -> int:
+    """Run one L2 case through the full chain and capture the prose once.
+
+    The W5 evaluation freeze is blocked on L2 dev calibration, and the
+    calibration judge needs the L2 answer prose: the design description, each
+    atomic claim's text, its proposed verdict and rationale, and the final
+    verdict. The durable records — ``ComplianceResult``, the sanitized run
+    events, and the checkpoints — are prose-free by design, and the worker path
+    persists none of the answer prose, so this command runs exactly the worker's
+    L2 assembly once, in-process, and writes the one-off capture into the
+    author's restricted artifacts directory.
+
+    Live provider calls belong to the author: this sends through the enforcer
+    (the only outward path) and the ledger, exactly as a queued run would, and
+    refuses with a stable code on any provider, egress, or parse failure.
+    """
+    return asyncio.run(_l2_run_async(arguments))
+
+
+async def _l2_run_async(arguments: argparse.Namespace) -> int:
+    from specpilot.agents.compliance import ComplianceAgent, ComplianceContext
+    from specpilot.agents.evidence import EvidenceAgent, EvidenceCollectionError
+    from specpilot.agents.planner import Planner, PlannerContext
+    from specpilot.answer.evidence import Evidence
+    from specpilot.egress.ledger import LedgerError
+    from specpilot.egress.postgres import PostgresEgressLedger
+    from specpilot.providers.http import (
+        HttpChatAdapter,
+        ProviderCredentialMissing,
+        resolve_credential,
+    )
+    from specpilot.providers.transport import (
+        NoAdapterForRoute,
+        PolicyBoundTransport,
+        ProviderAttemptError,
+        TransportReplayError,
+    )
+    from specpilot.runtime.l2 import L2RunContext, run_l2_attempt
+    from specpilot.runtime.local_checkpoint import LocalCheckpointStore
+    from specpilot.runtime.local_mcp import (
+        LocalMcpEvidenceClient,
+        LocalToolServicesError,
+        build_local_tool_services,
+    )
+    from specpilot.runtime.outcome_capture import (
+        build_l2_outcome,
+        write_l2_outcome,
+    )
+    from specpilot.verifier.deterministic import verify_candidate
+    from specpilot.verifier.recovery import (
+        RecoveryOutcome,
+        RecoveryRequest,
+        execute_recovery,
+        select_recovery,
+    )
+    from specpilot.verifier.semantic import (
+        DeterministicVerificationRequired,
+        SemanticContext,
+        SemanticVerifier,
+    )
+
+    try:
+        corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_manifest_not_found")
+
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    if {manifest.manifest_id for manifest, _ in resolved} != set(
+        corpus_manifest.source_manifest_ids
+    ):
+        return _refuse("corpus_source_mismatch")
+
+    store = ManifestStore(arguments.manifest_dir)
+    try:
+        authorized = store.read_source(arguments.source_manifest)
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("manifest_not_found")
+
+    try:
+        endpoint = _authorized_l2_endpoint(arguments.route, authorized)
+    except EgressPolicyViolation as violation:
+        return _refuse(f"blocked:{violation.code}")
+
+    try:
+        services = build_local_tool_services(resolved, corpus_manifest)
+    except LocalToolServicesError as error:
+        return _refuse(error.code)
+    except (UnsafeRfcError, OversizedClauseError, OSError):
+        return _refuse("invalid_corpus")
+    corpus = services.corpus
+
+    try:
+        run_uuid = uuid.UUID(arguments.run_id)
+    except (ValueError, AttributeError):
+        return _refuse("invalid_run_id", EXIT_USAGE)
+
+    policy = EgressPolicy.load()
+    enforcer = EgressPolicyEnforcer(policy, manifests=store)
+    ledger = PostgresEgressLedger(
+        arguments.ledger_dsn, policy=policy, manifests=store
+    )
+    try:
+        key = resolve_credential(endpoint)
+    except ProviderCredentialMissing:
+        return _refuse("provider_credential_missing", EXIT_USAGE)
+    adapter = HttpChatAdapter(endpoint, api_key=key)
+    transport = PolicyBoundTransport(
+        enforcer=enforcer,
+        ledger=ledger,
+        adapters=(cast(Any, adapter),),
+    )
+
+    local_client = LocalMcpEvidenceClient(services)
+    run_id = str(run_uuid)
+    model_id = endpoint.model_id
+    question = arguments.question
+
+    async def recover(
+        candidate: object,
+        evidence: tuple[Evidence, ...],
+        reasons: tuple[str, ...],
+        attempts_used: int,
+    ) -> RecoveryOutcome:
+        from specpilot.contracts.verdict import IdentifiedCandidate, SemanticReason
+        from specpilot.verifier.deterministic import DeterministicFault
+
+        if not isinstance(candidate, IdentifiedCandidate):
+            return RecoveryOutcome(evidence, (), attempts_used)
+        closed: list[DeterministicFault | SemanticReason] = []
+        for reason in reasons:
+            try:
+                closed.append(DeterministicFault(reason))
+            except ValueError:
+                try:
+                    closed.append(SemanticReason(reason))
+                except ValueError:
+                    continue
+        clause_source = next(
+            (
+                item.disclosed.clause_id
+                for item in evidence
+                if item.excerpt.content_hash in candidate.candidate.evidence_ids
+            ),
+            None,
+        )
+        selected = select_recovery(
+            closed,
+            source_clause_id=clause_source,
+            remaining_attempts=8 - attempts_used,
+        )
+        if selected is None:
+            return RecoveryOutcome(evidence, (), attempts_used)
+        return await execute_recovery(
+            RecoveryRequest(
+                kind=selected.kind,
+                claim_id=candidate.claim_id,
+                reason_code=selected.reason_code,
+                source_clause_id=(
+                    clause_source if selected.kind.value != "scoped_search" else None
+                ),
+                corpus_manifest_id=corpus_manifest.manifest_id,
+                allowed_document_ids=(authorized.document_id,),
+                remaining_attempts=8 - attempts_used,
+            ),
+            claim_text=candidate.candidate.claim,
+            client=local_client,
+            corpus=corpus,
+            existing_evidence=evidence,
+            existing_calls=(),
+            attempts_used=attempts_used,
+        )
+
+    checkpoint_store = LocalCheckpointStore(
+        run_id=run_id,
+        query_hash=hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        evaluation_root_id=arguments.evaluation_root_id,
+        source_manifest_id=authorized.manifest_id,
+        corpus_manifest_id=corpus_manifest.manifest_id,
+        policy_hash=policy.policy_hash,
+        configuration_hash=_l2_configuration_hash(),
+        compliance_prompt_hash=_l2_compliance_prompt_hash(),
+        verifier_prompt_hash=_l2_verifier_prompt_hash(),
+        provider_id=endpoint.provider_id,
+        model_id=model_id,
+    )
+
+    context = L2RunContext(
+        run_id=run_id,
+        question=question,
+        planner=Planner(transport),
+        planner_context=PlannerContext(
+            source_manifest=authorized,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            evaluation_root_id=arguments.evaluation_root_id,
+            run_id=run_id,
+            model_id=model_id,
+            idempotency_key=f"{run_id}-planning-initial-g0",
+            task_level=TaskLevel.L2,
+        ),
+        evidence_agent=cast(Any, EvidenceAgent(local_client, corpus)),
+        compliance_agent=ComplianceAgent(transport),
+        compliance_context=ComplianceContext(
+            source_manifest=authorized,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            evaluation_root_id=arguments.evaluation_root_id,
+            run_id=run_id,
+            model_id=model_id,
+            idempotency_key="initial",
+            reconstruction_generation=0,
+        ),
+        semantic_verifier=SemanticVerifier(transport),
+        semantic_context=SemanticContext(
+            source_manifest=authorized,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            evaluation_root_id=arguments.evaluation_root_id,
+            run_id=run_id,
+            model_id=model_id,
+            idempotency_key="initial",
+            reconstruction_generation=0,
+        ),
+        deterministic_verifier=lambda candidate, evidence: verify_candidate(
+            candidate,
+            evidence,
+            corpus,
+            corpus_manifest_id=corpus_manifest.manifest_id,
+            allowed_document_ids=frozenset({authorized.document_id}),
+        ),
+        recovery_runner=recover,
+        checkpoint_factory=checkpoint_store.new_checkpoint,
+        checkpoint_writer=checkpoint_store.write,
+    )
+
+    try:
+        outcome = await run_l2_attempt(context)
+    except EgressPolicyViolation as violation:
+        return _refuse(f"blocked:{violation.code}")
+    except ProviderAttemptError as error:
+        return _refuse(f"failed:{error.public_error_code}")
+    except TransportReplayError as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except NoAdapterForRoute as error:
+        return _refuse(f"failed:{error.code}", EXIT_IO)
+    except LedgerError as error:
+        return _refuse(f"blocked:{error.code}", EXIT_IO)
+    except EvidenceCollectionError as error:
+        return _refuse(error.code)
+    except DeterministicVerificationRequired:
+        return _refuse("l2_deterministic_verification_required")
+    except Exception:
+        return _refuse("l2_run_unavailable", EXIT_IO)
+    finally:
+        aclose = getattr(adapter, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    artifact = build_l2_outcome(arguments.case_id, question, outcome)
+    try:
+        outcome_path = write_l2_outcome(
+            arguments.out_dir, arguments.case_id, artifact
+        )
+    except OSError:
+        return _refuse("outcome_not_written", EXIT_IO)
+    except ValueError:
+        return _refuse("invalid_l2_outcome")
+
+    verdicts = [result["verdict"] for result in artifact["results"]]
+    if (
+        outcome.egress_error is None
+        and outcome.provider_error is None
+        and outcome.parse_fault is None
+    ):
+        return _emit(
+            {
+                "status": "completed",
+                "case_id": arguments.case_id,
+                "outcome_path": str(outcome_path),
+                "verdicts": verdicts,
+            }
+        )
+    _emit(
+        {
+            "status": "refused",
+            "case_id": arguments.case_id,
+            "outcome_path": str(outcome_path),
+            "verdicts": verdicts,
+        }
+    )
+    if outcome.egress_error is not None:
+        return _refuse(f"blocked:{outcome.egress_error}")
+    if outcome.provider_error is not None:
+        return _refuse(f"failed:{outcome.provider_error}")
+    return _refuse(outcome.parse_fault or "l2_parse_fault")
+
+
 def _annotation_retire(arguments: argparse.Namespace) -> int:
     """Take one item out of the evaluation set without deleting anything.
 
@@ -4367,6 +4715,36 @@ def _parser() -> argparse.ArgumentParser:
     answer.add_argument("--evaluation-root-id", required=True)
     answer.add_argument("--run-id", required=True)
     answer.set_defaults(handler=_answer)
+
+    l2 = commands.add_parser("l2").add_subparsers(dest="command", required=True)
+    l2_run = l2.add_parser("run")
+    l2_run.add_argument("--question", required=True)
+    l2_run.add_argument("--case-id", required=True)
+    l2_run.add_argument("--corpus-manifest", required=True)
+    l2_run.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    l2_run.add_argument("--manifest-dir", type=Path, required=True)
+    l2_run.add_argument("--manifest", action="append", required=True)
+    l2_run.add_argument("--xml", action="append", type=Path, required=True)
+    # The authorized successor, named separately from the corpus sources exactly
+    # as ``answer`` does: the sources say which documents the index covers, this
+    # one says which compliance decision permits sending from them.
+    l2_run.add_argument("--source-manifest", required=True)
+    # Accepted for invocation parity with ``answer`` so the author's existing
+    # script can become an L2 run by changing the command and adding the case.
+    # The L2 chain is retrieval-local (BM25 over the pooled corpus) and never
+    # opens the dense index or the encoder, so these three are validated but not
+    # read by this path.
+    l2_run.add_argument("--model-dir", type=Path, required=True)
+    l2_run.add_argument("--device", choices=["mps", "cpu"], required=True)
+    l2_run.add_argument("--qdrant-url", required=True)
+    l2_run.add_argument("--ledger-dsn", required=True)
+    l2_run.add_argument("--route", choices=sorted(LIVE_ROUTE_NAMES), default="main")
+    l2_run.add_argument("--evaluation-root-id", required=True)
+    # A fresh UUID per invocation: the local checkpoint store never resumes, and
+    # reusing one would replay against the ledger's idempotency keys.
+    l2_run.add_argument("--run-id", required=True)
+    l2_run.add_argument("--out-dir", type=Path, required=True)
+    l2_run.set_defaults(handler=_l2_run)
 
     annotation = commands.add_parser("annotation").add_subparsers(
         dest="command", required=True
