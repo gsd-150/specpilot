@@ -251,6 +251,51 @@ def test_deleted_shared_record_can_be_republished_over_stale_other_indexes(
     assert cache.get(key) == republished
 
 
+def test_hit_replaces_only_genuinely_stale_run_and_session_markers(
+    tmp_path: Path,
+) -> None:
+    current = NOW
+    cache = LocalResponseCache(
+        tmp_path / "cache", ttl_seconds=60, clock=lambda: current
+    )
+    key = _key()
+    cache.put(
+        key,
+        _response("old"),
+        linkage=CacheLinkage(run_id="run-old", session_id="session-old"),
+    )
+    assert cache.delete_run("run-old") == 1
+    current += timedelta(seconds=1)
+    cache.put(
+        key,
+        _response("new"),
+        linkage=CacheLinkage(run_id="run-new", session_id="session-new"),
+    )
+
+    assert (
+        cache.get(
+            key,
+            linkage=CacheLinkage(run_id="run-reuse", session_id="session-old"),
+        )
+        is not None
+    )
+    assert cache.delete_session("session-old") == 1
+    current += timedelta(seconds=1)
+    cache.put(
+        key,
+        _response("newer"),
+        linkage=CacheLinkage(run_id="run-final", session_id="session-final"),
+    )
+    assert (
+        cache.get(
+            key,
+            linkage=CacheLinkage(run_id="run-reuse", session_id="session-reuse"),
+        )
+        is not None
+    )
+    assert cache.delete_run("run-reuse") == 1
+
+
 def test_index_failure_never_publishes_a_reusable_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

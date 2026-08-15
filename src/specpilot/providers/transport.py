@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -146,11 +146,14 @@ class PolicyBoundTransport:
         counter = adapter.token_counter
         reservation_request = self.__enforcer.prepare(request, counter)
         cache_key = self.__cache_key(reservation_request)
-        if self.__cache is not None:
+        cache = self.__cache
+        if cache is not None:
             assert cache_key is not None
             if cache_linkage is None or cache_linkage.run_id != request.run_id:
                 raise ResponseCacheError("cache_linkage_invalid")
-            cached = self.__cache.get(cache_key, linkage=cache_linkage)
+            cached = await _cache_thread(
+                lambda: cache.get(cache_key, linkage=cache_linkage)
+            )
             if cached is not None:
                 cached_response = cached.response
                 return TransportReceipt(
@@ -239,13 +242,15 @@ class PolicyBoundTransport:
             duration_ms=_elapsed_ms(started),
         )
         cache_record_hash: str | None = None
-        if self.__cache is not None:
+        if cache is not None:
             assert cache_key is not None
             assert cache_linkage is not None
-            cached = self.__cache.put(
-                cache_key,
-                response,
-                linkage=cache_linkage,
+            cached = await _cache_thread(
+                lambda: cache.put(
+                    cache_key,
+                    response,
+                    linkage=cache_linkage,
+                )
             )
             cache_record_hash = cached.record_hash
         return TransportReceipt(
@@ -378,6 +383,23 @@ class PolicyBoundTransport:
 
 def _elapsed_ms(started: float) -> int:
     return max(int((time.monotonic() - started) * 1000), 0)
+
+
+async def _cache_thread[CacheResult](
+    operation: Callable[[], CacheResult],
+) -> CacheResult:
+    """Keep private filesystem locks off-loop and observe detached completion."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_consume_detached_cache_result)
+        raise
+
+
+def _consume_detached_cache_result(task: asyncio.Task[object]) -> None:
+    with suppress(BaseException):
+        task.result()
 
 
 async def _settle_bounded(task: asyncio.Task[object]) -> None:

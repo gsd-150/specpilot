@@ -375,7 +375,21 @@ class LocalResponseCache:
                 )
             except FileNotFoundError:
                 existing = None
-            if existing is not None and existing != marker and replace_stale:
+            if existing is not None and existing != marker:
+                previous = _CacheIndexMarker.model_validate_json(existing)
+                if previous.key_hash != cached.key.key_hash or existing != _canonical(
+                    previous
+                ):
+                    raise ValueError("cache index identity mismatch")
+                current = self._read_record_locked(cached.key.key_hash)
+                missing_record_is_stale = replace_stale and current is None
+                replaced_record_is_stale = (
+                    not replace_stale
+                    and current == cached
+                    and previous.record_hash != current.record_hash
+                )
+                if not (missing_record_is_stale or replaced_record_is_stale):
+                    raise ValueError("cache index names a live conflicting record")
                 _secure_unlink(
                     records,
                     f"{cached.key.key_hash}.json",

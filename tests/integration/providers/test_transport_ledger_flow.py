@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
 import psycopg
@@ -12,6 +14,7 @@ from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
 from specpilot.egress.postgres import PostgresEgressLedger
 from specpilot.providers.cache import (
+    CachedProviderResponse,
     CacheLinkage,
     CacheNamespace,
     LocalResponseCache,
@@ -194,6 +197,111 @@ async def test_cache_fault_fails_closed_before_reservation(
 
     assert provider.call_count == 0
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 0
+
+
+async def test_cache_lock_contention_never_blocks_the_event_loop(
+    clean_ledger: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeProvider()
+    cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
+    line = cached_transport(clean_ledger, provider, cache)
+    request = request_with(distinct_excerpt(1))
+    await line.send(
+        request,
+        idempotency_key="populate",
+        cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-a"),
+    )
+    key_hash = next((tmp_path / "cache" / "records").glob("*.json")).stem
+    acquired = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr("specpilot.providers.cache._LOCK_TIMEOUT_SECONDS", 0.3)
+    holder = threading.Thread(
+        target=lambda: _hold_cache_key(cache, key_hash, acquired, release)
+    )
+    holder.start()
+    assert acquired.wait(timeout=1)
+    reused = request.model_copy(update={"run_id": "run-ticker"})
+    started = time.monotonic()
+    pending = asyncio.create_task(
+        line.send(
+            reused,
+            idempotency_key="ticker",
+            cache_linkage=CacheLinkage(
+                run_id=reused.run_id, session_id="session-ticker"
+            ),
+        )
+    )
+    await asyncio.sleep(0.05)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.2
+    assert not pending.done()
+    release.set()
+    receipt = await pending
+    holder.join(timeout=1)
+    assert receipt.cache_hit is True
+
+
+async def test_cancelled_cache_wait_returns_promptly_and_background_closes_lock(
+    clean_ledger: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeProvider()
+    cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
+    line = cached_transport(clean_ledger, provider, cache)
+    request = request_with(distinct_excerpt(1))
+    await line.send(
+        request,
+        idempotency_key="populate-cancel",
+        cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-a"),
+    )
+    record_path = next((tmp_path / "cache" / "records").glob("*.json"))
+    cached_key = CachedProviderResponse.model_validate_json(
+        record_path.read_bytes()
+    ).key
+    key_hash = record_path.stem
+    monkeypatch.setattr("specpilot.providers.cache._LOCK_TIMEOUT_SECONDS", 0.3)
+    acquired = threading.Event()
+    release = threading.Event()
+    holder = threading.Thread(
+        target=lambda: _hold_cache_key(cache, key_hash, acquired, release)
+    )
+    holder.start()
+    assert acquired.wait(timeout=1)
+    cancelled = request.model_copy(update={"run_id": "run-cancelled"})
+    pending = asyncio.create_task(
+        line.send(
+            cancelled,
+            idempotency_key="cancelled",
+            cache_linkage=CacheLinkage(
+                run_id=cancelled.run_id, session_id="session-cancelled"
+            ),
+        )
+    )
+    await asyncio.sleep(0.02)
+    started = time.monotonic()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=0.1)
+    assert time.monotonic() - started < 0.1
+    release.set()
+    holder.join(timeout=1)
+    for _ in range(100):
+        if await asyncio.to_thread(cache.delete_run, cancelled.run_id) == 1:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("detached cache association did not finish within its bound")
+    assert await asyncio.to_thread(cache.get, cached_key) is None
+
+
+def _hold_cache_key(
+    cache: LocalResponseCache,
+    key_hash: str,
+    acquired: threading.Event,
+    release: threading.Event,
+) -> None:
+    with cache._key_lock(key_hash):
+        acquired.set()
+        assert release.wait(timeout=2)
 
 
 async def test_a_retry_under_a_new_key_is_charged_transmitted_usage_again(

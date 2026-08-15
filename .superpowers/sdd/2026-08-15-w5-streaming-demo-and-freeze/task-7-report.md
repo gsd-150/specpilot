@@ -116,3 +116,33 @@ Review verification from the final tree:
   passed**.
 - Fresh PostgreSQL transport plus migrations: **105 passed**.
 - Browser decoder suite: **151 passed** and the production build succeeded.
+
+## Review round 2
+
+Two remaining cache-hit defects were reproduced and corrected.
+
+- A deleted record can be repopulated under the same content key while older
+  run/session markers remain. Hit association now decodes the existing marker
+  canonically under the key lock and replaces it only when its record hash is
+  absent or differs from the currently validated live record. Corrupt markers
+  and markers that still bind the live record are never overwritten. The
+  cross-session regression deletes the old run, repopulates from a new
+  session, reuses the original session, and verifies both new run and session
+  retention links.
+- `PolicyBoundTransport.send` no longer executes synchronous cache filesystem
+  or `flock` waits on the event loop. Cache get/association and put run through
+  `asyncio.to_thread`; the task is shielded so caller cancellation returns
+  promptly while the bounded filesystem operation finishes. A done callback
+  consumes every detached result or exception. The cache's five-second lock
+  bound, `finally`-based descriptor release, and atomic publication/association
+  rollback remain authoritative for the background operation.
+
+Review verification from the final tree:
+
+- Cache filesystem suite: **29 passed**.
+- `make check`: Ruff and mypy passed; **1,629 unit tests** and **197 CLI tests
+  passed**.
+- Fresh PostgreSQL transport plus migrations: **107 passed**, including a
+  ticker that advances during lock contention and prompt cancellation followed
+  by observed background association, retention deletion, and lock release.
+- Browser suite: **151 passed** and the production build succeeded.
