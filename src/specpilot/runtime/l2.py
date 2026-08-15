@@ -206,6 +206,7 @@ class L2Outcome:
     audit_events: tuple[L2AuditEvent, ...] = ()
     checkpoints: tuple[RunCheckpoint, ...] = ()
     planning: PlannerResult | None = None
+    raw_compliance_reply: str | None = None
 
 
 def logical_stage_key(
@@ -660,9 +661,10 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
             )
             if checkpoint is not None:
                 written.append(checkpoint)
-        return _fault(
+        fault = _fault(
             "invalid_compliance_reply", attempts, reservations, recovered, written
         )
+        return replace(fault, raw_compliance_reply=error.raw_reply)
     except InvalidSemanticReply as error:
         _append_reservation(reservations, error.reservation_id)
         if checkpoint is not None:

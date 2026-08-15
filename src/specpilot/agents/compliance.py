@@ -43,6 +43,7 @@ class InvalidComplianceReply(Exception):
         "cache_hit",
         "cache_record_hash",
         "cache_request_hash",
+        "raw_reply",
         "replayed",
         "request_size",
         "reservation_id",
@@ -57,6 +58,7 @@ class InvalidComplianceReply(Exception):
         cache_hit: bool = False,
         cache_request_hash: str | None = None,
         cache_record_hash: str | None = None,
+        raw_reply: str | None = None,
     ) -> None:
         self.reservation_id = reservation_id
         self.replayed = replayed
@@ -64,6 +66,7 @@ class InvalidComplianceReply(Exception):
         self.cache_hit = cache_hit
         self.cache_request_hash = cache_request_hash
         self.cache_record_hash = cache_record_hash
+        self.raw_reply = raw_reply
         super().__init__("invalid_compliance_reply")
 
 
@@ -133,6 +136,10 @@ class ComplianceAgent:
                 cache_hit=receipt.cache_hit,
                 cache_request_hash=receipt.cache_request_hash,
                 cache_record_hash=receipt.cache_record_hash,
+                # Bounded and only ever projected into the author's restricted
+                # outcome artifact: the raw bytes are the only way to fix a
+                # reply contract from the data instead of guessing.
+                raw_reply=receipt.response.content[:16384],
             )
             raise error
         return ComplianceOutcome(
