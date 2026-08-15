@@ -101,6 +101,34 @@ class PostgresEgressLedger:
         except psycopg.Error as error:
             raise LedgerUnavailable() from error
 
+    async def initialize_corpus(self, corpus_manifest_id: str) -> str:
+        """Create one empty policy-bound corpus epoch, or replay its identity."""
+        policy_hash = self._policy.policy_hash
+        try:
+            CorpusUsage(
+                corpus_manifest_id=corpus_manifest_id,
+                policy_hash=policy_hash,
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise LedgerIntegrityError() from None
+        connection = await self._connect()
+        try:
+            async with connection, connection.transaction():
+                await _record_policy(connection, self._policy, policy_hash)
+                locked = await _lock_corpus(
+                    connection, corpus_manifest_id, policy_hash
+                )
+                if (
+                    locked.usage is None
+                    or locked.usage.policy_hash != policy_hash
+                ):
+                    raise PolicyRebindConflict()
+                return locked.corpus_ledger_id
+        except PolicyRebindConflict:
+            raise
+        except psycopg.Error as error:
+            raise LedgerUnavailable() from error
+
     async def rebind_policy(
         self,
         corpus_manifest_id: str,

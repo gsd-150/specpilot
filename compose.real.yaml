@@ -12,6 +12,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      target: initializer-runtime
     profiles: ["real"]
     networks: [internal]
     depends_on:

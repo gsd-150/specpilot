@@ -99,6 +99,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      target: runtime
     profiles: ["demo", "real"]
     networks: [internal, egress]
     volumes:
@@ -142,6 +143,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      target: fixture
     profiles: ["demo"]
     networks: [internal]
     depends_on:

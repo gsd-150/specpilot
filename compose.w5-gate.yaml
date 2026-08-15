@@ -1,0 +1,45 @@
+# W5 packaged-demo gate only. The internally generated Compose project name in
+# scripts/w5_packaged_gate.py scopes every named resource and teardown operation.
+# Writable artifacts use named volumes; committed fixtures and migrations are
+# copied into image-only build targets, so this gate has no runtime host binds.
+
+volumes:
+  w5-corpus:
+  w5-manifests:
+  w5-ready:
+  w5-sources:
+
+services:
+  fixture-init:
+    volumes: !override
+      - w5-corpus:/run/specpilot/corpus
+      - w5-manifests:/run/specpilot/manifests
+      - w5-ready:/run/specpilot/ready
+
+  mcp:
+    volumes: !override
+      - w5-corpus:/run/specpilot/corpus:ro
+      - w5-manifests:/run/specpilot/manifests:ro
+      - w5-sources:/run/specpilot/sources:ro
+      - w5-ready:/run/specpilot/ready:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  api:
+    volumes: !override
+      - w5-corpus:/run/specpilot/corpus:ro
+      - w5-manifests:/run/specpilot/manifests:ro
+      - w5-sources:/run/specpilot/sources:ro
+      - w5-ready:/run/specpilot/ready:ro
+    ports: !override
+      - "127.0.0.1:${SPECPILOT_W5_API_PORT}:8000"
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy

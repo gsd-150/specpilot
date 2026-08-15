@@ -225,10 +225,16 @@ def test_w5_gate_names_every_required_evidence_surface() -> None:
         "compose-check",
         "package-check",
         "image-check",
+        "packaged-demo-check",
         "browser",
         "full-service",
     ):
         assert dependency in target, f"w5-check omits {dependency}"
+    assert target.count("SPECPILOT_W5_ENV") == 9
+
+    environment = makefile[makefile.index("SPECPILOT_W5_ENV :=") :]
+    environment = environment[: environment.index("\n")]
+    assert 'PYTHONPATH="$(CURDIR):$(CURDIR)/src"' in environment
 
     fixture_target = makefile[makefile.index("fixture-smoke:") :]
     fixture_target = fixture_target[: fixture_target.index("\n\n")]
@@ -239,6 +245,30 @@ def test_w5_gate_names_every_required_evidence_surface() -> None:
     browser_target = browser_target[: browser_target.index("\n\n")]
     assert 'SPECPILOT_PYTHON="$(SPECPILOT_PYTHON)"' in browser_target
     assert 'PYTHONPATH="$(CURDIR):$(CURDIR)/src"' in browser_target
+
+    packaged_target = makefile[makefile.index("packaged-demo-check:") :]
+    packaged_target = packaged_target[: packaged_target.index("\n\n")]
+    assert "scripts/w5_packaged_gate.py" in packaged_target
+
+    image_target = makefile[makefile.index("image-check:") :]
+    image_target = image_target[: image_target.index("\n\n")]
+    assert "build api mcp fixture-init real-init ingestion" in image_target
+    assert "--no-cache" not in image_target
+    assert "COMPOSE_PARALLEL_LIMIT=1" in image_target
+    assert "image-verify" in image_target
+
+    cold_target = makefile[makefile.index("image-cold-check:") :]
+    cold_target = cold_target[: cold_target.index("\n\n")]
+    assert "build --no-cache api mcp fixture-init real-init ingestion" in cold_target
+    assert "image-verify" in cold_target
+    assert "image-cold-check" not in target
+
+    verify_target = makefile[makefile.index("image-verify:") :]
+    verify_target = verify_target[: verify_target.index("\n\n")]
+    assert "docker history --no-trunc" in verify_target
+    assert "specpilot-real-init specpilot-fixture-init" in verify_target
+    assert "-m specpilot.cli --help" in verify_target
+    assert 'api/static/trace").exists()' in verify_target
 
 
 def test_ci_executes_the_same_hard_gate_with_fixture_only_inputs() -> None:

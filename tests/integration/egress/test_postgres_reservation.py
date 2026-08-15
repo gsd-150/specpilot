@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from specpilot.contracts.egress import EgressStage
 from specpilot.egress.enforcer import EgressPolicyEnforcer, EgressPolicyViolation
-from specpilot.egress.ledger import AttemptOutcome, RequestSize, ReservationState
+from specpilot.egress.ledger import (
+    AttemptOutcome,
+    PolicyRebindConflict,
+    RequestSize,
+    ReservationState,
+)
 from specpilot.egress.postgres import PostgresEgressLedger
 from tests.unit.egress.test_disclosure_caps import distinct_excerpt, sized_quote
 from tests.unit.egress.test_policy_projection import (
+    CORPUS_MANIFEST_ID,
     FIXTURE_DOCUMENT,
     NOW,
     FixtureTokenCounter,
@@ -118,6 +126,58 @@ async def test_first_reservation_persists_both_scopes(clean_ledger: str) -> None
     assert reservation_ledger_id == head_ledger_id == root_ledger_id
     assert ledger_corpus_manifest_id == request.version.corpus_manifest_id
     assert predecessor_ledger_id is None
+
+
+async def test_initialize_corpus_is_idempotent_and_concurrency_safe(
+    clean_ledger: str,
+) -> None:
+    book = ledger(clean_ledger)
+
+    epochs = await asyncio.gather(
+        *(book.initialize_corpus(CORPUS_MANIFEST_ID) for _ in range(8))
+    )
+    replayed = await book.initialize_corpus(CORPUS_MANIFEST_ID)
+
+    assert len(set(epochs)) == 1
+    assert replayed == epochs[0]
+
+    import psycopg
+
+    async with await psycopg.AsyncConnection.connect(clean_ledger) as connection:
+        row = await (
+            await connection.execute(
+                "SELECT count(*), min(policy_hash), "
+                "sum(unique_excerpts), sum(unique_tokens), sum(unique_bytes) "
+                "FROM egress_corpus_ledger"
+            )
+        ).fetchone()
+    assert row == (1, fixture_policy().policy_hash, 0, 0, 0)
+
+
+async def test_initialize_corpus_rejects_an_existing_different_policy(
+    clean_ledger: str,
+) -> None:
+    first = await ledger(clean_ledger).initialize_corpus(CORPUS_MANIFEST_ID)
+    stricter = fixture_policy(
+        **{
+            FIXTURE_DOCUMENT: {
+                "excerpts": 64,
+                "tokens": 1024,
+                "bytes": 8192,
+            }
+        }
+    )
+    conflicting = PostgresEgressLedger(
+        clean_ledger,
+        policy=stricter,
+        manifests=fixture_store(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(PolicyRebindConflict):
+        await conflicting.initialize_corpus(CORPUS_MANIFEST_ID)
+
+    assert await ledger(clean_ledger).initialize_corpus(CORPUS_MANIFEST_ID) == first
 
 
 async def test_ledger_stores_no_query_claim_or_excerpt_text(

@@ -1,8 +1,9 @@
-.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant require-browser-dsn require-compose-env frontend-test frontend-build compose-check package-check image-check browser full-service w5-check ingest-real
+.PHONY: setup check unit cli integration integration-db integration-qdrant lint typecheck fixture-smoke require-dsn require-qdrant require-browser-dsn require-compose-env frontend-test frontend-build compose-check package-check image-check image-cold-check image-verify packaged-demo-check browser full-service w5-check ingest-real
 
 SPECPILOT_PYTHON ?= .venv/bin/python
 SPECPILOT_W5_TIMEOUT_SECONDS ?= 1800
 SPECPILOT_W5_RUN := perl -e 'alarm shift; exec @ARGV' $(SPECPILOT_W5_TIMEOUT_SECONDS)
+SPECPILOT_W5_ENV := env PYTHONPATH="$(CURDIR):$(CURDIR)/src"
 
 setup:
 	python -m venv .venv
@@ -91,7 +92,23 @@ package-check:
 	$(SPECPILOT_PYTHON) -c 'import glob, zipfile; wheels=glob.glob("tmp/w5-dist/specpilot-*.whl"); assert len(wheels) == 1, wheels; names=set(zipfile.ZipFile(wheels[0]).namelist()); assert any(n.endswith("specpilot/api/static/trace/index.html") for n in names); assert any("specpilot/api/static/trace/assets/" in n for n in names); assert any(n.endswith("specpilot/egress/policies/default-v1.json") for n in names); assert any(n.endswith("specpilot/egress/policies/fixture-overlay-v1.json") for n in names)'
 
 image-check: require-compose-env
-	docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile demo --profile real --profile ingestion build api mcp fixture-init real-init ingestion
+	COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile demo --profile real --profile ingestion build api mcp fixture-init real-init ingestion
+	$(MAKE) image-verify
+
+image-cold-check: require-compose-env
+	COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file "$$SPECPILOT_COMPOSE_ENV_FILE" -f compose.yaml -f compose.real.yaml --profile demo --profile real --profile ingestion build --no-cache api mcp fixture-init real-init ingestion
+	$(MAKE) image-verify
+
+image-verify:
+	@for image in specpilot-real-init specpilot-fixture-init; do \
+		if docker history --no-trunc "$$image" | grep -Eq 'node:|npm |static/trace'; then \
+			echo "$$image contains frontend build history"; exit 1; fi; \
+		docker run --rm --entrypoint python "$$image" -m specpilot.cli --help >/dev/null; \
+		docker run --rm --entrypoint python "$$image" -c 'from pathlib import Path; import specpilot; assert not (Path(specpilot.__file__).parent / "api/static/trace").exists()'; \
+	done
+
+packaged-demo-check:
+	$(SPECPILOT_PYTHON) scripts/w5_packaged_gate.py
 
 browser: require-browser-dsn
 	PYTHONPATH="$(CURDIR):$(CURDIR)/src" \
@@ -117,14 +134,15 @@ full-service: require-dsn require-qdrant
 # hard wall-clock bound and the ordered log shows which evidence surface failed.
 # The complete tree includes the four registered fixture scenarios over SSE.
 w5-check:
-	$(SPECPILOT_W5_RUN) $(MAKE) check
-	$(SPECPILOT_W5_RUN) $(MAKE) frontend-test
-	$(SPECPILOT_W5_RUN) $(MAKE) frontend-build
-	$(SPECPILOT_W5_RUN) $(MAKE) compose-check
-	$(SPECPILOT_W5_RUN) $(MAKE) package-check
-	$(SPECPILOT_W5_RUN) $(MAKE) full-service
-	$(SPECPILOT_W5_RUN) $(MAKE) browser
-	$(SPECPILOT_W5_RUN) $(MAKE) image-check
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) check
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) frontend-test
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) frontend-build
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) compose-check
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) package-check
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) full-service
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) browser
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) image-check
+	$(SPECPILOT_W5_RUN) $(SPECPILOT_W5_ENV) $(MAKE) packaged-demo-check
 
 ingest-real:
 	@test -n "$(CORPUS_DIR)" || { echo "set CORPUS_DIR to an absolute path"; exit 1; }
