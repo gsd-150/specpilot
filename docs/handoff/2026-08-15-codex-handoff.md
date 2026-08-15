@@ -44,3 +44,25 @@ human-label stores, the prose-free freeze evidence builder, and the
 The freeze path is now: dev runs → `judge score` → `labels-template` →
 author labels → `labels-add` → `judge calibrate` (evidence + hash) →
 `dev-scoring-status.json` → `freeze-candidate` → author `freeze-confirm`.
+
+## L1 dev calibration — 2026-08-16
+
+The first author-run dev pass answered 9 of 13 answerable L1 dev cases and
+refused 4. Judge calibration over the 9 (prompt v1, glm-5.2): key points n=18,
+agreement 1.0, kappa 1.0; claims n=12, agreement 0.917, kappa 0.0 (unbalanced
+marginals — the judge rated every claim supported; the single disagreement is
+l1-dev-008's SHOULD-strength claim), severe-flag agreement 12/12. The evidence
+sha256 is `392900c592f881102d90597ffd34ec6f9e5c51449fa7e9be45ccaa36fb51117a`;
+`dev-scoring-status.json` carries route `judge_calibrated` and split `dev`.
+
+The four refusals are diagnosed and deliberately left unfixed — see
+`docs/reports/2026-08-16-l1-dev-refusal-diagnosis.md`: l1-dev-002 is a
+retrieval gap (dense rank 6, one rank outside top-5; fixing it means changing
+the frozen manifest's retrieval protocol), l1-dev-010 is the known
+multi-anchor case (one of two golds retrievable at k=5), l1-dev-011 and
+l1-dev-016 are model-side refusals with gold at rank 1 on the wire. The
+calibration coverage is 9/13 answerable dev cases and the report must say so.
+
+Still open before the freeze: the author's identity status and dependency
+lock, the L2 dev calibration (needs a run path and a judge-input shape
+decision), and the four-scenario demo matrix evidence.
