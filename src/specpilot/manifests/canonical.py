@@ -8,7 +8,12 @@ from pydantic import BaseModel
 # Fields that hold a record's own content ID. They are excluded from the bytes
 # the ID is computed from, or the hash would have to contain itself. Excluding
 # a name a model does not declare is a no-op, so listing both is safe.
-_CONTENT_ID_FIELDS = {"manifest_id", "annotation_id", "retirement_id"}
+_CONTENT_ID_FIELDS = {
+    "manifest_id",
+    "annotation_id",
+    "retirement_id",
+    "group_record_id",
+}
 
 
 def canonical_json(model: BaseModel, *, include_manifest_id: bool = False) -> bytes:
