@@ -79,6 +79,8 @@ def build_l2_outcome(
         "provider_error": outcome.provider_error,
         "parse_fault": outcome.parse_fault,
     }
+    if outcome.raw_planning_reply is not None:
+        artifact["raw_plan_reply"] = outcome.raw_planning_reply[:16384]
     if outcome.raw_compliance_reply is not None:
         # Present only on a compliance parse fault, so the author can fix the
         # reply contract from the data; bounded again on the way in.
@@ -112,7 +114,7 @@ def validate_l2_outcome(payload: object) -> dict[str, Any]:
         raise ValueError("l2 outcome results must be a list")
     for result in results:
         _require_result(result)
-    for key in ("provider_error", "parse_fault", "raw_reply"):
+    for key in ("provider_error", "parse_fault", "raw_reply", "raw_plan_reply"):
         value = payload.get(key)
         if value is not None and not isinstance(value, str):
             raise ValueError(f"l2 outcome {key} must be a string or null")

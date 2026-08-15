@@ -207,6 +207,7 @@ class L2Outcome:
     checkpoints: tuple[RunCheckpoint, ...] = ()
     planning: PlannerResult | None = None
     raw_compliance_reply: str | None = None
+    raw_planning_reply: str | None = None
 
 
 def logical_stage_key(
@@ -692,7 +693,8 @@ async def run_l2_attempt(context: L2RunContext) -> L2Outcome:
                 recovered=recovered,
                 allow_same_stage=True,
             )
-        return _fault("invalid_tool_plan", attempts, reservations, recovered, written)
+        fault = _fault("invalid_tool_plan", attempts, reservations, recovered, written)
+        return replace(fault, raw_planning_reply=error.raw_reply)
 
 
 async def _verify_and_record(
