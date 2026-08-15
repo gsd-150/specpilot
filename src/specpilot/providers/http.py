@@ -100,9 +100,13 @@ COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
     {
         "instruction": (
             "Split into one to three atomic candidates and return JSON only. "
-            "A candidate whose proposed_verdict is insufficient_evidence must "
-            "set evidence_ids to an empty list: the ids name evidence FOR a "
-            "claim, and an insufficient claim has none."
+            "Each excerpt is introduced by its identifier after the word "
+            "Evidence; a candidate's evidence_ids must be exactly those shown "
+            "identifiers, copied in full, and never an identifier you were not "
+            "shown. A candidate whose proposed_verdict is "
+            "insufficient_evidence must set evidence_ids to an empty list: "
+            "the ids name evidence FOR a claim, and an insufficient claim "
+            "has none."
         ),
         "response_schema": ComplianceBatch.model_json_schema(),
     },
@@ -115,7 +119,9 @@ SEMANTIC_REPLY_INSTRUCTIONS = json.dumps(
     {
         "instruction": (
             "Judge only whether the excerpts support the proposed verdict; "
-            "return JSON only."
+            "return JSON only. Each excerpt is introduced by its identifier "
+            "after the word Evidence; cite exactly those shown identifiers, "
+            "copied in full, and never an identifier you were not shown."
         ),
         "response_schema": SemanticDecision.model_json_schema(),
     },

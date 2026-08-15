@@ -615,3 +615,26 @@ def test_planning_instructions_state_the_call_budget_rule() -> None:
             ),
             max_call_cost=8,
         )
+
+
+def test_compliance_and_semantic_instructions_state_the_echo_rule() -> None:
+    """The citation-echo guard the first live L2 run tripped.
+
+    The compliance model cited three identifiers that matched none of the
+    shown excerpts, and the deterministic gate correctly killed every
+    candidate as deterministic_failed. The L1 reply contract has always told
+    the model to echo exactly the shown identifiers; the two L2 instructions
+    now say the same, and this test pins them together so the rule cannot
+    drift off one path again.
+    """
+    from specpilot.providers.http import (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    )
+
+    for instructions in (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    ):
+        assert "never an identifier you were not shown" in instructions
+        assert "copied in full" in instructions
