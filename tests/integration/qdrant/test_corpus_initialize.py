@@ -18,7 +18,11 @@ from specpilot.deployment.initialize import (
     initialize_real,
 )
 from specpilot.deployment.ready import ReadyMarker, ReadyMarkerStore
-from specpilot.manifests.corpus_store import CollectionFrozenError, CorpusManifestStore
+from specpilot.manifests.corpus_store import (
+    CollectionFreezeLease,
+    CollectionFrozenError,
+    CorpusManifestStore,
+)
 from specpilot.retrieval.dense import DenseIndexWriter
 from tests.integration.qdrant.test_corpus_freeze import (
     SyntheticCorpus,
@@ -28,6 +32,37 @@ from tests.integration.qdrant.test_corpus_freeze import (
 
 pytestmark = pytest.mark.integration
 _ROOT = Path(__file__).resolve().parents[3]
+
+
+def _inject_post_publish_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    if failure_point == "record_publish":
+        original_create = CorpusManifestStore.create
+
+        def create_then_fail(
+            store: CorpusManifestStore,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            original_create(store, *args, **kwargs)  # type: ignore[arg-type]
+            raise RuntimeError("injected after durable manifest publish")
+
+        monkeypatch.setattr(CorpusManifestStore, "create", create_then_fail)
+        return
+
+    original_close = CollectionFreezeLease.close
+    armed = True
+
+    def close_then_fail(lease: CollectionFreezeLease) -> None:
+        nonlocal armed
+        original_close(lease)
+        if armed:
+            armed = False
+            raise RuntimeError("injected freeze lease exit failure")
+
+    monkeypatch.setattr(CollectionFreezeLease, "close", close_then_fail)
 
 
 @pytest.fixture
@@ -273,6 +308,82 @@ def test_fixture_cancellation_keeps_primary_error_and_uses_bounded_cleanup(
         admin.close()
 
 
+@pytest.mark.parametrize("failure_point", ["record_publish", "lease_exit"])
+def test_fixture_post_publish_failure_preserves_collection_and_recovers(
+    fixture_request: FixtureInitializationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    fixture = json.loads(
+        (fixture_request.fixture_dir / "fixture-manifest.json").read_text()
+    )
+    collection = fixture["collection_name"]
+    _inject_post_publish_failure(monkeypatch, failure_point)
+    admin = QdrantClient(url=fixture_request.qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            initialize_fixture(fixture_request)
+
+        manifests = CorpusManifestStore(
+            fixture_request.corpus_manifest_dir
+        ).read_all()
+        assert len(manifests) == 1
+        assert manifests[0].collection_name == collection
+        assert admin.collection_exists(collection)
+
+        recovered = initialize_fixture(fixture_request)
+        assert recovered.corpus_manifest_id == manifests[0].manifest_id
+        assert admin.collection_exists(collection)
+    finally:
+        if admin.collection_exists(collection):
+            for snapshot in admin.list_snapshots(collection):
+                admin.delete_snapshot(
+                    collection_name=collection,
+                    snapshot_name=snapshot.name,
+                    wait=True,
+                )
+            admin.delete_collection(collection)
+        admin.close()
+
+
+def test_fixture_cleanup_uncertainty_preserves_created_collection(
+    fixture_request: FixtureInitializationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = json.loads(
+        (fixture_request.fixture_dir / "fixture-manifest.json").read_text()
+    )
+    collection = fixture["collection_name"]
+
+    def fail_before_freeze(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("injected primary observation failure")
+
+    def fail_manifest_check(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("injected manifest check failure")
+
+    monkeypatch.setattr(
+        "specpilot.deployment.initialize._observe_fixture",
+        fail_before_freeze,
+    )
+    monkeypatch.setattr(
+        CorpusManifestStore,
+        "has_collection_binding",
+        fail_manifest_check,
+    )
+    admin = QdrantClient(url=fixture_request.qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(RuntimeError, match="primary observation"):
+            initialize_fixture(fixture_request)
+
+        assert admin.collection_exists(collection)
+    finally:
+        if admin.collection_exists(collection):
+            admin.delete_collection(collection)
+        admin.close()
+
+
 def test_real_initialization_verifies_existing_freeze_and_writes_real_marker(
     tmp_path: Path,
     qdrant_url: str,
@@ -475,5 +586,45 @@ def test_real_runtime_fault_removes_created_mutable_collection(
         assert not admin.collection_exists(synthetic.collection)
     finally:
         if admin.collection_exists(synthetic.collection):
+            admin.delete_collection(synthetic.collection)
+        admin.close()
+
+
+@pytest.mark.parametrize("failure_point", ["record_publish", "lease_exit"])
+def test_real_post_publish_failure_preserves_collection_and_recovers(
+    tmp_path: Path,
+    qdrant_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    request, synthetic = _new_real_request(
+        tmp_path,
+        qdrant_url,
+        monkeypatch,
+        number="990006" if failure_point == "record_publish" else "990007",
+    )
+    _inject_post_publish_failure(monkeypatch, failure_point)
+    admin = QdrantClient(url=qdrant_url, trust_env=False)
+    try:
+        with pytest.raises(InitializationRefusal) as raised:
+            initialize_real(request)
+
+        assert raised.value.code == "real_corpus_unavailable"
+        manifests = CorpusManifestStore(request.corpus_manifest_dir).read_all()
+        assert len(manifests) == 1
+        assert manifests[0].collection_name == synthetic.collection
+        assert admin.collection_exists(synthetic.collection)
+
+        recovered = initialize_real(request)
+        assert recovered.corpus_manifest_id == manifests[0].manifest_id
+        assert admin.collection_exists(synthetic.collection)
+    finally:
+        if admin.collection_exists(synthetic.collection):
+            for snapshot in admin.list_snapshots(synthetic.collection):
+                admin.delete_snapshot(
+                    collection_name=synthetic.collection,
+                    snapshot_name=snapshot.name,
+                    wait=True,
+                )
             admin.delete_collection(synthetic.collection)
         admin.close()

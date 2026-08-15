@@ -574,7 +574,11 @@ def initialize_fixture(request: FixtureInitializationRequest) -> ReadyMarker:
         result = ready_store.publish(marker)
     except BaseException:
         if created and not frozen:
-            _cleanup_collection(admin, bundle.manifest.collection_name)
+            _cleanup_unbound_collection(
+                admin,
+                corpus_store,
+                bundle.manifest.collection_name,
+            )
         _close_qdrant(admin)
         raise
     admin.close()
@@ -641,6 +645,24 @@ def _cleanup_collection(admin: QdrantClient, collection: str) -> None:
             timeout=_QDRANT_OPERATION_TIMEOUT_SECONDS,
         )
     except BaseException:
+        return
+
+
+def _cleanup_unbound_collection(
+    admin: QdrantClient,
+    corpus_store: CorpusManifestStore,
+    collection: str,
+) -> None:
+    """Delete only while an owned lease proves no durable freeze can bind it."""
+    try:
+        with corpus_store.acquire_freeze_lease(collection) as lease:
+            if corpus_store.has_collection_binding(collection, lease=lease):
+                return
+            _cleanup_collection(admin, collection)
+    except BaseException:
+        # Any lease, decode, filesystem, or cleanup uncertainty preserves the
+        # collection. A false preserve is recoverable; deleting a durable
+        # manifest's collection is not.
         return
 
 
@@ -800,7 +822,11 @@ def _initialize_new_real(
         manifest = result.manifest
     except BaseException:
         if created and not frozen:
-            _cleanup_collection(admin, derived_collection)
+            _cleanup_unbound_collection(
+                admin,
+                corpus_store,
+                derived_collection,
+            )
         _close_qdrant(admin)
         raise
     admin.close()

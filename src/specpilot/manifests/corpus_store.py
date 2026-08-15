@@ -500,6 +500,24 @@ class CorpusManifestStore:
                 )
             return matches[0] if matches else None
 
+    def has_collection_binding(
+        self,
+        collection_name: str,
+        *,
+        lease: CollectionFreezeLease,
+    ) -> bool:
+        """Check the durable frozen registry under this store's owned lease."""
+        self._validate_collection_name(collection_name)
+        with self._owned_operation(
+            lease,
+            collection_name=collection_name,
+            exclusive=True,
+        ):
+            return any(
+                manifest.collection_name == collection_name
+                for manifest in self._read_all_under(lease)
+            )
+
     def require_publishable_intent(
         self,
         intent: CorpusManifestIntent,
