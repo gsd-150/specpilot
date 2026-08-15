@@ -137,7 +137,15 @@ class ScoringPoint(_FrozenModel):
 
 
 class JudgePayload(_FrozenModel):
+    """§8.3.1's judge input: the question, the answer, and the gold points.
+
+    The question is required input, not context: the judge decides whether a
+    scoring point is hit against the question the answer was answering, and
+    §8.3.1 lists it first. It travels as `query` like both L1 payloads do.
+    """
+
     kind: Literal["judge"] = "judge"
+    query: ShortText
     final_answer: BoundedText
     scoring_points: Annotated[tuple[ScoringPoint, ...], Field(max_length=128)]
     gold_excerpts: tuple[EvidenceExcerpt, ...] = ()

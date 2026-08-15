@@ -134,6 +134,7 @@ def prepare_judge(
 ):
     route = judge_route()
     payload = JudgePayload(
+        query="The question being scored.",
         final_answer="Final bounded answer",
         scoring_points=(ScoringPoint(point_id="p1", text="Correctness"),),
         gold_excerpts=excerpts,

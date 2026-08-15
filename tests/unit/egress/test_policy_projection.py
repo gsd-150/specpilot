@@ -295,6 +295,7 @@ def test_evidence_excerpt_verifies_exact_quote_hash() -> None:
 
 def test_judge_payload_exposes_only_answer_scoring_and_gold_excerpts() -> None:
     payload = JudgePayload(
+        query="The question being scored.",
         final_answer="Final answer",
         scoring_points=(ScoringPoint(point_id="p1", text="Correctness"),),
         gold_excerpts=(excerpt(),),
@@ -302,6 +303,7 @@ def test_judge_payload_exposes_only_answer_scoring_and_gold_excerpts() -> None:
 
     assert set(payload.model_dump()) == {
         "kind",
+        "query",
         "final_answer",
         "scoring_points",
         "gold_excerpts",
