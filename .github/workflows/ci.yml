@@ -156,17 +156,35 @@ jobs:
           # config step fails on an empty section between colons — the failure
           # AGENTS.md warns about, for the same reason.
           ready_dir="$RUNNER_TEMP/specpilot-ci/ready"
+          real_input_dir="$RUNNER_TEMP/specpilot-ci/real-input"
           mkdir -p \
             "$corpus_dir" \
             "$manifest_dir" \
             "$source_dir" \
-            "$ready_dir"
+            "$ready_dir" \
+            "$real_input_dir"
           {
             echo "SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST=$corpus_dir"
             echo "SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST=$manifest_dir"
             echo "SPECPILOT_MCP_SOURCE_DATA_DIR_HOST=$source_dir"
             echo "SPECPILOT_READY_DIR_HOST=$ready_dir"
+            echo "CORPUS_DIR=$real_input_dir"
           } >> "$GITHUB_ENV"
+      # Enumerated rather than added one failure at a time: two rounds of this
+      # job died on a different unset mount variable, and the list is small
+      # enough to assert whole.
+      - name: every compose bind-mount variable is set
+        run: |
+          missing=0
+          for name in $(grep -hoE '\$\{[A-Z_]+\}:[^ ]*' \
+              compose.yaml compose.real.yaml compose.demo.yaml compose.index.yaml \
+              2>/dev/null | sed -E 's/^\$\{([A-Z_]+)\}.*/\1/' | sort -u); do
+            if [ -z "${!name:-}" ]; then
+              echo "unset compose mount variable: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - run: docker compose --profile demo config
       - run: docker compose --profile real config
       # The base file must publish nothing; only the explicit demo override may.
