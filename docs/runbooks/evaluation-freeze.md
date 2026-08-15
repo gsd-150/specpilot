@@ -70,6 +70,45 @@ commit/tree, then publishes a content-addressed final spec. It does not execute
 evaluation code. An identical retry leaves the artifact bytes unchanged and
 prints the same `path`, `hash`, and aggregate `counts`.
 
+## Pre-freeze disclosures
+
+The following five items were recorded during the 2026-08-15 L2-adv source
+review and are part of the frozen tree. The W6 report must restate each one;
+none of them is a defect, and each changes how a raw number may be read.
+
+1. **Dimension skew.** The realized 16-group distribution is
+   `normative_strength` x7, `document_attribution` x5, `role_attribution` x2,
+   `request_vs_response` x1, `received_vs_generated` x1. The cause is a corpus
+   property, not a sampling choice: no genuine topically-close role or
+   direction gap could be found for the missing dimensions, and forcing one
+   would have produced weaker groups. The author decided against swapping
+   groups (2026-08-15): the skew is a finding about the corpus and is stated
+   rather than papered over.
+2. **Weak direct-feed negatives in the normative groups.** Their distractors
+   are themselves SHOULD / MAY / ought-to clauses, so the evidence shown to
+   the Verifier nearly refutes the claim and any correct Verifier refuses. A
+   direct-feed miss-interception rate near zero therefore does not indicate a
+   strong Verifier; it indicates low construction difficulty. The dimension's
+   signal lives in the end-to-end negatives, where the corpus holds tempting
+   MUST clauses.
+3. **Non-minimal rewrites are structural for this axis.** A SHOULD clause
+   cannot support `violating`, so the positive half must land on a different
+   MUST requirement; "minimally rewritten" on the normative-strength axis
+   degrades to "same section, different scenario, flipped strength".
+4. **Strict document reading.** The four `document_attribution` negatives
+   assert "violates RFC 9112" and are judged as "violates a requirement
+   stated in RFC 9112's text". Reading an RFC number as the protocol suite
+   name (RFC 9112 §1 defines HTTP/1.1 as the union of three documents) would
+   void all four negatives; that reading is outside the judgement scope and
+   the report must say so.
+5. **Supporting-clause reuse inside the locked set.** The RFC 9110 §7.8
+   Switching Protocols clause is shared by three locked groups (locked-003 and
+   locked-004 positive support; locked-009 distractor and support) and the
+   §7.6.2 Max-Forwards MUST clause by two (locked-002 positive support;
+   locked-008 distractor and support). The registration gate only enforces
+   dev-vs-locked disjointness, so this reuse is legal; it must still be
+   disclosed as evidence-clause reuse.
+
 ## Successor boundary
 
 W6 is the first workflow allowed to execute locked L1, L2, or L2-advanced
