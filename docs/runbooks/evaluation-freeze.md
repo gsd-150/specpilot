@@ -46,9 +46,9 @@ python -m specpilot.cli evaluation freeze-candidate \
   --candidate-dir /absolute/private/path/evaluation-candidates
 ```
 
-Success prints only `status`, `path`, `hash`, and aggregate `counts`. Review the
-candidate and validation sources without running any locked set. Record the
-printed candidate hash exactly.
+Success prints only `path`, `hash`, and aggregate `counts`. Review the candidate
+and validation sources without running any locked set. Record the printed
+candidate hash exactly.
 
 ## Author confirmation
 
@@ -67,7 +67,8 @@ python -m specpilot.cli evaluation freeze-confirm \
 
 Confirmation verifies the candidate's exact bytes and the unchanged clean Git
 commit/tree, then publishes a content-addressed final spec. It does not execute
-evaluation code. An identical retry returns `unchanged` with identical bytes.
+evaluation code. An identical retry leaves the artifact bytes unchanged and
+prints the same `path`, `hash`, and aggregate `counts`.
 
 ## Successor boundary
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,33 @@ def _rewrite(path: Path, update: dict[str, object]) -> None:
     body = json.loads(path.read_text(encoding="utf-8"))
     body.update(update)
     path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _swap_name_after_open(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    replacement: Path,
+) -> None:
+    original_open = os.open
+    swapped = False
+
+    def open_then_swap(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == target.name and dir_fd is not None and not swapped:
+            swapped = True
+            target.rename(target.with_suffix(".pinned"))
+            target.symlink_to(replacement)
+        return descriptor
+
+    monkeypatch.setattr("specpilot.evaluation.freeze.os.open", open_then_swap)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {open_then_swap})
 
 
 def test_candidate_contract_requires_every_frozen_identity_hash() -> None:
@@ -201,6 +229,63 @@ def test_candidate_refuses_dirty_git_tree_without_writing(tmp_path: Path) -> Non
         build_candidate(_inputs(paths))
 
     assert captured.value.code == "dirty_git_tree"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_refuses_status_name_swapped_after_descriptor_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    replacement = tmp_path / "replacement-progress.json"
+    replacement.write_bytes(paths["progress_status"].read_bytes())
+    _swap_name_after_open(monkeypatch, paths["progress_status"], replacement)
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "invalid_progress_status"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_refuses_dependency_name_swapped_after_descriptor_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    replacement = tmp_path / "replacement.lock"
+    replacement.write_bytes(paths["dependency_lock"].read_bytes())
+    _swap_name_after_open(monkeypatch, paths["dependency_lock"], replacement)
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "dependency_lock_unavailable"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_refuses_fifo_status_without_blocking_or_writing(
+    tmp_path: Path,
+) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    paths["progress_status"].unlink()
+    os.mkfifo(paths["progress_status"], mode=0o600)
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "invalid_progress_status"
+    assert not paths["candidate_dir"].exists()
+
+
+def test_candidate_refuses_oversized_status_without_writing(tmp_path: Path) -> None:
+    paths = make_evaluation_workspace(tmp_path)
+    paths["progress_status"].write_bytes(b"x" * (256 * 1024 + 1))
+
+    with pytest.raises(EvaluationFreezeError) as captured:
+        build_candidate(_inputs(paths))
+
+    assert captured.value.code == "invalid_progress_status"
     assert not paths["candidate_dir"].exists()
 
 

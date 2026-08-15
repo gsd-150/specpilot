@@ -9,6 +9,7 @@ evaluation execution path.
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -25,6 +26,10 @@ from specpilot.contracts.evaluation import (
     reject_evaluation_prose_keys,
 )
 from specpilot.contracts.manifests import Sha256
+from specpilot.ingestion._secure_fs import (
+    open_directory_path,
+    revalidate_directory_path,
+)
 from specpilot.manifests._secure_records import SecureRecordDirectory
 
 _MAX_STATUS_BYTES = 256 * 1024
@@ -158,16 +163,86 @@ class _DevScoringStatus(_ClosedStatus):
     split: Literal["dev"]
 
 
+def _file_state(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_pinned_file(
+    path: Path,
+    *,
+    max_bytes: int,
+    code: str,
+    require_nonempty: bool = False,
+) -> bytes:
+    """Read one stable regular file through a pinned parent-directory handle."""
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    try:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        nonblocking = getattr(os, "O_NONBLOCK", 0)
+        if not no_follow or not nonblocking or max_bytes < 0 or not path.name:
+            raise RuntimeError("required secure filesystem primitives unavailable")
+        parent_descriptor = open_directory_path(path.parent, create=False)
+        revalidate_directory_path(path.parent, parent_descriptor)
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | no_follow | nonblocking,
+            dir_fd=parent_descriptor,
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise OSError("input is not a bounded regular file")
+
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        revalidate_directory_path(path.parent, parent_descriptor)
+        if (
+            len(data) > max_bytes
+            or len(data) != before.st_size
+            or (require_nonempty and not data)
+            or _file_state(before) != _file_state(after)
+            or _file_state(after) != _file_state(named)
+            or not stat.S_ISREG(named.st_mode)
+        ):
+            raise OSError("input identity changed during read")
+        return data
+    except (OSError, RuntimeError, ValueError):
+        raise EvaluationFreezeError(code) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+
+
 def _read_status(path: Path, model: type[BaseModel], code: str) -> BaseModel:
     try:
-        status = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_STATUS_BYTES:
-            raise OSError
-        data = path.read_bytes()
-        if len(data) != status.st_size:
-            raise OSError
+        data = _read_pinned_file(path, max_bytes=_MAX_STATUS_BYTES, code=code)
         return model.model_validate_json(data)
-    except (OSError, ValidationError, ValueError):
+    except EvaluationFreezeError:
+        raise
+    except (ValidationError, ValueError):
         raise EvaluationFreezeError(code) from None
 
 
@@ -201,16 +276,12 @@ def _sha256(data: bytes) -> str:
 
 
 def _read_dependency_lock(path: Path) -> bytes:
-    try:
-        status = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_STATUS_BYTES:
-            raise OSError
-        data = path.read_bytes()
-    except OSError:
-        raise EvaluationFreezeError("dependency_lock_unavailable") from None
-    if not data or len(data) != status.st_size:
-        raise EvaluationFreezeError("dependency_lock_unavailable")
-    return data
+    return _read_pinned_file(
+        path,
+        max_bytes=_MAX_STATUS_BYTES,
+        code="dependency_lock_unavailable",
+        require_nonempty=True,
+    )
 
 
 def _publish(

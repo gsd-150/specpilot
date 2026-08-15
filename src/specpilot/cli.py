@@ -200,7 +200,6 @@ def _cache_retention(arguments: argparse.Namespace) -> int:
 
 def _evaluation_report_payload(report: Any) -> dict[str, Any]:
     return {
-        "status": report.status,
         "path": str(report.artifact_path),
         "hash": report.artifact_sha256,
         "counts": report.counts,

@@ -45,8 +45,7 @@ def test_candidate_cli_emits_only_path_hash_and_aggregate_counts(
     captured = capsys.readouterr()
     assert code == 0, captured.err
     payload = parse_stdout(captured.out)
-    assert set(payload) == {"path", "hash", "counts", "status"}
-    assert payload["status"] == "created"
+    assert set(payload) == {"path", "hash", "counts"}
     assert payload["counts"] == {
         "deep_review": 12,
         "l1": 40,
@@ -104,7 +103,7 @@ def test_confirmation_cli_requires_the_literal_confirmation_flag(
     assert capsys.readouterr().err == "invalid_evaluation_freeze_arguments\n"
 
 
-def test_confirmation_cli_creates_once_then_reports_unchanged(
+def test_confirmation_cli_retry_keeps_the_same_three_field_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     paths = make_evaluation_workspace(tmp_path)
@@ -128,12 +127,10 @@ def test_confirmation_cli_creates_once_then_reports_unchanged(
 
     assert main(args) == 0
     created = parse_stdout(capsys.readouterr().out)
-    assert created["status"] == "created"
+    assert set(created) == {"path", "hash", "counts"}
     assert main(args) == 0
     unchanged = parse_stdout(capsys.readouterr().out)
-    assert unchanged["status"] == "unchanged"
-    assert created["hash"] == unchanged["hash"]
-    assert created["path"] == unchanged["path"]
+    assert unchanged == created
 
 
 def test_evaluation_cli_has_no_execution_subcommand() -> None:
