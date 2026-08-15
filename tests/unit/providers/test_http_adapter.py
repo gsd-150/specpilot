@@ -638,3 +638,43 @@ def test_compliance_and_semantic_instructions_state_the_echo_rule() -> None:
     ):
         assert "never an identifier you were not shown" in instructions
         assert "copied in full" in instructions
+
+
+def test_the_l2_echo_rule_admits_a_subset_not_the_whole_shown_set() -> None:
+    """The echo rule is a whitelist, and saying "exactly those" made it a quota.
+
+    L1 has always phrased it as a subset — cite an identifier only if that
+    excerpt was given to you. The L2 wording asked instead for "exactly those
+    shown identifiers", which reads as cite all of them, and the candidate
+    schema caps `evidence_ids` at four while a case is routinely shown five or
+    six. That leaves the model an unsatisfiable instruction whose only
+    self-consistent escape is the one the next sentence blesses: propose
+    insufficient_evidence and send an empty list.
+
+    Which is what the dev batch did — six of eight cases refused while the
+    governing clause sat in the excerpts they had been given.
+    """
+    import json
+
+    from specpilot.contracts.verdict import ComplianceCandidate
+    from specpilot.providers.http import (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    )
+
+    cap = ComplianceCandidate.model_fields["evidence_ids"].metadata
+    max_items = next(
+        (getattr(entry, "max_length", None) for entry in cap), None
+    )
+
+    for instructions in (
+        COMPLIANCE_REPLY_INSTRUCTIONS,
+        SEMANTIC_REPLY_INSTRUCTIONS,
+    ):
+        body = json.loads(instructions)["instruction"]
+        # The prohibition stays; the quota must not.
+        assert "never an identifier you were not shown" in body
+        assert "must be exactly those shown identifiers" not in body
+        assert "only" in body
+
+    assert max_items == 4

@@ -101,9 +101,11 @@ COMPLIANCE_REPLY_INSTRUCTIONS = json.dumps(
         "instruction": (
             "Split into one to three atomic candidates and return JSON only. "
             "Each excerpt is introduced by its identifier after the word "
-            "Evidence; a candidate's evidence_ids must be exactly those shown "
-            "identifiers, copied in full, and never an identifier you were not "
-            "shown. A candidate whose proposed_verdict is "
+            "Evidence. Cite an identifier only if that excerpt was given to "
+            "you above, copied in full, and never an identifier you were not "
+            "shown. Cite the excerpts that bear on the candidate rather than "
+            "every excerpt you were given; the ones that do not bear on it are "
+            "left out. A candidate whose proposed_verdict is "
             "insufficient_evidence must set evidence_ids to an empty list: "
             "the ids name evidence FOR a claim, and an insufficient claim "
             "has none."
@@ -120,8 +122,9 @@ SEMANTIC_REPLY_INSTRUCTIONS = json.dumps(
         "instruction": (
             "Judge only whether the excerpts support the proposed verdict; "
             "return JSON only. Each excerpt is introduced by its identifier "
-            "after the word Evidence; cite exactly those shown identifiers, "
-            "copied in full, and never an identifier you were not shown."
+            "after the word Evidence. Cite an identifier only if that excerpt "
+            "was given to you above, copied in full, and never an identifier "
+            "you were not shown."
         ),
         "response_schema": SemanticDecision.model_json_schema(),
     },
