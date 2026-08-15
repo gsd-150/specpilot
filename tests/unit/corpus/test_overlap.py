@@ -94,10 +94,15 @@ def test_an_item_with_no_gold_clause_has_no_overlap_figure() -> None:
         question_gold_jaccard("alpha beta", ())
 
 
+# Synthetic, not quoted. It carries the vocabulary these ratios were calibrated
+# against — field names are identifiers, not prose — but the sentence is written
+# here rather than taken from the specification. §8.1 keeps clause prose out of
+# anything git tracks, which is a licence condition as well as a hygiene rule,
+# and a fixture is tracked like everything else.
 CLAUSE = (
-    "An intermediary that chooses to forward the message MUST first remove the "
-    "received Content-Length field and process the Transfer-Encoding prior to "
-    "forwarding the message downstream."
+    "Where an intermediary is forwarding a message, it MUST first remove the "
+    "received Content-Length field, then process the Transfer-Encoding, and "
+    "only afterwards pass the message on to the recipient downstream."
 )
 
 

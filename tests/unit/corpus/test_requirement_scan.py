@@ -117,15 +117,23 @@ def test_must_not_is_never_counted_as_a_must() -> None:
 def test_a_scan_carries_no_clause_prose() -> None:
     """§8.1 holds here too, and the aid does not need the text to do its job.
 
-    It says where to read. The author reads the source. Asserted against the
-    real sentence rather than a length bound, so the check fails if a field
-    ever starts carrying the clause it located.
+    Compared against the clause's real text, which is read from the frozen
+    rendition at run time and never written down here. An earlier version of
+    this test pasted the sentence in as a literal to assert its absence, which
+    put clause prose into a git-tracked file — the exact thing §8.1 forbids, and
+    a licence condition as well as a hygiene one.
     """
     import dataclasses
 
-    sentence = (
-        "A sender MUST NOT send a Content-Length header field in any message "
-        "that contains a Transfer-Encoding header field."
+    from specpilot.corpus.clauses import iter_clause_texts
+
+    target = "8bc686a451ca572cd2a5cccae5cd3c587f90e58eff83e4091e40f2be5e085daa"
+    text = next(
+        body
+        for clause, body in iter_clause_texts(
+            _source(), RfcLimits(), ClauseLimits()
+        )
+        if clause.clause_id == target
     )
     hits = scan_requirements(
         _source(),
@@ -134,16 +142,13 @@ def test_a_scan_carries_no_clause_prose() -> None:
         terms=("Content-Length", "Transfer-Encoding"),
         keywords=("MUST NOT",),
     )
-    located = next(
-        hit
-        for hit in hits
-        if hit.clause_id
-        == "8bc686a451ca572cd2a5cccae5cd3c587f90e58eff83e4091e40f2be5e085daa"
-    )
+    located = next(hit for hit in hits if hit.clause_id == target)
 
     rendered = repr(dataclasses.asdict(located))
-    assert "Content-Length header field in any message" not in rendered
-    assert sentence not in rendered
+    assert text not in rendered
+    # A prefix too, so a truncated excerpt cannot slip through whole-string
+    # equality.
+    assert text[:40] not in rendered
 
 
 def test_a_scan_without_terms_is_refused() -> None:
