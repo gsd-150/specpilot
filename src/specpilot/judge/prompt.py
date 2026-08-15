@@ -24,7 +24,6 @@ import json
 
 from pydantic import BaseModel, ConfigDict
 
-from specpilot.contracts.egress import JudgePayload
 from specpilot.contracts.manifests import Identifier
 
 # The reply schema, kept beside the parser it must match. The parser is in
@@ -108,32 +107,3 @@ def prompt_identity(prompt: JudgePrompt) -> JudgePromptIdentity:
     )
 
 
-def render_judge_prompt(prompt: JudgePrompt, payload: JudgePayload) -> str:
-    """Render the full judge message for one payload.
-
-    Every excerpt is introduced by the exact content hash the enforcer
-    disclosed, mirroring the L1 payload's identifier discipline: the model can
-    only refer to what it was shown, and what it was shown is named by bytes,
-    not by a locator it could invent.
-    """
-    point_lines = [
-        f"- {point.point_id}: {point.text}" for point in payload.scoring_points
-    ]
-    excerpt_lines = [
-        f"Evidence {excerpt.content_hash}:\n{excerpt.quote}"
-        for excerpt in payload.gold_excerpts
-    ]
-    parts = [
-        prompt.body,
-        "",
-        f"Question: {payload.query}",
-        "",
-        f"Final answer: {payload.final_answer}",
-        "",
-        "Gold scoring points:",
-        *point_lines,
-        "",
-        "Gold evidence excerpts:",
-        *(excerpt_lines or ["(none)"]),
-    ]
-    return "\n".join(parts)

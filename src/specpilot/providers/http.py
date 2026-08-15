@@ -45,6 +45,7 @@ from specpilot.contracts.egress import (
     L2DesignPayload,
 )
 from specpilot.contracts.verdict import ComplianceBatch, SemanticDecision
+from specpilot.judge.prompt import JUDGE_PROMPT_V1_BODY
 from specpilot.providers.base import ProviderError, ProviderResponse, ResponseMetadata
 
 # Sent only when the adapter is probing. It is a constant authored here, not
@@ -338,7 +339,7 @@ def _system_prompt(payload: EgressPayload) -> str:
     if isinstance(payload, L1PlanPayload):
         return _PLANNING_SYSTEM_PROMPT
     if isinstance(payload, JudgePayload):
-        return _SYSTEM_PROMPT
+        return JUDGE_PROMPT_V1_BODY
     if isinstance(payload, L2DesignPayload):
         return COMPLIANCE_REPLY_INSTRUCTIONS
     if isinstance(payload, L2AtomicClaimPayload):
@@ -364,6 +365,7 @@ def _render_user(payload: EgressPayload) -> str:
     elif isinstance(payload, L2AtomicClaimPayload):
         lines.append(f"Claim ({payload.atomic_claim_id}): {payload.atomic_claim}")
     elif isinstance(payload, JudgePayload):
+        lines.append(f"Question: {payload.query}")
         lines.append(f"Final answer under review: {payload.final_answer}")
         for point in payload.scoring_points:
             lines.append(f"Scoring point {point.point_id}: {point.text}")
