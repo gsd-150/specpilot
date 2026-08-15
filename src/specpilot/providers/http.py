@@ -426,6 +426,10 @@ JUDGE_ROUTE = RouteConfig(
         model_id="glm-5.2",
         base_url="https://api.chatanywhere.tech/v1",
         api_key_env="SPECPILOT_JUDGE_API_KEY",
+        # L2 payloads carry several candidates and rationale passages, and the
+        # judge occasionally exceeds the 60s wall the L1 payloads never
+        # approached; still bounded, by five minutes instead of one.
+        timeout_seconds=300.0,
     ),
     description="offline judge",
     endpoint_purpose="offline-judge-chatanywhere-glm-5.2-api",
