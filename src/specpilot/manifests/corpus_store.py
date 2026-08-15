@@ -466,7 +466,21 @@ class CorpusManifestStore:
 
     def __init__(self, directory: Path) -> None:
         self._directory = directory
+        self._root_fd: int | None = None
         self._owner_token = object()
+
+    @classmethod
+    def from_fd(cls, directory: Path, root_fd: int) -> Self:
+        """Bind all record and lease operations to one borrowed root descriptor."""
+        with SecureRecordDirectory.from_fd(
+            directory,
+            root_fd,
+            close_fd=False,
+        ):
+            pass
+        store = cls(directory)
+        store._root_fd = root_fd
+        return store
 
     def read(self, manifest_id: str) -> CorpusManifest:
         self._validate_manifest_id(manifest_id)
@@ -477,7 +491,15 @@ class CorpusManifestStore:
         raise FileNotFoundError(self._directory / f"{manifest_id}.json")
 
     def read_all(self) -> tuple[CorpusManifest, ...]:
-        with SecureRecordDirectory.open(self._directory, create=False) as records:
+        if self._root_fd is None:
+            records = SecureRecordDirectory.open(self._directory, create=False)
+        else:
+            records = SecureRecordDirectory.from_fd(
+                self._directory,
+                self._root_fd,
+                close_fd=False,
+            )
+        with records:
             return self._decode_all(records)
 
     def find_by_intent(
@@ -633,8 +655,11 @@ class CorpusManifestStore:
         lock_fd: int | None = None
         lock_held = False
         try:
-            root_fd = open_directory_path(self._directory, create=True)
-            os.fchmod(root_fd, 0o700)
+            if self._root_fd is None:
+                root_fd = open_directory_path(self._directory, create=True)
+                os.fchmod(root_fd, 0o700)
+            else:
+                root_fd = os.dup(self._root_fd)
             self._validate_root(root_fd)
             locks_fd, locks_identity = self._open_locks_directory(
                 root_fd,

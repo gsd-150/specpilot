@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import specpilot.deployment.initialize as initialize_module
 from specpilot.deployment.initialize import (
     InitializationRefusal,
     _pinned_real_directories,
@@ -113,5 +114,30 @@ def test_pinned_real_tree_refuses_the_root_path_inode_swap(tmp_path: Path) -> No
         root.rename(tmp_path / "real-input-pinned")
         root.symlink_to(attacker, target_is_directory=True)
         pinned.revalidate()
+
+    assert raised.value.code == "real_corpus_unavailable"
+
+
+def test_pinned_model_view_keeps_the_original_inode_through_an_aba_swap(
+    tmp_path: Path,
+) -> None:
+    root, output = _private_real_tree(tmp_path)
+    trusted_model = root / "model" / "identity.json"
+    trusted_model.write_bytes(b"trusted-model")
+    attacker = tmp_path / "attacker-model"
+    attacker.mkdir(mode=0o700)
+    (attacker / "identity.json").write_bytes(b"attacker-model")
+
+    with (
+        _pinned_real_directories(root, output) as pinned,
+        pytest.raises(InitializationRefusal) as raised,
+        initialize_module._pinned_model_view(pinned) as model_view,
+    ):
+        original = root / "model-pinned"
+        (root / "model").rename(original)
+        attacker.rename(root / "model")
+        assert (model_view / "identity.json").read_bytes() == b"trusted-model"
+        (root / "model").rename(attacker)
+        original.rename(root / "model")
 
     assert raised.value.code == "real_corpus_unavailable"

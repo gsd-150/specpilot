@@ -7,7 +7,7 @@ import json
 import os
 import stat
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,6 +81,9 @@ from .ready import ReadyMarker, ReadyMarkerStore
 
 _MAX_FIXTURE_MANIFEST_BYTES = 64 * 1024
 _MAX_DENSE_POINTS_BYTES = 32 * 1024 * 1024
+_MAX_MODEL_FILES = 100_000
+_MAX_MODEL_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_MODEL_DEPTH = 32
 _QDRANT_OPERATION_TIMEOUT_SECONDS = 10
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _FIXTURE_ROUTE = ProviderRouteBinding(
@@ -767,6 +770,12 @@ class _PinnedRealDirectories:
             _refuse("real_corpus_unavailable")
 
 
+@dataclass(slots=True)
+class _ModelCopyBudget:
+    files: int = 0
+    bytes: int = 0
+
+
 def _open_private_child(parent_descriptor: int, name: str) -> int:
     descriptor = os.open(
         name,
@@ -782,6 +791,192 @@ def _open_private_child(parent_descriptor: int, name: str) -> int:
         os.close(descriptor)
         raise OSError("private child identity mismatch")
     return descriptor
+
+
+def _descriptor_directory_alias(descriptor: int) -> Path | None:
+    """Return a Linux descriptor path only when it names the pinned directory."""
+    alias = Path("/proc/self/fd") / str(descriptor)
+    try:
+        observed = alias.stat()
+        pinned = os.fstat(descriptor)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_dev != pinned.st_dev
+        or observed.st_ino != pinned.st_ino
+    ):
+        return None
+    return alias
+
+
+def _copy_pinned_model_tree(
+    source_descriptor: int,
+    target_descriptor: int,
+    budget: _ModelCopyBudget,
+    *,
+    depth: int = 0,
+) -> None:
+    """Copy a descriptor-pinned regular tree when no directory-fd alias exists."""
+    if depth > _MAX_MODEL_DEPTH:
+        raise ValueError("model directory is too deep")
+    source_before = os.fstat(source_descriptor)
+    if not stat.S_ISDIR(source_before.st_mode):
+        raise ValueError("model root is not a directory")
+    nonblocking = getattr(os, "O_NONBLOCK", 0)
+    if not nonblocking:
+        raise RuntimeError("required secure filesystem primitives unavailable")
+
+    for name in sorted(os.listdir(source_descriptor)):
+        if (
+            not name
+            or name in {".", ".."}
+            or name != Path(name).name
+            or len(os.fsencode(name)) > 255
+        ):
+            raise ValueError("model entry name is invalid")
+        named_before = os.stat(
+            name,
+            dir_fd=source_descriptor,
+            follow_symlinks=False,
+        )
+        if stat.S_ISDIR(named_before.st_mode):
+            source_child = os.open(
+                name,
+                directory_open_flags(),
+                dir_fd=source_descriptor,
+            )
+            target_child: int | None = None
+            try:
+                if _file_state(os.fstat(source_child)) != _file_state(named_before):
+                    raise FileExistsError(name)
+                os.mkdir(name, mode=0o700, dir_fd=target_descriptor)
+                target_child = os.open(
+                    name,
+                    directory_open_flags(),
+                    dir_fd=target_descriptor,
+                )
+                _copy_pinned_model_tree(
+                    source_child,
+                    target_child,
+                    budget,
+                    depth=depth + 1,
+                )
+                named_after = os.stat(
+                    name,
+                    dir_fd=source_descriptor,
+                    follow_symlinks=False,
+                )
+                if _file_state(os.fstat(source_child)) != _file_state(named_after):
+                    raise FileExistsError(name)
+            finally:
+                if target_child is not None:
+                    os.close(target_child)
+                os.close(source_child)
+            continue
+        if not stat.S_ISREG(named_before.st_mode):
+            raise ValueError("model tree contains a non-regular entry")
+
+        source_file = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | nonblocking,
+            dir_fd=source_descriptor,
+        )
+        target_file: int | None = None
+        try:
+            opened = os.fstat(source_file)
+            if _file_state(opened) != _file_state(named_before):
+                raise FileExistsError(name)
+            budget.files += 1
+            budget.bytes += opened.st_size
+            if budget.files > _MAX_MODEL_FILES or budget.bytes > _MAX_MODEL_BYTES:
+                raise ValueError("model tree exceeds its capture bound")
+            target_file = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=target_descriptor,
+            )
+            copied = 0
+            while True:
+                chunk = os.read(source_file, 1024 * 1024)
+                if not chunk:
+                    break
+                _write_all(target_file, chunk)
+                copied += len(chunk)
+            source_after = os.fstat(source_file)
+            named_after = os.stat(
+                name,
+                dir_fd=source_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                copied != opened.st_size
+                or _file_state(source_after) != _file_state(opened)
+                or _file_state(named_after) != _file_state(opened)
+            ):
+                raise FileExistsError(name)
+            target_status = os.fstat(target_file)
+            if (
+                not stat.S_ISREG(target_status.st_mode)
+                or stat.S_IMODE(target_status.st_mode) != 0o600
+                or target_status.st_size != copied
+            ):
+                raise FileExistsError(name)
+        finally:
+            if target_file is not None:
+                os.close(target_file)
+            os.close(source_file)
+
+    if _file_state(os.fstat(source_descriptor)) != _file_state(source_before):
+        raise FileExistsError("model directory changed during capture")
+
+
+@contextmanager
+def _validated_model_view(
+    pinned: _PinnedRealDirectories,
+    path: Path,
+) -> Iterator[Path]:
+    try:
+        yield path
+    except BaseException:
+        with suppress(InitializationRefusal):
+            pinned.revalidate()
+        raise
+    else:
+        pinned.revalidate()
+
+
+@contextmanager
+def _pinned_model_view(pinned: _PinnedRealDirectories) -> Iterator[Path]:
+    """Expose only the pinned model inode to legacy path-based model loaders."""
+    pinned.revalidate()
+    alias = _descriptor_directory_alias(pinned.model_fd)
+    if alias is not None:
+        with _validated_model_view(pinned, alias) as path:
+            yield path
+        return
+
+    try:
+        with TemporaryDirectory(prefix="specpilot-real-model-") as temporary:
+            root = Path(temporary).resolve(strict=True)
+            root.chmod(0o700)
+            target_descriptor = open_directory_path(root, create=False)
+            try:
+                _copy_pinned_model_tree(
+                    pinned.model_fd,
+                    target_descriptor,
+                    _ModelCopyBudget(),
+                )
+            finally:
+                os.close(target_descriptor)
+            pinned.revalidate()
+            with _validated_model_view(pinned, root) as path:
+                yield path
+    except InitializationRefusal:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        _refuse("real_corpus_unavailable")
 
 
 @contextmanager
@@ -855,7 +1050,7 @@ def _staged_source_manifest_store(
         _refuse("real_corpus_unavailable")
 
     with TemporaryDirectory(prefix="specpilot-real-manifests-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve(strict=True)
         root.chmod(0o700)
         root_descriptor = open_directory_path(root, create=False)
         try:
@@ -891,7 +1086,7 @@ def _staged_source_bindings(
 ) -> Iterator[tuple[CorpusSourceInput, ...]]:
     """Expose captured source bytes to freeze/verify without reopening input."""
     with TemporaryDirectory(prefix="specpilot-real-sources-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve(strict=True)
         root.chmod(0o700)
         bindings: list[CorpusSourceInput] = []
         for manifest_id, data in sources:
@@ -973,7 +1168,7 @@ def _initialize_new_real(
     pinned: _PinnedRealDirectories,
     source_store: ManifestStore,
     stored_source_ids: tuple[str, ...],
-    corpus_dir: Path,
+    corpus_store: CorpusManifestStore,
     model_dir: Path,
 ) -> CorpusManifest:
     pinned.revalidate()
@@ -1051,7 +1246,6 @@ def _initialize_new_real(
         PIPELINE_VERSION,
         IndexTextPolicy().version,
     )
-    corpus_store = CorpusManifestStore(corpus_dir)
     admin = QdrantClient(
         url=request.qdrant_url,
         timeout=_QDRANT_OPERATION_TIMEOUT_SECONDS,
@@ -1147,11 +1341,15 @@ def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
             ) or ready_root.is_relative_to(input_root):
                 _refuse("real_corpus_output_overlaps_input")
             corpus_dir = request.corpus_manifest_dir
-            model_dir = request.corpus_dir / "model"
-            with _staged_source_manifest_store(pinned) as (
-                source_store,
-                stored_source_ids,
+            corpus_store = CorpusManifestStore.from_fd(
+                corpus_dir,
+                pinned.output_fd,
+            )
+            with (
+                _pinned_model_view(pinned) as model_dir,
+                _staged_source_manifest_store(pinned) as staged_source_store,
             ):
+                source_store, stored_source_ids = staged_source_store
                 with SecureRecordDirectory.from_fd(
                     corpus_dir,
                     pinned.output_fd,
@@ -1166,11 +1364,10 @@ def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
                         pinned=pinned,
                         source_store=source_store,
                         stored_source_ids=stored_source_ids,
-                        corpus_dir=corpus_dir,
+                        corpus_store=corpus_store,
                         model_dir=model_dir,
                     )
                 else:
-                    corpus_store = CorpusManifestStore(corpus_dir)
                     stored = tuple(
                         corpus_store.read(corpus_id) for corpus_id in corpus_ids
                     )
@@ -1211,7 +1408,7 @@ def initialize_real(request: RealInitializationRequest) -> ReadyMarker:
                             qdrant_url=request.qdrant_url,
                         ),
                         source_store=source_store,
-                        corpus_store=CorpusManifestStore(corpus_dir),
+                        corpus_store=corpus_store,
                     )
                     verified.close()
                 pinned.revalidate()
