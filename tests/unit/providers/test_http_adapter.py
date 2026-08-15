@@ -161,7 +161,7 @@ def test_planning_payload_uses_the_formal_json_only_contract() -> None:
     system = _system_prompt(payload)
 
     contract = json.loads(system)
-    assert contract["instruction"].endswith("rather than assuming.")
+    assert contract["instruction"].endswith("bound to a single document by the run.")
     assert contract["response_schema"]["title"] == "ToolPlan"
     assert "citations" not in system.lower()
 

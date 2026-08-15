@@ -84,10 +84,10 @@ _PLANNING_SYSTEM_PROMPT = json.dumps(
             "stated in the tool descriptions: a search_clauses step costs 1 "
             "call, and a get_clause or expand_references step costs its take "
             "value (the number of clauses it names). Sum every step's cost and "
-            "keep the total within the budget. Scope search_clauses to every "
+            "keep the total within the budget. Scope search_clauses to the "
             "document the design names: a design that says RFC 9112 must be "
-            "searched in RFC 9112, and when the design does not name one, "
-            "search all available documents rather than assuming."
+            "searched in RFC 9112, and a design that does not name one is "
+            "bound to a single document by the run."
         ),
         "response_schema": ToolPlan.model_json_schema(),
     },
