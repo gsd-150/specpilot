@@ -94,6 +94,8 @@ def test_api_service_passes_only_approved_environment_names_without_defaults() -
         "SPECPILOT_API_CONFIGURATION_HASH",
         "SPECPILOT_API_PROMPT_ID",
         "SPECPILOT_API_PROMPT_HASH",
+        "SPECPILOT_API_COMPLIANCE_PROMPT_HASH",
+        "SPECPILOT_API_VERIFIER_PROMPT_HASH",
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID",
         "SPECPILOT_MCP_SOURCES_JSON",
         "SPECPILOT_MCP_READY_ID",

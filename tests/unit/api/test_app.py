@@ -21,9 +21,12 @@ from specpilot.sessions.tokens import SessionIssuer, SessionVerifier
 pytestmark = pytest.mark.anyio
 
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
-HASHES = {name: character * 64 for name, character in zip(
-    ("source", "corpus", "policy", "configuration", "prompt"), "abcde", strict=True
-)}
+HASHES = {
+    name: character * 64
+    for name, character in zip(
+        ("source", "corpus", "policy", "configuration", "prompt"), "abcde", strict=True
+    )
+}
 
 
 @dataclass
@@ -111,10 +114,17 @@ class FakeStore:
             raise self.create_error
         self.creates += 1
         view = RunView(
-            run_id=run.run_id, request_id=run.request_id, task_level=run.task_level,
-            profile=run.profile, corpus_manifest_id=run.corpus_manifest_id,
-            status=RunStatus.QUEUED, reason=None, created_at=NOW,
-            started_at=None, completed_at=None, events=(),
+            run_id=run.run_id,
+            request_id=run.request_id,
+            task_level=run.task_level,
+            profile=run.profile,
+            corpus_manifest_id=run.corpus_manifest_id,
+            status=RunStatus.QUEUED,
+            reason=None,
+            created_at=NOW,
+            started_at=None,
+            completed_at=None,
+            events=(),
         )
         self.runs[run.run_id] = (run.session_id, view)
         self.scenario_ids[run.run_id] = run.demo_scenario_id
@@ -240,15 +250,17 @@ def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
     verifier = SessionVerifier(
         secret=secret, audience="specpilot-api", profile=profile, clock=lambda: NOW
     )
+
     def build_job(
         run_id: UUID,
         question: str,
+        session_id: str,
         request: ChatRequest,
         checkpoint: RunCheckpoint | None,
         query_hash: str,
         recovery_phase: str,
     ) -> RunJob:
-        del checkpoint, query_hash, recovery_phase
+        del session_id, checkpoint, query_hash, recovery_phase
         return RunJob(
             run_id=run_id,
             question=question,
@@ -258,16 +270,26 @@ def runtime(*, profile: str = "fixture", host: str = "127.0.0.1") -> ApiRuntime:
         )
 
     binding = ApiRunBinding(
-        profile=profile, source_manifest_id=HASHES["source"],
-        corpus_manifest_id=HASHES["corpus"], policy_hash=HASHES["policy"],
-        configuration_hash=HASHES["configuration"], prompt_id="l1-answer-v1",
-        prompt_hash=HASHES["prompt"], provider_id="provider-a", model_id="model-a",
+        profile=profile,
+        source_manifest_id=HASHES["source"],
+        corpus_manifest_id=HASHES["corpus"],
+        policy_hash=HASHES["policy"],
+        configuration_hash=HASHES["configuration"],
+        prompt_id="l1-answer-v1",
+        prompt_hash=HASHES["prompt"],
+        provider_id="provider-a",
+        model_id="model-a",
         build_job=build_job,
     )
     return ApiRuntime(
-        store=store, worker=worker, verifier=verifier, binding=binding,
-        bind_host=host, demo_issuer=issuer if profile == "fixture" else None,
-        postgres_health=lambda: _health(True), mcp_health=lambda: _health(True),
+        store=store,
+        worker=worker,
+        verifier=verifier,
+        binding=binding,
+        bind_host=host,
+        demo_issuer=issuer if profile == "fixture" else None,
+        postgres_health=lambda: _health(True),
+        mcp_health=lambda: _health(True),
     )
 
 
@@ -284,8 +306,10 @@ async def client_for(made: ApiRuntime) -> Any:
 
 def payload() -> dict[str, str]:
     return {
-        "question": "private question", "request_id": str(uuid4()),
-        "evaluation_root_id": "root-1", "task_level": "L1",
+        "question": "private question",
+        "request_id": str(uuid4()),
+        "evaluation_root_id": "root-1",
+        "task_level": "L1",
         "source_manifest_id": HASHES["source"],
         "corpus_manifest_id": HASHES["corpus"],
     }
@@ -397,9 +421,7 @@ async def test_real_profile_rejects_every_demo_scenario_before_delivery() -> Non
     made = runtime(profile="real", host="0.0.0.0")
     app, client = await client_for(made)
     secret = b"s" * 32
-    issuer = SessionIssuer(
-        secret=secret, audience="specpilot-api", clock=lambda: NOW
-    )
+    issuer = SessionIssuer(secret=secret, audience="specpilot-api", clock=lambda: NOW)
     token = issuer.issue(session_id="owner-a", profile="real", ttl_seconds=300)
 
     async with app.router.lifespan_context(app), client:
@@ -498,9 +520,11 @@ async def test_resume_acquire_delivers_once_and_replay_does_not_reserve_again() 
         )
 
     assert acquired.status_code == replay.status_code == 202
-    assert acquired.json() == replay.json() == {
-        "run_id": str(run_id), "attempt": 2, "status": "queued"
-    }
+    assert (
+        acquired.json()
+        == replay.json()
+        == {"run_id": str(run_id), "attempt": 2, "status": "queued"}
+    )
     assert len(made.worker.jobs) == 1
 
 
@@ -538,8 +562,7 @@ async def test_bearer_precedes_cookie_and_both_use_identical_verification() -> N
         client.cookies.set("specpilot_session", valid)
         cookie_only = await client.post("/chat", json=payload())
         bad_bearer = await client.post(
-            "/chat", headers={"Authorization": "Bearer invalid"},
-            json=payload()
+            "/chat", headers={"Authorization": "Bearer invalid"}, json=payload()
         )
     assert cookie_only.status_code == 202
     assert bad_bearer.status_code == 401
@@ -719,25 +742,32 @@ async def test_generic_api_exception_is_stable_marker_free_and_terminalizes(
         def hostile_build(
             run_id: UUID,
             question: str,
+            session_id: str,
             request: object,
             checkpoint: object,
             query_hash: str,
             recovery_phase: str,
         ) -> RunJob:
+            del run_id, question, session_id, request, checkpoint, query_hash
+            del recovery_phase
             raise RuntimeError(marker)
 
-        object.__setattr__(made, "binding", ApiRunBinding(
-            profile=binding.profile,
-            source_manifest_id=binding.source_manifest_id,
-            corpus_manifest_id=binding.corpus_manifest_id,
-            policy_hash=binding.policy_hash,
-            configuration_hash=binding.configuration_hash,
-            prompt_id=binding.prompt_id,
-            prompt_hash=binding.prompt_hash,
-            provider_id=binding.provider_id,
-            model_id=binding.model_id,
-            build_job=hostile_build,
-        ))
+        object.__setattr__(
+            made,
+            "binding",
+            ApiRunBinding(
+                profile=binding.profile,
+                source_manifest_id=binding.source_manifest_id,
+                corpus_manifest_id=binding.corpus_manifest_id,
+                policy_hash=binding.policy_hash,
+                configuration_hash=binding.configuration_hash,
+                prompt_id=binding.prompt_id,
+                prompt_hash=binding.prompt_hash,
+                provider_id=binding.provider_id,
+                model_id=binding.model_id,
+                build_job=hostile_build,
+            ),
+        )
     else:
         made.worker.delivery_error = True
     app, client = await client_for(made)

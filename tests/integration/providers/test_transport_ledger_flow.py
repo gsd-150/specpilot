@@ -12,6 +12,7 @@ from specpilot.egress.enforcer import EgressPolicyEnforcer
 from specpilot.egress.ledger import LedgerUnavailable, RunSealed
 from specpilot.egress.postgres import PostgresEgressLedger
 from specpilot.providers.cache import (
+    CacheLinkage,
     CacheNamespace,
     LocalResponseCache,
     ResponseCacheError,
@@ -70,6 +71,8 @@ def cached_transport(
             configuration_hash="a" * 64,
             prompt_id="l1-answer-v1",
             prompt_hash="b" * 64,
+            compliance_prompt_hash="1" * 64,
+            verifier_prompt_hash="2" * 64,
             source_manifest_id=request.version.source_manifest_id,
             corpus_manifest_id=request.version.corpus_manifest_id,
         ),
@@ -109,9 +112,18 @@ async def test_cache_hit_prepares_policy_but_skips_reservation_and_adapter(
     cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
     line = cached_transport(clean_ledger, provider, cache)
     request = request_with(distinct_excerpt(1))
+    reused = request.model_copy(update={"run_id": "run-cache-reuse"})
 
-    miss = await line.send(request, idempotency_key="first")
-    hit = await line.send(request, idempotency_key="second")
+    miss = await line.send(
+        request,
+        idempotency_key="first",
+        cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-a"),
+    )
+    hit = await line.send(
+        reused,
+        idempotency_key="second",
+        cache_linkage=CacheLinkage(run_id=reused.run_id, session_id="session-b"),
+    )
 
     assert miss.cache_hit is False
     assert miss.reservation_id is not None
@@ -121,8 +133,17 @@ async def test_cache_hit_prepares_policy_but_skips_reservation_and_adapter(
     assert hit.cache_record_hash == miss.cache_record_hash
     assert hit.response == miss.response
     assert provider.call_count == 1
-    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 1
-    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 1
+    assert cache.delete_run(reused.run_id) == 1
+    after_delete = await line.send(
+        request,
+        idempotency_key="third",
+        cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-c"),
+    )
+    assert after_delete.cache_hit is False
+    assert provider.call_count == 2
+    assert cache.delete_session("session-c") == 1
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 2
+    assert await scalar(clean_ledger, "SELECT count(*) FROM egress_attempt") == 2
 
 
 async def test_cache_hit_cannot_bypass_prepare(
@@ -132,11 +153,19 @@ async def test_cache_hit_cannot_bypass_prepare(
     cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
     line = cached_transport(clean_ledger, provider, cache)
     request = request_with(distinct_excerpt(1))
-    await line.send(request, idempotency_key="first")
+    await line.send(
+        request,
+        idempotency_key="first",
+        cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-a"),
+    )
     invalid = request.model_copy(update={"model_id": "other-model"})
 
     with pytest.raises(Exception) as caught:
-        await line.send(invalid, idempotency_key="second")
+        await line.send(
+            invalid,
+            idempotency_key="second",
+            cache_linkage=CacheLinkage(run_id=invalid.run_id, session_id="session-a"),
+        )
 
     assert getattr(caught.value, "code", None) == "no_adapter_for_route"
     assert provider.call_count == 1
@@ -150,12 +179,18 @@ async def test_cache_fault_fails_closed_before_reservation(
     cache = LocalResponseCache(tmp_path / "cache", ttl_seconds=60, clock=lambda: NOW)
     line = cached_transport(clean_ledger, provider, cache)
 
-    def fail_get(*args: object) -> None:
+    def fail_get(*args: object, **kwargs: object) -> None:
+        del args, kwargs
         raise ResponseCacheError("cache_record_invalid")
 
     monkeypatch.setattr(cache, "get", fail_get)
     with pytest.raises(ResponseCacheError, match="cache_record_invalid"):
-        await line.send(request_with(distinct_excerpt(1)), idempotency_key="first")
+        request = request_with(distinct_excerpt(1))
+        await line.send(
+            request,
+            idempotency_key="first",
+            cache_linkage=CacheLinkage(run_id=request.run_id, session_id="session-a"),
+        )
 
     assert provider.call_count == 0
     assert await scalar(clean_ledger, "SELECT count(*) FROM egress_reservation") == 0

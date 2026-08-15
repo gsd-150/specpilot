@@ -40,7 +40,7 @@ from specpilot.mcp_server.client import StreamableMcpClient
 from specpilot.mcp_server.runtime import load_runtime_config as load_mcp_config
 from specpilot.mcp_server.runtime import load_runtime_services
 from specpilot.providers.base import _ProviderAdapter
-from specpilot.providers.cache import CacheNamespace, LocalResponseCache
+from specpilot.providers.cache import CacheLinkage, CacheNamespace, LocalResponseCache
 from specpilot.providers.fake import FakeProvider
 from specpilot.providers.http import MAIN_ROUTE, HttpChatAdapter, resolve_credential
 from specpilot.providers.transport import PolicyBoundTransport
@@ -83,6 +83,8 @@ class ApiRuntimeConfig(BaseModel):
     configuration_hash: _Sha256
     prompt_id: _Identifier
     prompt_hash: _Sha256
+    compliance_prompt_hash: _Sha256
+    verifier_prompt_hash: _Sha256
     cache_directory: Path | None = None
     cache_ttl_seconds: Annotated[int, Field(gt=0)] | None = None
 
@@ -140,6 +142,12 @@ def load_runtime_config() -> ApiRuntimeConfig:
             "configuration_hash": os.environ.get("SPECPILOT_API_CONFIGURATION_HASH"),
             "prompt_id": os.environ.get("SPECPILOT_API_PROMPT_ID"),
             "prompt_hash": os.environ.get("SPECPILOT_API_PROMPT_HASH"),
+            "compliance_prompt_hash": os.environ.get(
+                "SPECPILOT_API_COMPLIANCE_PROMPT_HASH"
+            ),
+            "verifier_prompt_hash": os.environ.get(
+                "SPECPILOT_API_VERIFIER_PROMPT_HASH"
+            ),
             "cache_directory": os.environ.get("SPECPILOT_API_CACHE_DIR"),
             "cache_ttl_seconds": os.environ.get("SPECPILOT_API_CACHE_TTL_SECONDS"),
         }
@@ -307,6 +315,8 @@ def _assemble_runtime(
             configuration_hash=config.configuration_hash,
             prompt_id=config.prompt_id,
             prompt_hash=config.prompt_hash,
+            compliance_prompt_hash=config.compliance_prompt_hash,
+            verifier_prompt_hash=config.verifier_prompt_hash,
             source_manifest_id=source.manifest_id,
             corpus_manifest_id=mcp_config.corpus_manifest_id,
         )
@@ -362,6 +372,9 @@ def _assemble_runtime(
                 run_id=str(run.run_id),
                 model_id=adapter.model_id,
                 idempotency_key=f"{run.run_id}-planning",
+                cache_linkage=CacheLinkage(
+                    run_id=str(run.run_id), session_id=run.session_id
+                ),
             ),
             corpus_manifest_id=corpus_id,
             answer_context={
@@ -371,6 +384,9 @@ def _assemble_runtime(
                 "evaluation_root_id": run.evaluation_root_id,
                 "run_id": str(run.run_id),
                 "idempotency_key": f"{run.run_id}-answer",
+                "cache_linkage": CacheLinkage(
+                    run_id=str(run.run_id), session_id=run.session_id
+                ),
             },
         )
 
@@ -474,6 +490,9 @@ def _assemble_runtime(
                 run_id=str(run.run_id),
                 model_id=adapter.model_id,
                 idempotency_key=f"{run.run_id}-planning-initial-g0",
+                cache_linkage=CacheLinkage(
+                    run_id=str(run.run_id), session_id=run.session_id
+                ),
             ),
             evidence_agent=cast(Any, EvidenceAgent(mcp_client, services.corpus)),
             compliance_agent=ComplianceAgent(transport),
@@ -485,6 +504,9 @@ def _assemble_runtime(
                 model_id=adapter.model_id,
                 idempotency_key="initial",
                 reconstruction_generation=0,
+                cache_linkage=CacheLinkage(
+                    run_id=str(run.run_id), session_id=run.session_id
+                ),
             ),
             semantic_verifier=SemanticVerifier(transport),
             semantic_context=SemanticContext(
@@ -495,6 +517,9 @@ def _assemble_runtime(
                 model_id=adapter.model_id,
                 idempotency_key="initial",
                 reconstruction_generation=0,
+                cache_linkage=CacheLinkage(
+                    run_id=str(run.run_id), session_id=run.session_id
+                ),
             ),
             deterministic_verifier=lambda candidate, evidence: verify_candidate(
                 candidate,
@@ -517,6 +542,7 @@ def _assemble_runtime(
     async def build_job(
         run_id: UUID,
         question: str,
+        session_id: str,
         request: ChatRequest,
         checkpoint: RunCheckpoint | None,
         query_hash: str,
@@ -540,6 +566,9 @@ def _assemble_runtime(
                     run_id=str(run_id),
                     model_id=adapter.model_id,
                     idempotency_key=f"{run_id}-planning",
+                    cache_linkage=CacheLinkage(
+                        run_id=str(run_id), session_id=session_id
+                    ),
                 ),
                 corpus_manifest_id=corpus_id,
                 answer_context={
@@ -549,6 +578,9 @@ def _assemble_runtime(
                     "evaluation_root_id": request.evaluation_root_id,
                     "run_id": str(run_id),
                     "idempotency_key": f"{run_id}-answer",
+                    "cache_linkage": CacheLinkage(
+                        run_id=str(run_id), session_id=session_id
+                    ),
                 },
             )
         run = _ephemeral_delivery_run(
@@ -560,6 +592,7 @@ def _assemble_runtime(
             adapter,
             checkpoint,
             query_hash=query_hash,
+            session_id=session_id,
         )
         job = await delivery.build(
             run,
@@ -593,6 +626,8 @@ def _assemble_runtime(
             configuration_hash=config.configuration_hash,
             prompt_id=config.prompt_id,
             prompt_hash=config.prompt_hash,
+            compliance_prompt_hash=config.compliance_prompt_hash,
+            verifier_prompt_hash=config.verifier_prompt_hash,
             provider_id=adapter.provider_id,
             model_id=adapter.model_id,
             build_job=build_job,
@@ -655,6 +690,7 @@ def _ephemeral_delivery_run(
     checkpoint: RunCheckpoint | None,
     *,
     query_hash: str,
+    session_id: str,
 ) -> RunRecord:
     """Provide the job builder only immutable run bindings, never client state.
 
@@ -667,7 +703,7 @@ def _ephemeral_delivery_run(
     return RunRecord(
         run_id=run_id,
         request_id=request.request_id,
-        session_id="delivery",
+        session_id=session_id,
         task_level=request.task_level,
         evaluation_root_id=request.evaluation_root_id if is_l2 else None,
         profile=config.profile,
@@ -677,16 +713,8 @@ def _ephemeral_delivery_run(
         configuration_hash=config.configuration_hash,
         prompt_id=config.prompt_id,
         prompt_hash=config.prompt_hash,
-        compliance_prompt_hash=(
-            checkpoint.compliance_prompt_hash if checkpoint is not None else "f" * 64
-        )
-        if is_l2
-        else None,
-        verifier_prompt_hash=(
-            checkpoint.verifier_prompt_hash if checkpoint is not None else "0" * 64
-        )
-        if is_l2
-        else None,
+        compliance_prompt_hash=config.compliance_prompt_hash if is_l2 else None,
+        verifier_prompt_hash=config.verifier_prompt_hash if is_l2 else None,
         provider_id=adapter.provider_id,
         model_id=adapter.model_id,
         query_hash=query_hash,

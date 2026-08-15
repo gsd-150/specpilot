@@ -34,6 +34,8 @@ API_ENV = {
     "SPECPILOT_API_CONFIGURATION_HASH": "a" * 64,
     "SPECPILOT_API_PROMPT_ID": "l1-answer-v1",
     "SPECPILOT_API_PROMPT_HASH": "b" * 64,
+    "SPECPILOT_API_COMPLIANCE_PROMPT_HASH": "c" * 64,
+    "SPECPILOT_API_VERIFIER_PROMPT_HASH": "d" * 64,
 }
 
 
@@ -86,6 +88,8 @@ def test_runtime_config_requires_every_explicit_value(
         configuration_hash=API_ENV["SPECPILOT_API_CONFIGURATION_HASH"],
         prompt_id=API_ENV["SPECPILOT_API_PROMPT_ID"],
         prompt_hash=API_ENV["SPECPILOT_API_PROMPT_HASH"],
+        compliance_prompt_hash=API_ENV["SPECPILOT_API_COMPLIANCE_PROMPT_HASH"],
+        verifier_prompt_hash=API_ENV["SPECPILOT_API_VERIFIER_PROMPT_HASH"],
     )
 
     for missing in API_ENV:

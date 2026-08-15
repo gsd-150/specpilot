@@ -23,6 +23,7 @@ from specpilot.providers.base import (
 )
 from specpilot.providers.cache import (
     CacheKey,
+    CacheLinkage,
     CacheNamespace,
     LocalResponseCache,
     ResponseCacheError,
@@ -136,6 +137,7 @@ class PolicyBoundTransport:
         request: EgressRequest,
         *,
         idempotency_key: str,
+        cache_linkage: CacheLinkage | None = None,
     ) -> TransportReceipt:
         adapter = self.__adapters.get((request.route.provider_id, request.model_id))
         if adapter is None:
@@ -146,7 +148,9 @@ class PolicyBoundTransport:
         cache_key = self.__cache_key(reservation_request)
         if self.__cache is not None:
             assert cache_key is not None
-            cached = self.__cache.get(cache_key)
+            if cache_linkage is None or cache_linkage.run_id != request.run_id:
+                raise ResponseCacheError("cache_linkage_invalid")
+            cached = self.__cache.get(cache_key, linkage=cache_linkage)
             if cached is not None:
                 cached_response = cached.response
                 return TransportReceipt(
@@ -237,11 +241,11 @@ class PolicyBoundTransport:
         cache_record_hash: str | None = None
         if self.__cache is not None:
             assert cache_key is not None
+            assert cache_linkage is not None
             cached = self.__cache.put(
                 cache_key,
                 response,
-                run_id=request.run_id,
-                session_id=request.evaluation_root_id,
+                linkage=cache_linkage,
             )
             cache_record_hash = cached.record_hash
         return TransportReceipt(

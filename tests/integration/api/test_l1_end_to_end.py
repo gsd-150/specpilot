@@ -252,6 +252,8 @@ async def _runtime(
         "SPECPILOT_API_CONFIGURATION_HASH": "d" * 64,
         "SPECPILOT_API_PROMPT_ID": "l1-answer-v1",
         "SPECPILOT_API_PROMPT_HASH": "e" * 64,
+        "SPECPILOT_API_COMPLIANCE_PROMPT_HASH": "f" * 64,
+        "SPECPILOT_API_VERIFIER_PROMPT_HASH": "0" * 64,
         "SPECPILOT_MCP_CORPUS_MANIFEST_DIR": str(corpus_dir),
         "SPECPILOT_MCP_CORPUS_MANIFEST_ID": corpus_id,
         "SPECPILOT_MCP_SOURCE_MANIFEST_DIR": str(source_dir),

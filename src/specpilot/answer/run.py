@@ -22,6 +22,7 @@ from specpilot.answer.evidence import Evidence
 from specpilot.contracts.answer import AnswerVerdict, RefusalReason, VerifiedAnswer
 from specpilot.contracts.manifests import RfcSourceManifest, SourceManifest
 from specpilot.egress.ledger import RequestSize
+from specpilot.providers.cache import CacheLinkage
 from specpilot.providers.transport import PolicyBoundTransport, ProviderAttemptError
 
 
@@ -49,6 +50,7 @@ async def run_answer(
     evaluation_root_id: str,
     run_id: str,
     idempotency_key: str | None = None,
+    cache_linkage: CacheLinkage | None = None,
 ) -> AnswerOutcome:
     """Reserve, send, record, verify — and refuse rather than raise.
 
@@ -84,6 +86,7 @@ async def run_answer(
         receipt = await transport.send(
             request,
             idempotency_key=idempotency_key or str(uuid.uuid4()),
+            cache_linkage=cache_linkage,
         )
     except ProviderAttemptError as error:
         return AnswerOutcome(

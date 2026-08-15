@@ -79,3 +79,40 @@ ledger bypass.
 - Cache records intentionally contain provider responses and therefore must
   remain under the explicitly configured private cache directory; durable run
   traces contain only bounded opaque hashes.
+
+## Review round 1
+
+Four retention and identity defects were reproduced and corrected.
+
+- Transport callers now pass a validated `CacheLinkage` copied from the real
+  durable `RunRecord.run_id/session_id` (or the owner-validated resume
+  session). `evaluation_root_id` is no longer used as a retention session.
+  Every hit associates the current run and session while holding the same key
+  lock used to read the record; association failure rolls back new markers and
+  fails closed before returning the response.
+- New records become observable only after both required hashed index markers
+  exist. Publication orders run marker, session marker, then record as the
+  commit point. Index and cancellation-shaped failures remove any record and
+  newly created markers, while preserving the primary control-flow exception.
+- A persistent private lock record per cache key provides bounded
+  cross-process `flock` exclusion. Lock records are canonical `0600` regular
+  files under a `0700` directory, opened with `O_NOFOLLOW` and inode/name
+  revalidation. All get, put, association, expiry, and indexed deletion paths
+  obey the lock; multi-key deletion acquires hashes in sorted order. A
+  deterministic delete/put race proves a validated old name cannot unlink the
+  replacement record.
+- Cache namespace binding now selects the configured stage prompt hash:
+  global prompt ID/hash for all keys, compliance hash for compliance, and
+  verifier hash for semantic/verifier (and judge) stages. The two stage hashes
+  are explicit runtime/Compose inputs; no prompt identifiers are fabricated.
+
+Review verification from the final tree:
+
+- Cache filesystem/concurrency suite: **28 passed**, including index-first
+  publication rollback, hit-association rollback, stale-index republish,
+  symlink/mode refusal, hard lock timeout, cancellation-shaped cleanup, and
+  the deterministic replacement race.
+- `make check`: Ruff and mypy passed; **1,628 unit tests** and **197 CLI tests
+  passed**.
+- Fresh PostgreSQL transport plus migrations: **105 passed**.
+- Browser decoder suite: **151 passed** and the production build succeeded.

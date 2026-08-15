@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from specpilot.agents.planner import PlannerContext
 from specpilot.checkpoints.contracts import CheckpointStage, RunCheckpoint
 from specpilot.contracts.egress import TaskLevel
+from specpilot.providers.cache import CacheLinkage
 from specpilot.runs.contracts import RunRecord
 from specpilot.runtime.l2 import L2RunContext
 from specpilot.runtime.worker import RunJob
@@ -147,6 +148,9 @@ def _job(
             model_id=run.model_id,
             idempotency_key=f"{run.run_id}-planning",
             task_level=TaskLevel.L2,
+            cache_linkage=CacheLinkage(
+                run_id=str(run.run_id), session_id=run.session_id
+            ),
         ),
         corpus_manifest_id=run.corpus_manifest_id,
         answer_context={},
@@ -167,6 +171,7 @@ def _planner_context(run: RunRecord, context: L2RunContext) -> PlannerContext:
         model_id=run.model_id,
         idempotency_key=f"{run.run_id}-planning-initial-g0",
         task_level=TaskLevel.L2,
+        cache_linkage=CacheLinkage(run_id=str(run.run_id), session_id=run.session_id),
     )
 
 

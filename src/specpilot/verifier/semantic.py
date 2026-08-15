@@ -21,6 +21,7 @@ from specpilot.contracts.manifests import (
 )
 from specpilot.contracts.verdict import IdentifiedCandidate, SemanticDecision
 from specpilot.egress.ledger import RequestSize
+from specpilot.providers.cache import CacheLinkage
 from specpilot.providers.transport import PolicyBoundTransport, TransportReceipt
 from specpilot.verifier.deterministic import DeterministicResult
 
@@ -72,6 +73,7 @@ class SemanticContext:
     model_id: str
     idempotency_key: str
     reconstruction_generation: int
+    cache_linkage: CacheLinkage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +131,7 @@ class SemanticVerifier:
             ),
             _stage_key(context, "verifier"),
             set(selected_ids),
+            context.cache_linkage,
         )
         if decision is None:
             error = InvalidSemanticReply(
@@ -156,8 +159,11 @@ async def _send_and_parse(
     request: EgressRequest,
     idempotency_key: str,
     expected_evidence_ids: set[str],
+    cache_linkage: CacheLinkage | None,
 ) -> tuple[SemanticDecision | None, TransportReceipt]:
-    receipt = await transport.send(request, idempotency_key=idempotency_key)
+    receipt = await transport.send(
+        request, idempotency_key=idempotency_key, cache_linkage=cache_linkage
+    )
     decision = _parse_content(receipt.response.content, expected_evidence_ids)
     return decision, receipt
 

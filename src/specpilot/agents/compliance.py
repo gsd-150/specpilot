@@ -30,6 +30,7 @@ from specpilot.contracts.verdict import (
     normalized_claim_id,
 )
 from specpilot.egress.ledger import RequestSize
+from specpilot.providers.cache import CacheLinkage
 from specpilot.providers.transport import PolicyBoundTransport, TransportReceipt
 
 _MAX_L2_EXCERPTS = 12
@@ -75,6 +76,7 @@ class ComplianceContext:
     model_id: str
     idempotency_key: str
     reconstruction_generation: int
+    cache_linkage: CacheLinkage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +123,7 @@ class ComplianceAgent:
                 payload=payload,
             ),
             _stage_key(context, "compliance"),
+            context.cache_linkage,
         )
         if batch is None:
             error = InvalidComplianceReply(
@@ -153,8 +156,11 @@ async def _send_and_parse(
     transport: PolicyBoundTransport,
     request: EgressRequest,
     idempotency_key: str,
+    cache_linkage: CacheLinkage | None,
 ) -> tuple[ComplianceBatch | None, TransportReceipt]:
-    receipt = await transport.send(request, idempotency_key=idempotency_key)
+    receipt = await transport.send(
+        request, idempotency_key=idempotency_key, cache_linkage=cache_linkage
+    )
     batch = _parse_content(receipt.response.content)
     return batch, receipt
 

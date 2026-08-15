@@ -7,7 +7,12 @@ from pathlib import Path
 from specpilot.cli import main
 from specpilot.contracts.egress import EgressStage
 from specpilot.providers.base import ProviderResponse, ResponseMetadata
-from specpilot.providers.cache import CacheKey, CacheNamespace, LocalResponseCache
+from specpilot.providers.cache import (
+    CacheKey,
+    CacheLinkage,
+    CacheNamespace,
+    LocalResponseCache,
+)
 
 
 def _put(root: Path, *, request_hash: str, run_id: str, session_id: str) -> None:
@@ -20,6 +25,8 @@ def _put(root: Path, *, request_hash: str, run_id: str, session_id: str) -> None
         configuration_hash="a" * 64,
         prompt_id="prompt-v1",
         prompt_hash="b" * 64,
+        compliance_prompt_hash="1" * 64,
+        verifier_prompt_hash="2" * 64,
         source_manifest_id="c" * 64,
         corpus_manifest_id="d" * 64,
     )
@@ -45,8 +52,7 @@ def _put(root: Path, *, request_hash: str, run_id: str, session_id: str) -> None
                 request_bytes=2,
             ),
         ),
-        run_id=run_id,
-        session_id=session_id,
+        linkage=CacheLinkage(run_id=run_id, session_id=session_id),
     )
 
 

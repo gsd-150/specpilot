@@ -212,7 +212,13 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 raise
             created = True
             job = await _build_job(
-                runtime, run_id, request.question, request, None, query_hash
+                runtime,
+                run_id,
+                request.question,
+                run.session_id,
+                request,
+                None,
+                query_hash,
             )
             await permit.deliver(job)
             delivered = True
@@ -316,6 +322,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
                 runtime,
                 run_id,
                 request.question,
+                session.session_id,
                 reconstructed,
                 checkpoint,
                 query_hash,
@@ -556,13 +563,20 @@ async def _build_job(
     runtime: ApiRuntime,
     run_id: UUID,
     question: str,
+    session_id: str,
     request: ChatRequest,
     checkpoint: RunCheckpoint | None,
     query_hash: str,
     recovery_phase: str = "none",
 ) -> RunJob:
     job = runtime.binding.build_job(
-        run_id, question, request, checkpoint, query_hash, recovery_phase
+        run_id,
+        question,
+        session_id,
+        request,
+        checkpoint,
+        query_hash,
+        recovery_phase,
     )
     if inspect.isawaitable(job):
         job = await job

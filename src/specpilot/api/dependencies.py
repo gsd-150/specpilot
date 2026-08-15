@@ -84,7 +84,8 @@ class ApiLifecycleHook(Protocol):
 
 HealthProbe = Callable[[], Awaitable[bool]]
 JobFactory = Callable[
-    [UUID, str, ChatRequest, RunCheckpoint | None, str, str], RunJob | Awaitable[RunJob]
+    [UUID, str, str, ChatRequest, RunCheckpoint | None, str, str],
+    RunJob | Awaitable[RunJob],
 ]
 
 

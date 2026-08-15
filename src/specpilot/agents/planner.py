@@ -32,6 +32,7 @@ from specpilot.contracts.manifests import (
     SourceManifest,
 )
 from specpilot.egress.ledger import RequestSize
+from specpilot.providers.cache import CacheLinkage
 from specpilot.providers.transport import PolicyBoundTransport
 
 _CATALOG_VERSION = "mcp-v1"
@@ -89,6 +90,7 @@ class PlannerContext:
     idempotency_key: str
     task_level: TaskLevel = TaskLevel.L1
     reconstruction_generation: int = 0
+    cache_linkage: CacheLinkage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +144,7 @@ class Planner:
             idempotency_key=_generation_key(
                 context.idempotency_key, context.reconstruction_generation
             ),
+            cache_linkage=context.cache_linkage,
         )
         try:
             plan = validate_tool_plan(
