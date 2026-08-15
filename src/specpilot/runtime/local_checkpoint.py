@@ -8,8 +8,8 @@ a fail-closed boundary of its own: a checkpoint that regressed a stage or
 rewound an immutable binding must refuse rather than be written.
 
 This store keeps only the current checkpoint in memory, applies the same
-compare-and-swap version check and ``validate_transition`` as the PostgreSQL
-store, and stores nothing with clause prose — ``RunCheckpoint`` has no field that
+compare-and-swap version check plus the run/attempt binding as the
+PostgreSQL store, and stores nothing with clause prose — ``RunCheckpoint`` has no field that
 can hold any.
 """
 
@@ -21,7 +21,6 @@ from uuid import UUID
 from specpilot.checkpoints.contracts import (
     CheckpointStage,
     RunCheckpoint,
-    validate_transition,
 )
 
 
@@ -93,11 +92,24 @@ class LocalCheckpointStore:
     async def write(
         self, previous_version: int | None, checkpoint: RunCheckpoint
     ) -> RunCheckpoint:
-        """CAS the version and validate the transition before accepting it."""
+        """CAS the version and pin the binding, like the real store accepts.
+
+        Deliberately does NOT run the cross-checkpoint stage validator: the
+        durable store never does — the runtime constructs its own legal
+        checkpoints, including same-stage updates — and applying the shared
+        validator here rejected a legal live transition the first real run
+        reached, which the durable path would have accepted.
+        """
         if previous_version != self._version:
             raise ValueError("checkpoint_compare_and_swap_mismatch")
         if self._current is not None:
-            validate_transition(self._current, checkpoint)
+            if (
+                checkpoint.run_id != self._current.run_id
+                or checkpoint.attempt != self._current.attempt
+            ):
+                raise ValueError("checkpoint run and attempt are immutable")
+            if checkpoint.checkpoint_version != self._current.checkpoint_version + 1:
+                raise ValueError("checkpoint versions advance by one")
         self._current = checkpoint
         self._version = checkpoint.checkpoint_version
         return checkpoint
