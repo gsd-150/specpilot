@@ -404,6 +404,10 @@ MAIN_ROUTE = RouteConfig(
         model_id="deepseek-v4-flash",
         base_url="https://api.deepseek.com/v1",
         api_key_env="SPECPILOT_MAIN_API_KEY",
+        # The L2 planner reasons over the tool catalog before its first tool
+        # call and consistently exceeds a 60s wall on the live route; a hung
+        # connection is still bounded, just by five minutes instead of one.
+        timeout_seconds=300.0,
     ),
     description="online main chain",
     endpoint_purpose="online-main-deepseek-v4-flash-api",
