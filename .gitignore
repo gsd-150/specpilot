@@ -25,6 +25,12 @@ tmp/
 provider-snapshots/
 data/provider-snapshots/
 
+# Local copies of the restricted store, kept beside the project rather than
+# inside `artifacts/restricted/` so a backup is not nested in what it backs up.
+# Ignored by directory rather than by name: these carry the freeze artifacts and
+# the annotation store, and one `git add -A` would put them on a public remote.
+backups/
+
 # Local Compose volumes
 compose-volumes/
 postgres-data/
