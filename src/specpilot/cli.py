@@ -102,6 +102,7 @@ from specpilot.corpus.freezing import (
 )
 from specpilot.corpus.overlap import question_gold_jaccard, restates
 from specpilot.corpus.qa import QaThresholds, run_parse_qa
+from specpilot.corpus.requirements import scan_requirements
 from specpilot.corpus.walk import (
     InvalidDocumentIdentityError,
     document_identity,
@@ -902,6 +903,56 @@ def _annotation_template(arguments: argparse.Namespace) -> int:
     json.dump(template, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def _corpus_requirements(arguments: argparse.Namespace) -> int:
+    """List every clause using the given terms, so a negative can be checked.
+
+    An adversarial negative claims that nothing in the corpus supports its
+    verdict. That is a statement about every clause, and it cannot be settled by
+    rereading the one already in hand — which is how two drafted groups reached
+    review resting on clauses that a prohibition elsewhere supported outright.
+
+    Prints every hit and a trailing total. The total is the point: a scan whose
+    output could have been truncated proves nothing about what is absent.
+    """
+    source = _frozen_source(arguments)
+    if isinstance(source, str):
+        return _refuse_source(source)
+
+    try:
+        hits = scan_requirements(
+            source.document,
+            RfcLimits(),
+            _clause_limits(source.manifest),
+            terms=tuple(arguments.term),
+            keywords=tuple(arguments.keyword),
+        )
+    except ValueError:
+        return _refuse("requirement_scan_needs_a_term")
+    except UnsafeRfcError as error:
+        return _refuse(error.code.value)
+    except OversizedClauseError:
+        return _refuse("clause_too_large")
+    except OSError:
+        return _refuse("io_error", EXIT_IO)
+
+    for hit in hits:
+        json.dump(
+            {
+                "clause_id": hit.clause_id,
+                "section_number": hit.section_number,
+                "section_path": hit.section_path,
+                "ordinal": hit.ordinal,
+                "word_count": hit.word_count,
+                "keyword_counts": hit.keyword_counts,
+            },
+            sys.stdout,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        sys.stdout.write("\n")
+    return _emit({"status": "scanned", "matched_clauses": len(hits)})
 
 
 def _annotation_adv_template(arguments: argparse.Namespace) -> int:
@@ -3545,6 +3596,17 @@ def _parser() -> argparse.ArgumentParser:
     normative.add_argument("--section", default=None)
     normative.add_argument("--min-keywords", type=int, default=0)
     normative.set_defaults(handler=_corpus_normative)
+
+    requirements = corpus.add_parser("requirements")
+    requirements.add_argument("--manifest", required=True)
+    requirements.add_argument("--manifest-dir", type=Path, required=True)
+    requirements.add_argument("--xml", type=Path, required=True)
+    # Repeatable and conjunctive. There is deliberately no --limit and no
+    # ordering flag: a truncated or reordered scan cannot answer the question
+    # this exists to answer.
+    requirements.add_argument("--term", action="append", default=[])
+    requirements.add_argument("--keyword", action="append", default=[])
+    requirements.set_defaults(handler=_corpus_requirements)
 
     overlap = corpus.add_parser("overlap")
     overlap.add_argument("--manifest", required=True)
