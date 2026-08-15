@@ -42,6 +42,24 @@ _FIELDS = (
 )
 
 
+def _store(root: Path, name: str, records: int) -> Path:
+    """A stand-in record store, built here rather than borrowed.
+
+    The real stores live under `artifacts/restricted/`, which is gitignored, so
+    pointing at them made this file pass on the author's machine and fail in
+    every fresh checkout — the first thing CI said when it finally had a commit
+    to run. What the digest binds is record bytes; whose records they are does
+    not matter to it.
+    """
+    directory = root / name
+    directory.mkdir(parents=True, exist_ok=True)
+    for index in range(records):
+        (directory / f"{index:03d}.json").write_text(
+            f'{{"id":"{name}-{index}"}}', encoding="utf-8"
+        )
+    return directory
+
+
 def _inputs(tmp_path: Path, **overrides: object) -> IdentityInputs:
     lock = tmp_path / "requirements.lock"
     lock.write_text("pydantic==2.13.4\n", encoding="utf-8")
@@ -52,13 +70,23 @@ def _inputs(tmp_path: Path, **overrides: object) -> IdentityInputs:
         "derived_corpus_sha256": "b" * 64,
         "collection_inventory_sha256": "c" * 64,
         "source_manifest_ids": ("d" * 64, "e" * 64),
-        "group_dir": _ROOT / "artifacts/restricted/l2-adv",
-        "annotation_dir": _ROOT / "artifacts/restricted/annotations",
+        "group_dir": _store(tmp_path, "l2-adv", 16),
+        "annotation_dir": _store(tmp_path, "annotations", 60),
         "model_ids": ("claude-opus-5",),
         "python_version": "3.12.11",
     }
     fields.update(overrides)
     return IdentityInputs(**fields)  # type: ignore[arg-type]
+
+
+def test_an_absent_store_refuses_rather_than_hashing_emptiness(
+    tmp_path: Path,
+) -> None:
+    """The behaviour the borrowed directories were accidentally relying on."""
+    with pytest.raises(IdentityUnavailableError):
+        build_identity_status(
+            _inputs(tmp_path, annotation_dir=tmp_path / "never-created")
+        )
 
 
 def test_all_twelve_fields_are_produced(tmp_path: Path) -> None:

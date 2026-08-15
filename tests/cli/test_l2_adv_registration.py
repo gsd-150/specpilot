@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,13 @@ from specpilot.corpus.clauses import EXCLUDED_SECTIONS, ClauseLimits, build_clau
 from specpilot.ingestion.rfc import load_verified_rfc
 
 _ROOT = Path(__file__).resolve().parents[2]
+# Derived, not hardcoded. An absolute home path passes on one machine and
+# means nothing in a clone; the store sits at this path in a normal checkout,
+# and the override exists because a git worktree does not carry it.
 _MANIFEST_DIR = Path(
-    "/Users/chunxue/Documents/resume_project/specpilot/manifests/local/r0/source"
+    os.environ.get(
+        "SPECPILOT_TEST_SOURCE_MANIFEST_DIR", str(_ROOT / "manifests/local/r0/source")
+    )
 )
 _RFC9110_ID = "af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691"
 _RFC9110_XML = _ROOT / "artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml"

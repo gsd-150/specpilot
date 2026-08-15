@@ -150,14 +150,22 @@ jobs:
           corpus_dir="$RUNNER_TEMP/specpilot-ci/corpus"
           manifest_dir="$RUNNER_TEMP/specpilot-ci/manifests"
           source_dir="$RUNNER_TEMP/specpilot-ci/sources"
+          # The ready-marker mount arrived with W5 and this list did not grow
+          # with it. Compose validates every service even when one is named, so
+          # an unset variable expands to ":/run/specpilot/ready:ro" and the
+          # config step fails on an empty section between colons — the failure
+          # AGENTS.md warns about, for the same reason.
+          ready_dir="$RUNNER_TEMP/specpilot-ci/ready"
           mkdir -p \
             "$corpus_dir" \
             "$manifest_dir" \
-            "$source_dir"
+            "$source_dir" \
+            "$ready_dir"
           {
             echo "SPECPILOT_MCP_CORPUS_MANIFEST_DIR_HOST=$corpus_dir"
             echo "SPECPILOT_MCP_SOURCE_MANIFEST_DIR_HOST=$manifest_dir"
             echo "SPECPILOT_MCP_SOURCE_DATA_DIR_HOST=$source_dir"
+            echo "SPECPILOT_READY_DIR_HOST=$ready_dir"
           } >> "$GITHUB_ENV"
       - run: docker compose --profile demo config
       - run: docker compose --profile real config
