@@ -9,7 +9,8 @@ rewound an immutable binding must refuse rather than be written.
 
 This store keeps only the current checkpoint in memory, applies the same
 compare-and-swap version check plus the run/attempt binding as the
-PostgreSQL store, and stores nothing with clause prose — ``RunCheckpoint`` has no field that
+PostgreSQL store, and stores nothing with clause prose — ``RunCheckpoint``
+has no field that
 can hold any.
 """
 
