@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,6 +21,30 @@ _TABLES = (
     "egress_corpus_ledger",
     "egress_policy_snapshot",
 )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Resolve the temporary directory before anything allocates one.
+
+    Not a convenience. `open_directory_path` walks a path one component at a
+    time under `O_NOFOLLOW` and refuses a symlinked component by design, and on
+    macOS `tempfile.gettempdir()` answers under `/var`, which is a symlink to
+    `private/var`. So `initialize_real`, staging its source manifests below an
+    unresolved temporary root, refuses with `real_corpus_unavailable` — an
+    environment artifact that reads exactly like a defect in the code under
+    test. Linux has a real `/var`, so the packaged gate stays green and the
+    local red looks unexplained.
+
+    The refusal itself is correct and stays: a component that turns out to be a
+    link is precisely what the guard exists to stop. What is wrong is asking the
+    guard to vet a path the platform never meant literally. Resolving once here
+    keeps every environment on the same answer. Both the environment variable
+    and the module value are set because `tempfile` caches the first lookup, and
+    subprocesses read only the former.
+    """
+    resolved = os.path.realpath(tempfile.gettempdir())
+    os.environ["TMPDIR"] = resolved
+    tempfile.tempdir = resolved
 
 
 @pytest.fixture(scope="session")
