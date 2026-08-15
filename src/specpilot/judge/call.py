@@ -27,17 +27,34 @@ from specpilot.contracts.scoring import JudgeOutput
 def parse_judge_reply(content: str) -> tuple[JudgeOutput | None, str | None]:
     """Read the model reply into a `JudgeOutput`, refusing rather than guessing.
 
-    Returns `(output, None)` on success and `(None, fault_code)` otherwise. The
-    fault codes are stable because the calibration CLI branches on them.
+    A fenced code block is tolerated the same way the L1 reply parser does:
+    models wrap JSON in ```json routinely, and that is a formatting habit, not
+    a failure to answer. Anything looser than that stays a fault. Returns
+    `(output, None)` on success and `(None, fault_code)` otherwise; the fault
+    codes are stable because the calibration CLI branches on them.
     """
     try:
-        payload = json.loads(content)
+        payload = _extract_object(content)
     except ValueError:
+        return None, "judge_reply_unreadable"
+    if payload is None:
         return None, "judge_reply_unreadable"
     try:
         return JudgeOutput.model_validate(payload), None
     except ValidationError:
         return None, "judge_reply_invalid"
+
+
+def _extract_object(content: str) -> object | None:
+    text = content.strip()
+    if text.startswith("```"):
+        _, _, rest = text.partition("\n")
+        text = rest.rpartition("```")[0].strip() or rest.strip()
+    try:
+        parsed: object = json.loads(text)
+        return parsed
+    except ValueError:
+        return None
 
 
 def build_judge_request(

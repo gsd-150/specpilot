@@ -87,6 +87,17 @@ def test_unreadable_and_invalid_replies_carry_stable_faults() -> None:
     assert parse_judge_reply(json.dumps(malformed)) == (None, "judge_reply_invalid")
 
 
+def test_a_fenced_reply_is_tolerated_but_prose_is_not() -> None:
+    fenced = "```json\n" + json.dumps(VALID_REPLY) + "\n```"
+    output, fault = parse_judge_reply(fenced)
+    assert fault is None
+    assert isinstance(output, JudgeOutput)
+    assert parse_judge_reply("Here is my assessment: " + json.dumps(VALID_REPLY)) == (
+        None,
+        "judge_reply_unreadable",
+    )
+
+
 def test_the_judge_request_is_staged_as_judge() -> None:
     request = build_judge_request(
         _payload(),
