@@ -2381,6 +2381,222 @@ def _pool_corpus(
     )
 
 
+def _comparison_e_context(arguments: argparse.Namespace) -> int:
+    """Measure A' stratification on dev without spending provider budget.
+
+    Comparison A' (§8.5.2) asks whether the E-context evidence arm -- each
+    retrieved hit expanded to its section-adjacent clauses -- differs from the
+    frozen E-narrow default, and on which items it cannot possibly differ. This
+    command answers the second half on the dev split: per item it builds both
+    arms and reports whether the gold clause even has a section neighbour to
+    expand into, which is the stratum the live comparison must report
+    separately rather than average in.
+
+    Retrieval-only. No provider call, no reservation: the two arms are built
+    and compared locally, exactly as they will be built before the live paired
+    runs. Locked is refused outright -- §8.5 keeps the locked splits unread
+    until W6 executes them -- and the count assertion is the same discipline
+    the sweep driver applies: a selection that differs from `--expected`
+    refuses before anything is computed.
+    """
+    from specpilot.corpus.indexable import IndexUnit
+    from specpilot.embedding.local_encoder import (
+        load_encoder,
+        load_token_counter,
+    )
+    from specpilot.retrieval.expansion import (
+        EXCERPT_TOKEN_CAP,
+        MAX_EXCERPTS,
+        MAX_TOKENS,
+        expand_evidence_context,
+        gold_has_section_context,
+    )
+
+    if arguments.split != "dev":
+        return _refuse("comparison_requires_dev_split", EXIT_USAGE)
+
+    try:
+        corpus_manifest = CorpusManifestStore(arguments.corpus_manifest_dir).read(
+            arguments.corpus_manifest
+        )
+    except (OSError, ValueError, RuntimeError):
+        return _refuse("corpus_manifest_not_found")
+
+    resolved = _pool_sources(arguments)
+    if isinstance(resolved, str):
+        return _refuse_source(resolved)
+    if {manifest.manifest_id for manifest, _ in resolved} != set(
+        corpus_manifest.source_manifest_ids
+    ):
+        return _refuse("corpus_source_mismatch")
+
+    try:
+        heads = _annotation_heads(arguments.annotation_dir, ("l1",))
+        retired = {
+            entry.item_id
+            for entry in AnnotationStore(arguments.annotation_dir).read_retirements()
+        }
+        corpus = _pool_corpus(resolved)
+    except (OSError, ValueError):
+        return _refuse("invalid_annotation_record")
+    except (UnsafeRfcError, OversizedClauseError):
+        return _refuse("invalid_corpus")
+
+    selected = tuple(
+        record
+        for record in heads
+        if record.split.value == arguments.split
+        and not record.expected_refusal
+        and record.gold_clause_ids
+        and record.item_id not in retired
+    )
+    if not selected:
+        return _refuse("no_scorable_annotations")
+    if len(selected) != arguments.expected:
+        return _refuse("comparison_count_mismatch", EXIT_USAGE)
+
+    if weights_sha256(arguments.model_dir) != corpus_manifest.embedding_weights_sha256:
+        return _refuse("embedding_weights_mismatch")
+    try:
+        encoder = load_encoder(arguments.model_dir, arguments.device)
+        counter = load_token_counter(arguments.model_dir)
+    except EmbeddingRuntimeUnavailable:
+        return _refuse("embedding_runtime_unavailable")
+
+    # One section map for every item: units grouped by document and section,
+    # ordered by ordinal with tables after clauses at the same ordinal -- the
+    # same ordering key the retrieval protocol uses for deterministic ties.
+    by_section: dict[tuple[str, str | None], list[IndexUnit]] = {}
+    for unit in corpus.units():
+        key = (unit.document_id, unit.section_number)
+        by_section.setdefault(key, []).append(unit)
+    section_map = {
+        key: tuple(
+            sorted(
+                units,
+                key=lambda u: (u.ordinal, 0 if u.kind == "clause" else 1),
+            )
+        )
+        for key, units in by_section.items()
+    }
+
+    def siblings(hit: IndexUnit) -> Sequence[IndexUnit]:
+        return section_map.get((hit.document_id, hit.section_number), (hit,))
+
+    protocol = corpus_manifest.retrieval
+    dense: DenseIndex | None = None
+    try:
+        try:
+            dense = DenseIndex.open(
+                arguments.qdrant_url, corpus_manifest.collection_name
+            )
+            if dense.point_count() != corpus_manifest.point_count:
+                return _refuse("dense_point_count_mismatch")
+        except EgressPolicyViolation:
+            raise
+        except Exception:
+            return _refuse("dense_index_unavailable", EXIT_IO)
+
+        sparse = Bm25Index.build(corpus.indexable())
+        if sparse.fingerprint != corpus_manifest.bm25.index_fingerprint:
+            return _refuse("bm25_fingerprint_mismatch")
+
+        locators = {
+            unit_id: locator_for_unit(
+                corpus_manifest.manifest_id, corpus.get_clause(unit_id)
+            )
+            for unit_id in corpus.unit_ids()
+        }
+        items: list[dict[str, Any]] = []
+        for record in selected:
+            vector = encoder([record.question])[0].tolist()
+            bm25_ids = tuple(
+                hit.unit_id
+                for hit in sparse.search(record.question, protocol.bm25_top_k)
+            )
+            dense_ids = tuple(
+                hit.unit_id for hit in dense.search(vector, protocol.dense_top_k)
+            )
+            fused = reciprocal_rank_fusion(
+                [
+                    RouteRanking(route="bm25", unit_ids=bm25_ids),
+                    RouteRanking(route="dense", unit_ids=dense_ids),
+                ],
+                locators=locators,
+                parameters=RrfParameters(k=protocol.rrf_k),
+            )
+            # The narrow arm, built exactly as the answer path builds it:
+            # top-k fused hits, scoped to the top hit's document.
+            ranked_units = [
+                corpus.get_clause(hit.unit_id) for hit in fused.hits
+            ][: protocol.final_top_k]
+            scoped = ranked_units[0].document_id if ranked_units else None
+            narrow = tuple(
+                unit for unit in ranked_units if unit.document_id == scoped
+            )
+            expansion = expand_evidence_context(
+                narrow,
+                siblings,
+                counter=counter,
+                max_excerpts=MAX_EXCERPTS,
+                max_tokens=MAX_TOKENS,
+                excerpt_token_cap=EXCERPT_TOKEN_CAP,
+            )
+            items.append(
+                {
+                    "item_id": record.item_id,
+                    "narrow_unit_ids": [u.unit_id for u in narrow],
+                    "expanded_unit_ids": [u.unit_id for u in expansion.units],
+                    "excerpt_count": expansion.excerpt_count,
+                    "token_total": expansion.token_total,
+                    "identical_to_narrow": expansion.identical_to_narrow,
+                    "gold_has_section_context": gold_has_section_context(
+                        tuple(record.gold_clause_ids),
+                        corpus.get_clause,
+                        siblings,
+                    ),
+                }
+            )
+    except DenseBackendUnavailable:
+        return _refuse("dense_index_unavailable", EXIT_IO)
+    finally:
+        if dense is not None:
+            dense.close()
+
+    expanded_items = [item for item in items if not item["identical_to_narrow"]]
+    identical_items = [item for item in items if item["identical_to_narrow"]]
+    context_items = [
+        item for item in items if item["gold_has_section_context"]
+    ]
+    return _emit(
+        {
+            "status": "measured",
+            "split": arguments.split,
+            "diagnostic_only": True,
+            "corpus_manifest_id": corpus_manifest.manifest_id,
+            "protocol": {
+                "bm25_top_k": protocol.bm25_top_k,
+                "dense_top_k": protocol.dense_top_k,
+                "final_top_k": protocol.final_top_k,
+                "rrf_k": protocol.rrf_k,
+            },
+            "budget": {
+                "max_excerpts": MAX_EXCERPTS,
+                "max_tokens": MAX_TOKENS,
+                "excerpt_token_cap": EXCERPT_TOKEN_CAP,
+            },
+            "item_count": len(items),
+            "expanded_item_count": len(expanded_items),
+            "identical_item_count": len(identical_items),
+            "identical_item_ids": [
+                item["item_id"] for item in identical_items
+            ],
+            "gold_context_item_count": len(context_items),
+            "items": items,
+        }
+    )
+
+
 def _retrieval_evaluate(arguments: argparse.Namespace) -> int:
     """Score the frozen retrieval protocol against one split's gold.
 
@@ -4894,6 +5110,25 @@ def _parser() -> argparse.ArgumentParser:
     # number whose split is implicit is one that gets quoted as a test result.
     evaluate.add_argument("--split", choices=["dev", "locked"], required=True)
     evaluate.set_defaults(handler=_retrieval_evaluate)
+
+    comparison = commands.add_parser("comparison").add_subparsers(
+        dest="command", required=True
+    )
+    e_context = comparison.add_parser("e-context")
+    e_context.add_argument("--annotation-dir", type=Path, required=True)
+    e_context.add_argument("--corpus-manifest", required=True)
+    e_context.add_argument("--corpus-manifest-dir", type=Path, required=True)
+    e_context.add_argument("--manifest-dir", type=Path, required=True)
+    e_context.add_argument("--manifest", action="append", required=True)
+    e_context.add_argument("--xml", action="append", type=Path, required=True)
+    e_context.add_argument("--model-dir", type=Path, required=True)
+    e_context.add_argument("--device", choices=["mps", "cpu"], required=True)
+    e_context.add_argument("--qdrant-url", required=True)
+    # Dev only until W6: the handler refuses locked, but the parser names the
+    # choice so the refusal names what was refused.
+    e_context.add_argument("--split", choices=["dev", "locked"], required=True)
+    e_context.add_argument("--expected", type=int, required=True)
+    e_context.set_defaults(handler=_comparison_e_context)
 
     answer = commands.add_parser("answer")
     answer.add_argument("--question", required=True)
