@@ -143,6 +143,11 @@ from specpilot.embedding.throughput import (
     measure_throughput,
     weights_sha256,
 )
+from specpilot.evaluation.adversarial_run import (
+    AdversarialRunError,
+    plan_cases,
+    select_groups,
+)
 from specpilot.evaluation.dependency_lock import (
     DependencyLockError,
     render_dependency_lock,
@@ -156,6 +161,11 @@ from specpilot.evaluation.retrieval import (
     RetrievedItem,
     score_route,
     stratify_by_overlap,
+)
+from specpilot.evaluation.sweep import (
+    SweepLevel,
+    SweepSelectionError,
+    select_cases,
 )
 from specpilot.ingestion.archive import extract_expected_docx
 from specpilot.ingestion.ooxml import OoxmlLimits, UnsafeOoxmlError, inspect_docx
@@ -220,6 +230,13 @@ def _refuse(code: str, exit_code: int = EXIT_REFUSED) -> int:
     """Print one machine-readable code. Never a path, message, or payload."""
     print(code, file=sys.stderr)
     return exit_code
+
+
+def _emit_line(payload: dict[str, Any]) -> None:
+    """One JSON object per line, for output a driver reads as it is produced."""
+    json.dump(payload, sys.stdout, ensure_ascii=False, sort_keys=True,
+              separators=(",", ":"))
+    sys.stdout.write("\n")
 
 
 def _cache_retention(arguments: argparse.Namespace) -> int:
@@ -1020,6 +1037,74 @@ def _evaluation_dependency_lock(arguments: argparse.Namespace) -> int:
     except OSError:
         return _refuse("io_error", EXIT_IO)
     return _emit({"status": "written", "pinned": len(closure)})
+
+
+def _sweep_plan(arguments: argparse.Namespace) -> int:
+    """Emit the work list for one level and split, or refuse.
+
+    JSON Lines rather than one document: the driver streams it, and a sweep
+    that dies partway leaves the cases it already printed readable.
+
+    Nothing here is a default. `--level`, `--split` and `--expected` are all
+    required, because the three ways a sweep silently runs the wrong set are a
+    defaulted split, an inferred count, and a level that pools L1 into L2.
+    """
+    if arguments.level == SweepLevel.L2_ADV.value:
+        if arguments.group_dir is None:
+            return _refuse("sweep_group_dir_required", EXIT_USAGE)
+        try:
+            groups = select_groups(
+                AdversarialGroupStore(arguments.group_dir),
+                split=Split(arguments.split),
+                expected=arguments.expected,
+            )
+        except AdversarialRunError as error:
+            return _refuse(str(error).split(":")[0])
+        except (OSError, ValueError):
+            return _refuse("adversarial_groups_unreadable", EXIT_IO)
+        for case in plan_cases(groups):
+            _emit_line(
+                {
+                    "case_id": case.case_id,
+                    "group_id": case.group_id,
+                    "role": case.role.value,
+                    "question": case.claim,
+                    # A group spans documents by construction — document
+                    # attribution is one of the five distractor dimensions —
+                    # so no single authorized manifest follows from the record.
+                    # The driver requires --source-manifest explicitly here.
+                    "document_id": None,
+                    "expected_verdict": case.expected_verdict.value,
+                }
+            )
+        return 0
+
+    if arguments.annotation_dir is None:
+        return _refuse("sweep_annotation_dir_required", EXIT_USAGE)
+    try:
+        cases = select_cases(
+            AnnotationStore(arguments.annotation_dir),
+            level=SweepLevel(arguments.level),
+            split=Split(arguments.split),
+            expected=arguments.expected,
+            include_unanswerable=arguments.include_unanswerable,
+        )
+    except SweepSelectionError as error:
+        return _refuse(str(error).split(":")[0])
+    except (OSError, ValueError):
+        return _refuse("annotations_unreadable", EXIT_IO)
+    for item in cases:
+        _emit_line(
+            {
+                "case_id": item.case_id,
+                "group_id": None,
+                "role": None,
+                "question": item.question,
+                "document_id": item.document_id,
+                "expected_refusal": item.expected_refusal,
+            }
+        )
+    return 0
 
 
 def _evaluation_identities(arguments: argparse.Namespace) -> int:
@@ -4757,6 +4842,31 @@ def _parser() -> argparse.ArgumentParser:
     init_real.add_argument("--ready-dir", type=Path, required=True)
     init_real.add_argument("--qdrant-url", required=True)
     init_real.set_defaults(handler=_corpus_init_real)
+
+    # Its own group, deliberately not under `evaluation`. That namespace
+    # prepares and seals inputs and reads no locked set — a guard test asserts
+    # its subcommand list exactly, for the reason recorded there. `sweep plan`
+    # reads a locked split by design, so it belongs where that is visible.
+    sweep = commands.add_parser("sweep").add_subparsers(
+        dest="command", required=True
+    )
+    sweep_plan = sweep.add_parser("plan")
+    # Every one of these is required. §8.5 keeps the locked splits unread until
+    # W6, so a defaulted split is a locked run nobody asked for; an inferred
+    # count turns a filter bug into a silently shorter sweep.
+    sweep_plan.add_argument(
+        "--level", choices=[member.value for member in SweepLevel], required=True
+    )
+    sweep_plan.add_argument(
+        "--split", choices=[member.value for member in Split], required=True
+    )
+    sweep_plan.add_argument("--expected", type=int, required=True)
+    sweep_plan.add_argument("--annotation-dir", type=Path)
+    sweep_plan.add_argument("--group-dir", type=Path)
+    sweep_plan.add_argument(
+        "--include-unanswerable", action="store_true", default=False
+    )
+    sweep_plan.set_defaults(handler=_sweep_plan)
 
     retrieval = commands.add_parser("retrieval").add_subparsers(
         dest="command", required=True

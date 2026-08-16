@@ -117,6 +117,23 @@ checkout at a file that was never in it. Every override the script reads has a
 default naming the frozen corpus, and it refuses without a key or a question
 rather than spending budget on either mistake.
 
+One whole evaluation split, same posture:
+
+```bash
+export SPECPILOT_MAIN_API_KEY='...' && \
+  bash scripts/run_sweep.sh --level l2 --split locked --expected 12
+```
+
+`tmp/run_l1_dev.sh` and `tmp/run_l2_dev.sh` are superseded and should not be
+run. They were gitignored and untested, they hardcoded the dev split, they
+selected the annotation chain's *root* rather than its head, they computed a
+case count without checking it, and `run_l2_dev.sh` printed an unassigned
+`${CODE}` on its retry path — so under `set -u` the first transport retry killed
+the sweep instead of retrying. Selection now lives in
+`src/specpilot/evaluation/sweep.py` and `evaluation/adversarial_run.py`, behind
+`sweep plan`, which refuses a count that differs from `--expected`
+before anything reaches a provider.
+
 ## Invariants — breaking these is never a fix
 
 - **Fail closed.** Any unreadable state, ambiguous commit, cap violation or
