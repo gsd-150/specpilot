@@ -333,7 +333,7 @@ Report end-to-end false confirmations, false rejections, the matched-pair confus
 
 `n` stays at 25, 12, and 10 groups. Descriptive engineering evidence only — no "statistically significant", no strong causal wording.
 
-### Task 10: Cold-Cache Cost and Latency
+### Task 10: Cold-Cache Cost and Latency — DONE
 
 - [ ] **Step 1: Measure with the response cache cold**
 

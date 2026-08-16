@@ -1,11 +1,70 @@
 # SpecPilot
 
-SpecPilot is a safety-first foundation for specification intelligence.
+SpecPilot answers questions about HTTP specifications (RFC 9110 and 9112) and
+assesses whether a described design conforms to them, with every excerpt that
+leaves the machine passing through one egress gate that meters and records it.
+The design premise is that a specification assistant is only useful if you can
+tell when it is wrong, so the evaluation apparatus is the product as much as
+the answering chain is.
+
+Two things follow from that premise and shape the whole repository:
+
+- **The enforcer is the only path outward,** and it holds a lifetime budget per
+  source document — a data-minimization argument, made concrete as a cap that
+  refuses rather than warns.
+- **Every claim the system makes cites the exact bytes it was shown,** recorded
+  in a ledger that can be reconstructed from the corpus independently of what
+  the model says it used. When the two disagree, the disagreement is the
+  finding.
 
 **Working on this repository — start here:** [`AGENTS.md`](AGENTS.md) for how to
 run it and which invariants must not be broken, then the newest file in
 [`docs/handoff/`](docs/handoff/) for where things currently stand and what comes
 next.
+
+## What the locked evaluation found
+
+Full report:
+[`docs/reports/2026-08-16-w6-locked-evaluation.md`](docs/reports/2026-08-16-w6-locked-evaluation.md).
+Release evidence is tagged `w6-locked-evaluation-2026-08-16`, at the commit the
+gate actually ran on.
+
+The locked sets were executed once, against a frozen, author-confirmed run spec
+(`270f7957…`). What ran:
+
+| set | n | outcome |
+|---|---|---|
+| L1 | 25 | 21 answered, 4 refused; all 20 answerable items answered |
+| L2 | 12 | 11 verdicts; 1 refused by the egress quota before any bytes left |
+| L2-adv | 10 | **0 executed** — the quota gate refused the budget |
+
+Three results are worth more than an accuracy score, and the report leads with
+them rather than burying them:
+
+1. **A verified false confirmation.** On one L2 case the chain returned a
+   determinate "compliant" that its own verifier passed — while the two gold
+   clauses that decide the question were never retrieved. Three independent
+   measures point at it (key points 0/3, claim label insufficient, gold coverage
+   none), and the model's own rationale reads as sound. This is the case for
+   keeping an evidence ledger that does not depend on the model's account of
+   itself.
+2. **The development loop spent the measurement budget.** The per-document cap
+   is lifetime and unique-keyed, so every rehearsal that surfaced a new clause
+   permanently consumed budget the locked run later needed. RFC 9112 ended at
+   98.3% used, which is why L2-adv never ran. The caps were not raised and no
+   ledger was rebound: a gate verdict, not an omission.
+3. **Human review is load-bearing in one place and near pass-through in
+   another.** The annotation stores record 40 of 41 model proposals adopted with
+   no key point ever edited, against 5 of 16 adversarial groups rejected on
+   construction review. Both numbers are in the report; "human-reviewed" is not
+   a uniform guarantee across the item set.
+
+**Bounds that travel with every number above.** The sets are small (`n` = 25,
+12, 10 groups). Most gold and scenario proposals came from a model, reviewed by
+one person. The §8.4 audit labels were produced by that same model family, so
+they do not discharge an independent human audit and every agreement figure
+inherits the defect. None of these are unbiased performance estimates, and the
+report says so in its own body rather than in a footnote.
 
 ## Local development
 

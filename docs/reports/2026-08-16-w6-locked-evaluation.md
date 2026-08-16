@@ -262,6 +262,39 @@ evaluation labels.
 
 ## [AUTHOR] still to fill before release
 
+## Cost and latency, cold
+
+Measured rather than arranged: the local response cache is opt-in by argument
+and `scripts/run_sweep.sh` never passes one, so every figure below is a
+cold-cache figure by construction. There is no warm comparison to report,
+which is the honest form — a latency number taken warm describes the cache.
+
+| level | provider calls | request tokens | p50 | p95 |
+|---|---|---|---|---|
+| L1 locked | 24 | 18,674 | 5.54 s | 13.7 s |
+| L2 locked | 66 | 82,012 | 9.85 s | 85.2 s |
+
+L2 by stage, which is where the cost actually sits:
+
+| stage | calls | request tokens | p50 |
+|---|---|---|---|
+| planning | 13 | 46,666 | 48.9 s |
+| compliance | 11 | 10,306 | 16.0 s |
+| judge | 11 | 8,274 | 32.5 s |
+| verifier | 10 | 6,086 | 3.4 s |
+
+**Planning is 57% of L2's tokens and by far its slowest stage** — the planner
+reasons over the tool catalogue before its first call, which is why the main
+route carries a 300-second timeout rather than the 60 seconds the L1 payloads
+never approached. The verifier, the stage that exists to catch the errors, is
+the cheapest thing in the chain at 3.4 s and 7% of tokens. On this evidence the
+semantic gate is not where the budget goes, and case 004 shows it is also not
+where the errors stop.
+
+Wall clock ran roughly twice provider duration across the dev rehearsal, the
+difference being local BGE-M3 encoding, BM25 and the Qdrant round trip — work
+no provider budget covers and no cache would shorten.
+
 ## The release gate
 
 Run at `cbaad01` on the machine that holds the corpus. `HEAD` was recorded
