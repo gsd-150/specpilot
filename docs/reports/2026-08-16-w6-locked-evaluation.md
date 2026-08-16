@@ -228,9 +228,46 @@ reader of a largely model-authored evaluation needs.
 
 ## [AUTHOR] still to fill before release
 
-- [AUTHOR] `make w5-check` transcript at the release commit, and a CI run
-  green at that same commit. The last green CI is at `7650ebe`, the freeze
-  commit; the report commit has not been checked.
+## The release gate
+
+Run at `cbaad01` on the machine that holds the corpus. `HEAD` was recorded
+before and after and did not move; the tree was clean throughout.
+
+| target | result |
+|---|---|
+| ruff, mypy | clean |
+| unit | 1,872 passed |
+| CLI | 243 passed |
+| frontend | 153 passed across 5 files |
+| **full-service** | **2,454 passed, 0 skipped**, 58.47 s |
+| browser | 5 passed, 8.6 s |
+| packaged demo | `packaged_demo_gate=passed` |
+
+Transcript SHA-256
+`301c2419efe267c2a65efe0deb5acc8b30501828dac3b80dc7a75b39bf7d8c6d`, 3,365
+lines. Fresh scratch databases were created before the run and dropped after,
+because a reused migrated database hides a missing migration — that is not
+hypothetical here.
+
+CI at the same commit: run `31968097661`, all seven jobs green. What CI attests
+and what this machine attests remain different claims; `make w5-check` is
+structurally unsatisfiable in CI, for the reason the workflow header records.
+
+**It took three attempts, and the two refusals were both guards doing their
+job.** The first run reported 2,446 passed with 8 skipped and the zero-skip
+rule refused it: `tests/cli/test_l2_adv_registration.py` had skipped entirely
+because `manifests/` is gitignored and a worktree does not carry it, so the
+override that exists for exactly this case had to be set. Without that rule the
+run would have gone green while the eight tests covering adversarial
+registration — including the one that refuses a fabricated clause digest —
+never executed. The second run was refused by the browser fixture's DSN
+allowlist, which accepts two literal database names because it drops and
+re-migrates whatever it is given; the correct response was to use a sanctioned
+name rather than widen the allowlist.
+
+Against the W5 freeze point's 2,388 full-service tests, the release commit
+carries 2,454. The 66 additional tests are the W6 build: sweep selection,
+adversarial pair execution, the two comparison arms, and judge preparation.
 - [AUTHOR] The numbers for any résumé or demo use, with `n` and scope. Every
   headline in this report is bounded — L1 `n=25`, L2 `n=12` of which one was
   quota-refused, L2-adv `n=0`.
