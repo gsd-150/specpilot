@@ -125,6 +125,13 @@ rather than spending budget on either mistake.
 - **No source text in a committable record.** No clause prose, no full indexes,
   no quotations in anything git tracks. §8.1. This also happens to discharge an
   IETF TLP condition, so it is a licence rule now as well as a hygiene one.
+  `scripts/check_clause_prose.py` enforces it in `make lint` and in CI, because
+  remembering the rule was not enough: a hand grep run once, immediately before
+  the first push, found two tracked fixtures holding clause sentences. A
+  synthetic fixture that imitates a clause declares itself with a
+  `# synthetic-spec-text` comment — a fabricated RFC and a pasted one are
+  indistinguishable to any rule that reads the text, so the author states which
+  it is, next to the fixture.
 - **`policy_hash` covers the policy's *field names*** — it is
   `_canonical_hash(model_dump())`. Renaming a cap field invalidates every corpus
   ledger row bound to it, and there is currently no path to rebind one (open

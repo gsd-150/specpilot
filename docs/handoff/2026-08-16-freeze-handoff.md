@@ -27,8 +27,10 @@ mid-run and the evidence spanned two trees.
 `feat/w5-streaming-demo-freeze`, tag pushed. Before pushing, two tracked test
 fixtures were found holding RFC clause prose verbatim, which §8.1 forbids and
 which AGENTS.md notes is a licence condition under the IETF TLP. Both were
-replaced. **That check is not in CI**, and it should be: it was done by grepping
-tracked files for known clause sentences, by hand, once.
+replaced. That check was a hand grep run once; it is now
+`scripts/check_clause_prose.py`, in `make lint` and in CI's static job, and it
+was verified by running it at `a51913b^`, where it catches both of the
+violations that were found by hand.
 
 **CI, first run ever.** It found two defects a green local `make check` could
 not. `test_identities.py` pointed at `artifacts/restricted/`, which is
@@ -94,10 +96,6 @@ and `backups/specpilot-受限产物备份-冻结点d2998ff-2026-08-16/` (616 fil
 artifacts and the sixty annotated items are not reconstructible; the code is.
 Blocks nothing today, loses W6's starting point if the machine does.
 
-**The prose check is manual.** Nothing prevents the next clause sentence from
-entering a tracked file. Blocks nothing until it happens, and the repository is
-public now.
-
 **Author decisions outstanding for W6.** No locked set has been executed —
 L1 25, L2 12, L2-adv 10. The freeze binds the configuration; W6 is the first
 permitted execution and must not read locked output to tune anything.
@@ -109,11 +107,12 @@ overstates by one the cases whose reasoning stayed inside disclosed evidence.
 
 ## What CI does and does not attest
 
-Eight jobs, all green: frontend, lint and types, unit and CLI, ledger and
-collection integration with fixture smoke, compose config and image build,
-packaged policy resolution, browser flow.
+Seven jobs, all green: frontend, lint and types (including the §8.1 prose
+check), unit and CLI, ledger and collection integration with fixture smoke,
+compose config and image build, packaged policy resolution, browser flow.
 
-`make w5-check` is deliberately not among them. `full-service` fails on any
+`make w5-check` is deliberately not among them — the job was removed rather than
+weakened, and the workflow's header records why. `full-service` fails on any
 skipped test — the suite reports three different results that all say "passed",
 and a stale assertion once survived two commits inside that gap — and the tests
 CI must skip are the ones needing the frozen RFC renditions, which are
@@ -126,7 +125,8 @@ transcript, not by CI. The freeze point's run is in this document above.
 
 ## Recommended path
 
-1. Add the clause-prose check to CI, so §8.1 is enforced rather than remembered.
-   It is currently a manual grep that has been run exactly once.
-2. Decide whether the restricted store leaves this disk, and where to.
-3. Begin W6 from tag `evaluation-freeze-2026-08-16`, not from branch head.
+1. Decide whether the restricted store leaves this disk, and where to. It is the
+   only irreplaceable thing here and it exists twice on one drive.
+2. Begin W6 from tag `evaluation-freeze-2026-08-16`, not from branch head. The
+   head is now eight commits past the tag — all of them CI and §8.1 work that
+   post-dates the freeze, none of them binding on it.
