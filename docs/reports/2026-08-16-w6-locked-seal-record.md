@@ -23,14 +23,15 @@ Every number below was recomputed from the ledger, not quoted from memory.
   The driver change that makes a verdict-refusal a logged result instead of a
   batch abort is the same one that adds the --resume guard.
 
-## L2 locked — 10/12 executed, one blocked by the quota gate
+## L2 locked — 12 cases accounted: 11 outcomes with results, 1 refused by the quota gate
 
-- 10 outcomes, all with one prompt identity (eecc5d4c0b98) across the batch.
-- All 10 pre-verifier artifacts present and hash-verified; the gate-only pair
+- 11 outcomes with results, all with one prompt identity (eecc5d4c0b98)
+  across the batch; 012 carries the same identity after the resume pass.
+- All 11 pre-verifier artifacts present and hash-verified; the gate-only pair
   scorer over them reports no exclusions and no downgrades.
 - Verdict distribution: 001-003 violating, 004-007 compliant, 008 compliant +
-  insufficient pair, 009-010 insufficient. Unscored here — that is the judge's
-  and the author's downstream step.
+  insufficient pair, 009-010 insufficient, 012 insufficient. Unscored here —
+  that is the judge's and the author's downstream step.
 - **011 blocked at the compliance reservation by
   corpus_document_unique_bytes_exceeded.** The enforcer refuses before any
   reservation: the ledger shows only the planning reservation (succeeded) for
@@ -71,8 +72,9 @@ fit — measuring a subset selected by budget exhaustion, not by design.
 
 ## What this seal records, and what it does not
 
-It records that the locked default chain did not complete: L1 25/25, L2 11
-executed of 12 with one quota-refused, L2-adv 0/10. The blocking condition is the system's own data-minimization gate
+It records that the locked default chain did not complete: L1 25/25, L2 12
+accounted (11 outcomes with results, 1 empty outcome refused by the lifetime
+quota — its artifact exists with results: 0), L2-adv 0/10. The blocking condition is the system's own data-minimization gate
 working as designed against a quota that development activity had already
 consumed. The gate's integrity is the product's claim; the report will state
 this plainly rather than soften it. Raising the caps (option C) would
