@@ -107,9 +107,26 @@ permitted execution and must not read locked output to tune anything.
 L2 dev verdict accuracy has to carry it: 8/8 is a true verdict count and
 overstates by one the cases whose reasoning stayed inside disclosed evidence.
 
+## What CI does and does not attest
+
+Eight jobs, all green: frontend, lint and types, unit and CLI, ledger and
+collection integration with fixture smoke, compose config and image build,
+packaged policy resolution, browser flow.
+
+`make w5-check` is deliberately not among them. `full-service` fails on any
+skipped test — the suite reports three different results that all say "passed",
+and a stale assertion once survived two commits inside that gap — and the tests
+CI must skip are the ones needing the frozen RFC renditions, which are
+restricted and correctly absent from the repository. The gate is therefore
+unsatisfiable in CI by construction, and relaxing the zero-skip rule to make it
+green would remove the only thing that rule buys.
+
+So the packaged demo gate is attested by the author's machine and its recorded
+transcript, not by CI. The freeze point's run is in this document above.
+
 ## Recommended path
 
-1. Watch CI on the current head; it is the only signal that is not this machine.
-2. Add the clause-prose check to CI, so §8.1 is enforced rather than remembered.
-3. Decide whether the restricted store leaves this disk, and where to.
-4. Begin W6 from tag `evaluation-freeze-2026-08-16`, not from branch head.
+1. Add the clause-prose check to CI, so §8.1 is enforced rather than remembered.
+   It is currently a manual grep that has been run exactly once.
+2. Decide whether the restricted store leaves this disk, and where to.
+3. Begin W6 from tag `evaluation-freeze-2026-08-16`, not from branch head.
