@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -262,6 +263,13 @@ class HttpChatAdapter:
         except httpx.TimeoutException as error:
             raise ProviderError("provider_timeout") from error
         except httpx.HTTPError as error:
+            raise ProviderError("provider_unreachable") from error
+        except ssl.SSLError as error:
+            # A TLS fault mid-response is not wrapped by httpx, so it would
+            # otherwise fall through to the transport's unclassified bucket and
+            # abort a sweep that could retry it. It is the same family as an
+            # unreachable endpoint: purely transport-level, payload-independent,
+            # with the reservation already committed and accounted.
             raise ProviderError("provider_unreachable") from error
 
         if response.status_code >= 400:

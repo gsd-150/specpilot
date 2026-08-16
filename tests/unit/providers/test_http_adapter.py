@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 
 import httpx
 import pytest
@@ -221,6 +222,22 @@ async def test_a_timeout_is_named_rather_than_raised_raw() -> None:
         await adapter.send(l1_payload())
 
     assert caught.value.public_error_code == "provider_timeout"
+
+
+async def test_a_tls_fault_is_unreachable_not_unclassified() -> None:
+    """A mid-response TLS break is transport-level and retryable, not unknown.
+
+    httpx does not wrap ``ssl.SSLError`` into ``HTTPError``, so without the
+    explicit branch it fell through to the transport's unclassified bucket,
+    which aborts a sweep instead of retrying the case. This is the live fault
+    observed on 2026-08-16: DECRYPTION_FAILED_OR_BAD_RECORD_MAC mid-body.
+    """
+    adapter = adapter_returning(ssl.SSLError("decryption failed or bad record mac"))
+
+    with pytest.raises(ProviderError) as caught:
+        await adapter.send(l1_payload())
+
+    assert caught.value.public_error_code == "provider_unreachable"
 
 
 @pytest.mark.parametrize(
