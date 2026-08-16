@@ -164,10 +164,16 @@ The dev groups exist precisely so the locked ten are not the first thing this co
 git commit -m "feat: run a matched adversarial pair as one unit"
 ```
 
-### Task 3: Dress-Rehearse the Whole W6 Sweep on Dev
+### Task 3: Dress-Rehearse the Whole W6 Sweep on Dev — PARTLY DONE
+
+Everything not spending budget has run; see
+`docs/reports/2026-08-16-w6-dev-rehearsal.md`. Two driver defects found and
+fixed (worktree manifest resolution, a prompt-identity guard that passed
+against zero artifacts). Steps 1 and 2 are the live sweeps and belong to the
+author; the commands are in the report.
 
 **Files:**
-- Create: `docs/reports/2026-08-XX-w6-dev-rehearsal.md`
+- Create: `docs/reports/2026-08-16-w6-dev-rehearsal.md`
 
 **Interfaces:**
 - Consumes: the promoted drivers, the dev splits.
@@ -181,11 +187,11 @@ L1 dev 15 (12 answerable + 3 expected-refusal), L2 dev 8, L2-adv dev 6 groups = 
 
 Wall-clock per case, tokens per case, provider spend, retry rate, and the failure classes actually observed. The locked run is one-shot; going in without an expected duration means no way to tell a hung sweep from a slow one.
 
-- [ ] **Step 3: Verify the prompt identity is single across the batch**
+- [x] **Step 3: Verify the prompt identity is single across the batch**
 
 One `compliance_prompt_sha256` and one `verifier_prompt_sha256` for every artifact. A mixed batch is not a result, and the guard exists because a mid-sweep code change once produced one.
 
-- [ ] **Step 4: Confirm HEAD does not move during a sweep**
+- [x] **Step 4: Confirm HEAD does not move during a sweep**
 
 The W5 gate was voided once for this. Record `git rev-parse HEAD` before and after.
 

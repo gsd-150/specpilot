@@ -68,8 +68,22 @@ ROUTE="${SPECPILOT_ROUTE:-main}"
 # The secure directory walker opens each path component by dir_fd and refuses
 # `..`, so the manifest directories must be absolute.
 CORPUS="${SPECPILOT_CORPUS_MANIFEST:-1abafff704358c2357ead5b837d212f130cadfa330dfa30d1df0a24f76d74295}"
-CORPUS_DIR="${SPECPILOT_CORPUS_MANIFEST_DIR:-$(cd manifests/local/r0/corpus 2>/dev/null && pwd)}"
-SOURCE_DIR="${SPECPILOT_SOURCE_MANIFEST_DIR:-$(cd manifests/local/r0/source 2>/dev/null && pwd)}"
+
+# `manifests/` is gitignored, so a git worktree does not carry it and the store
+# stays in the main checkout. Resolved rather than assumed: this runs from the
+# freeze worktree, where the local path does not exist, and the first rehearsal
+# died right here. The freeze tree is unaffected either way — only the
+# manifests' content hashes enter the identity status, never their location.
+resolve_manifest_dir() {
+  local relative="$1" base found
+  for base in "." "$(git rev-parse --git-common-dir 2>/dev/null || echo .)/.."; do
+    found=$(cd "$base/$relative" 2>/dev/null && pwd) || continue
+    if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+  done
+  return 1
+}
+CORPUS_DIR="${SPECPILOT_CORPUS_MANIFEST_DIR:-$(resolve_manifest_dir manifests/local/r0/corpus)}"
+SOURCE_DIR="${SPECPILOT_SOURCE_MANIFEST_DIR:-$(resolve_manifest_dir manifests/local/r0/source)}"
 ANNOTATION_DIR="${SPECPILOT_ANNOTATION_DIR:-artifacts/restricted/annotations}"
 GROUP_DIR="${SPECPILOT_GROUP_DIR:-artifacts/restricted/l2-adv}"
 RFC9110="${SPECPILOT_RFC9110_MANIFEST:-af230fed7cf961ba9a099e39be4ae03a881ef7cd885b40fa84bc9ffa55e34691}"
@@ -231,17 +245,27 @@ done < <(printf '%s\n' "$PLAN")
 if [ "$LEVEL" != "l1" ]; then
   EXPECTED_HASH=$("$PYTHON" -c "from specpilot.cli import _l2_compliance_prompt_hash; print(_l2_compliance_prompt_hash())")
   MISMATCH=0
+  CHECKED=0
   for FILE in "$OUT_DIR"/*.json; do
     [ -f "$FILE" ] || continue
     RECORDED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('compliance_prompt_sha256',''))" "$FILE")
     [ -n "$RECORDED" ] || continue
+    CHECKED=$((CHECKED + 1))
     if [ "$RECORDED" != "$EXPECTED_HASH" ]; then
       echo "HASH MISMATCH $(basename "$FILE"): $RECORDED" >&2
       MISMATCH=1
     fi
   done
   [ "$MISMATCH" = "0" ] || { echo "batch prompt-identity mismatch; re-run the sweep" >&2; exit 1; }
-  echo "batch prompt identity verified: ${EXPECTED_HASH}"
+  # A guard with nothing to check reports success. The predecessor skipped every
+  # artifact lacking a prompt field and then printed "verified" — which on a
+  # directory holding no case outcomes is a pass earned by the absence of
+  # evidence. The count is the difference between checking and appearing to.
+  if [ "$CHECKED" -lt "$COUNT" ]; then
+    echo "prompt identity checked ${CHECKED} of ${COUNT} case outcome(s); the rest carry no prompt field" >&2
+    exit 1
+  fi
+  echo "batch prompt identity verified across ${CHECKED} outcome(s): ${EXPECTED_HASH}"
 fi
 
 # The W5 gate was voided once because a commit landed mid-run and the evidence
