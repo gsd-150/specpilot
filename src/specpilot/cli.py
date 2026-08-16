@@ -1556,6 +1556,56 @@ def _judge_prompt_by_version(version: str) -> JudgePrompt | None:
     return None
 
 
+def _judge_prepare(arguments: argparse.Namespace) -> int:
+    """Prepare judge payloads for one level, with the sweep's count check.
+
+    Provider-free: reads the annotation store, the author's answer files (L1)
+    or the L2 outcome artifacts, and the frozen renditions. The count assertion
+    is the point: a prepared batch that differs from --expected refuses with a
+    stable code and writes nothing, so a miscounted run cannot reach the judge
+    and read as a complete one.
+    """
+    from specpilot.judge.prepare import (
+        JudgePrepareError,
+        prepare_l1_payloads,
+        prepare_l2_payloads,
+    )
+
+    xmls = {"9110": arguments.xml9110, "9112": arguments.xml9112}
+    try:
+        if arguments.level == "l1":
+            if arguments.answers_dir is None:
+                return _refuse("judge_prepare_missing_answers_dir", EXIT_USAGE)
+            prepared = prepare_l1_payloads(
+                arguments.annotation_dir,
+                arguments.answers_dir,
+                arguments.out_dir,
+                xmls=xmls,
+                expected=arguments.expected,
+            )
+        else:
+            if arguments.outcomes_dir is None or arguments.answers_out is None:
+                return _refuse("judge_prepare_missing_l2_dirs", EXIT_USAGE)
+            prepared = prepare_l2_payloads(
+                arguments.annotation_dir,
+                arguments.outcomes_dir,
+                arguments.answers_out,
+                arguments.out_dir,
+                xmls=xmls,
+                expected=arguments.expected,
+            )
+    except JudgePrepareError as error:
+        return _refuse(error.code)
+    return _emit(
+        {
+            "status": "prepared",
+            "level": arguments.level,
+            "payload_count": len(prepared),
+            "prepared_item_ids": list(prepared),
+        }
+    )
+
+
 def _judge_score(arguments: argparse.Namespace) -> int:
     """Score one prepared judge payload through the ledger-backed gate.
 
@@ -5006,6 +5056,32 @@ def _parser() -> argparse.ArgumentParser:
     judge_score.add_argument("--run-id", required=True)
     judge_score.add_argument("--records-dir", type=Path, required=True)
     judge_score.set_defaults(handler=_judge_score)
+
+    judge_prepare = judge.add_parser("prepare")
+    judge_prepare.add_argument("--level", choices=["l1", "l2"], required=True)
+    judge_prepare.add_argument("--annotation-dir", type=Path, required=True)
+    judge_prepare.add_argument("--out-dir", type=Path, required=True)
+    judge_prepare.add_argument(
+        "--xml9110",
+        type=Path,
+        default=Path(
+            "artifacts/restricted/sources/ietf/rfc9110/rfc9110.xml"
+        ),
+    )
+    judge_prepare.add_argument(
+        "--xml9112",
+        type=Path,
+        default=Path(
+            "artifacts/restricted/sources/ietf/rfc9112/rfc9112.xml"
+        ),
+    )
+    # The count assertion, same discipline as the sweep: a prepared count that
+    # differs from the expected one refuses before anything is written.
+    judge_prepare.add_argument("--expected", type=int, required=True)
+    judge_prepare.add_argument("--answers-dir", type=Path)
+    judge_prepare.add_argument("--outcomes-dir", type=Path)
+    judge_prepare.add_argument("--answers-out", type=Path)
+    judge_prepare.set_defaults(handler=_judge_prepare)
 
     corpus = commands.add_parser("corpus").add_subparsers(
         dest="command", required=True
