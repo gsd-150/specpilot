@@ -3,10 +3,10 @@
 Purpose: find the defects in the W6 sweep path while they are still free. The
 locked run is one-shot and spends real budget; this one is neither.
 
-**Status: L1 done, L2 and L2-adv pending.** Everything not spending budget has
-run, and the author ran the live L1 dev sweep on 2026-08-16. The two remaining
-sweeps are prepared and belong to the author — AGENTS.md reserves real provider
-calls. The commands are at the end.
+**Status: all three dev sweeps run live and sealed.** L1 and L2 dev ran clean
+on 2026-08-16; the L2-adv dev sweep needed three attempts before a clean run
+(sealed at `0e695d8`). The rehearsal did what it exists to do: everything below
+was found on dev, where it costs nothing.
 
 ## Environment, checked 2026-08-16
 
@@ -173,50 +173,143 @@ Corroborating §8.5.2 A′ incidentally: three cases disclosed fewer than the fi
 allowed excerpts (two at three, one at four). Idle quota is exactly what the
 E-narrow/E-context arm was rewritten to measure.
 
-## Prepared but not run: the two remaining live dev sweeps
+## L2 dev, run live 2026-08-16
 
-Author-owned. The script resolves its own tree, so it works from any directory —
-no `cd`, no `PYTHONPATH`. L1 is done; these two remain.
+Eight cases, all completed, head `bed25c4`. One transport retry on
+`l2-dev-005` (`invalid_tool_plan`) — the retry path's first live exercise,
+which the predecessor script would have killed with its unassigned `${CODE}`.
 
-```bash
-export SPECPILOT_MAIN_API_KEY='...'
-```
+| | |
+|---|---|
+| cases | 8 |
+| wall clock | 9 min 36 s, ≈ 72 s per case |
+| attempts | 23 (planning + compliance + verifier, all `succeeded`) |
+| request tokens | 44,792 total |
+| prompt identity | `eecc5d4c0b98…` verified across 8 — the same identity the freeze handoff records for the canonical dev batch |
 
-```bash
-bash scripts/run_sweep.sh --level l2 --split dev --expected 8
-```
+Final verdicts: 001 violating, 002 compliant, 003 insufficient_evidence, 004
+violating, 005 compliant, 006 violating, 007 compliant, 008
+insufficient_evidence. Citations present in 6 of 8; the two insufficient cases
+carry empty evidence lists, which is what the closed contract requires.
+Scoring this batch against gold is a judge step and is not done here.
 
-The adversarial level needs an authorization named explicitly: a group spans
-documents by construction — document attribution is one of the five distractor
-dimensions — so no single authorized manifest follows from the record.
+## L2-adv dev — three attempts, one sealed run
 
-```bash
-bash scripts/run_sweep.sh --level l2-adv --split dev --expected 6 --source-manifest <id>
-```
+### Attempt 1 — aborted by the author (`c42813e7…`, RFC 9110 authorization)
 
-## What to record while they run, and why
+Five cases completed before the author stopped the run. Its value: measured the
+cross-document question this report carried as open. Under a single-document
+authorization the L2 chain disclosed evidence from the *other* document —
+reservations all `succeeded`, nothing refused. **The enforcer does not refuse
+cross-document evidence on the L2 path**; the authorization gates the route
+binding, not the evidence's document. The open question is answered: the
+`--source-manifest` choice is a ledger bookkeeping decision, not an evidence
+gate.
 
-The locked run is one-shot. Going into it without an expected duration means
-having no way to tell a hung sweep from a slow one.
+### Attempt 2 — killed by an unclassified TLS fault (`b74abd04…`)
 
-- wall clock per case, per level;
-- provider spend for the 35, which scales to an estimate for the 57;
-- retry rate and the failure classes actually seen — the retry path has now been
-  exercised against a stub but never against a real provider;
-- whether one prompt identity held across each batch;
-- `git rev-parse HEAD` unchanged, which the driver now asserts itself.
+Hard abort at `adv-dev-003-pos`: planning succeeded after 61 s, then the
+compliance send failed in 980 ms as `provider_unclassified_error` — the
+transport's bucket for exceptions outside `ProviderError`. The sweep driver
+deliberately does not retry that class, so the batch died.
+
+Diagnosis: a probe with the author's real key reproduced it, and a temporary
+local stderr traceback showed the raw fault:
+
+    ssl.SSLError: DECRYPTION_FAILED_OR_BAD_RECORD_MAC
+
+mid-response-body, in the TLS stream read. Two facts made this a finding rather
+than a mystery: the same deterministic planning bytes succeeded at 17:36 and
+failed at 18:02, and a control case (`adv-dev-001-pos`) completed between two
+failures — so the path was healthy and the fault is an intermittent transport
+break, not a payload or provider-contract defect. Fail-closed held throughout:
+every failure recorded `failed_known` with zero tokens measured, no budget
+leaked.
+
+(One probe in the series failed with `provider_unauthorized` first: the copied
+command contained the literal placeholder key `...`. Operator error, zero cost,
+disclosed here because Task 6 Step 4 will demand the same honesty.)
+
+**The classification gap was real and is now fixed.** `ssl.SSLError` is not
+wrapped by httpx into `HTTPError`, so it missed `provider_unreachable` and fell
+into the unclassified bucket the driver refuses to retry. Commit `0e695d8` maps
+it beside `httpx.HTTPError` to `provider_unreachable` — transport-level,
+payload-independent, retryable — with a regression test driving an
+`ssl.SSLError` through the MockTransport. 1850 unit tests green.
+
+### Attempt 3 — sealed (`b74abd04…`, head `0e695d8`)
+
+Twelve invocations, all completed, no retries, one prompt identity
+(`eecc5d4c0b98…`) across 12, `HEAD` unchanged. The attempt in between — which
+completed 12/12 at `bed25c4` — was voided by the driver's own HEAD assertion:
+the fix commit landed mid-sweep and the batch spanned two trees. Same lesson as
+the W5 gate: **no commit may land while a sweep runs.**
+
+| | |
+|---|---|
+| cases | 12 (6 groups × neg/pos) |
+| wall clock | 23 min 46 s, ≈ 119 s per case |
+| attempts | 37, all `succeeded` |
+| request tokens | 62,730 total |
+
+Final verdicts after the semantic verifier, against the group design
+(negative → `insufficient_evidence`, positive → determinate):
+
+| case | expected | final | note |
+|---|---|---|---|
+| 001-neg | insufficient | violating (verified) | false confirmation |
+| 001-pos | compliant | compliant | ✓ |
+| 002-neg | insufficient | insufficient | ✓ — the gate downgraded a determinate proposal |
+| 002-pos | compliant | compliant | ✓ |
+| 003-neg | insufficient | insufficient | ✓ |
+| 003-pos | violating | insufficient | planner retrieved from the wrong document |
+| 004-neg | insufficient | insufficient | ✓ |
+| 004-pos | violating | violating | ✓ |
+| 005-neg | insufficient | compliant (verified) | false confirmation |
+| 005-pos | violating | insufficient | the gate downgraded a correct determinate verdict |
+| 006-neg | insufficient | compliant (verified ×2) | false confirmation |
+| 006-pos | violating | compliant + violating (both verified) | contradictory pair survived |
+
+Two of six groups (002, 004) behaved exactly as designed. The rest are findings,
+not accidents:
+
+- **`001-neg` is a stable false confirmation** — the same `violating` in every
+  run. The shown evidence settles the claim, so the negative side is decidable
+  by construction. This is a group-construction defect, not a system defect.
+- **`003-pos` is a stable retrieval miss** — the claim is an RFC 9110 rule and
+  the planner keeps retrieving RFC 9112 clauses. Same family as `l2-dev-008`.
+- **Verdicts drift across runs at temperature 0.** `002-neg` ran violating →
+  insufficient → compliant across the three live runs; `005-neg` insufficient →
+  compliant. Per-run raw counts must be reported separately; no run may be
+  averaged into another.
+- **`005-pos` is a false rejection by the semantic gate** — a correct
+  determinate verdict was downgraded to insufficient. The gate's
+  precision/recall on the adversarial set is itself a measured quantity now.
+- **`006-pos` let a verified `compliant` and a verified `violating` survive
+  side by side** — the multi-candidate aggregation admits contradiction.
+
+None of these were tuned. Dev rehearsal exists to surface them; the locked run
+will carry whatever the frozen configuration produces, and the W6 report must
+state every one of the five bullets above beside its numbers.
+
+### Extrapolation to locked (author's decision, not a commitment)
+
+Dev 32 measured invocations ≈ 35 minutes wall (108 s + 9 min 36 s + 23 min 46 s)
+and ≈ 116,448 request tokens across the three sealed batches. The locked 57 with
+refusals is the same shape at 1.6× the count; the SSL classification fix removes
+one whole class of batch abort.
 
 ## Open, and carried into Task 6 preflight
-
-**Which authorization covers an L2 run.** `l2 run` takes one
-`--source-manifest`, and the dev driver chose it from the item's `document_id`.
-The L2 chain retrieves by BM25 over the **pooled** corpus, so a case authorized
-under RFC 9110 can rank an RFC 9112 clause. Whether the enforcer refuses that or
-permits it is not established here, and it is not a question to discover during
-the locked run. It applies to the L2 main set as much as to L2-adv.
 
 **Three frozen identities do not describe the freeze commit.** Recorded in the
 W6 plan. `provider_sha256`, `scripts_sha256` and `sets_sha256` disagree with the
 tree at `d2998ff`; `prompts_sha256`, `policy_sha256`, `config_sha256` and
-`scoring_sha256` match. The remedy — re-freeze before Task 6, or run and
-disclose — is the author's and is not settled by this rehearsal.
+`scoring_sha256` match. `provider_sha256` moved again with `0e695d8`. The
+remedy — re-freeze before Task 6, or run and disclose — is the author's and is
+not settled by this rehearsal.
+
+**The adversarial set needs §8.4 adjudication before the locked run.** The five
+findings above distinguish group-construction defects (001-neg) from system
+defects (003-pos retrieval, 005-pos gate, 006-pos aggregation), and only a
+human read against the frozen source can make that call official. They do not
+block the locked run — they are what the report will have to say about it.
