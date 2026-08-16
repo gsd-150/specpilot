@@ -299,6 +299,91 @@ def test_l2_prepare_writes_payload_and_rendered_answer(
     assert rendered["answer"] == payload["final_answer"]
 
 
+def test_l2_prepare_skips_a_refused_outcome_and_the_count_shows_it(
+    tmp_path: Path,
+    synthetic_xml: Path,
+    gold_clause_ids: tuple[str, ...],
+) -> None:
+    store = AnnotationStore(tmp_path / "annotations")
+    store.create(_l2_annotation("l2-dev-001", gold_clause_ids))
+    store.create(_l2_annotation("l2-dev-002", gold_clause_ids))
+    outcomes = tmp_path / "outcomes"
+    outcomes.mkdir()
+    # 001 answered; 002 refused with an empty-candidate capture.
+    (outcomes / "l2-dev-001.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "l2-outcome/v1",
+                "case_id": "l2-dev-001",
+                "design_description": "d",
+                "candidates": [
+                    {
+                        "claim_id": "c" * 64,
+                        "claim": "claim",
+                        "proposed_verdict": "compliant",
+                        "evidence_ids": ["e" * 64],
+                        "rationale": "r",
+                    }
+                ],
+                "results": [],
+                "evidence": [],
+                "search_scopes": [],
+                "compliance_prompt_sha256": "f" * 64,
+                "verifier_prompt_sha256": "f" * 64,
+                "provider_error": None,
+                "parse_fault": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outcomes / "l2-dev-002.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "l2-outcome/v1",
+                "case_id": "l2-dev-002",
+                "design_description": "d",
+                "candidates": [],
+                "results": [],
+                "evidence": [],
+                "search_scopes": [],
+                "compliance_prompt_sha256": "f" * 64,
+                "verifier_prompt_sha256": "f" * 64,
+                "provider_error": None,
+                "parse_fault": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "l2-payloads"
+
+    code = main(
+        [
+            "judge",
+            "prepare",
+            "--level",
+            "l2",
+            "--annotation-dir",
+            str(tmp_path / "annotations"),
+            "--outcomes-dir",
+            str(outcomes),
+            "--answers-out",
+            str(tmp_path / "l2-answers"),
+            "--out-dir",
+            str(out),
+            "--xml9110",
+            str(synthetic_xml),
+            "--xml9112",
+            str(synthetic_xml),
+            "--expected",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert (out / "l2-dev-001.json").exists()
+    assert not (out / "l2-dev-002.json").exists()
+
+
 def test_l2_prepare_refuses_an_outcome_with_the_wrong_schema(
     tmp_path: Path,
     synthetic_xml: Path,

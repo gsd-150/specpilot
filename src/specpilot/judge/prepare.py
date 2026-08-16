@@ -251,10 +251,12 @@ def prepare_l2_payloads(
                 "outcome_schema_mismatch",
                 f"{item_id}: outcome schema is not {L2_OUTCOME_SCHEMA}",
             )
-        if not outcome.get("candidates") and outcome.get("provider_error") is None:
-            raise JudgePrepareError(
-                "outcome_empty", f"{item_id}: outcome has no candidates"
-            )
+        if not outcome.get("candidates"):
+            # A refused, blocked, or provider-failed case writes an outcome with
+            # no candidates. There is nothing of the system's to score, exactly
+            # like a refusal with no answer file -- the count assertion makes
+            # the skip visible instead of silently absorbing it.
+            continue
         if not annotation.key_points:
             raise JudgePrepareError(
                 "missing_gold_key_points", f"{item_id}: case has no gold key points"
