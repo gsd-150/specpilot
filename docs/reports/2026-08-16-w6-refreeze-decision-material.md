@@ -76,9 +76,21 @@ which belongs in the bias disclosure rather than in the configuration identity.
 They are not alternatives: naming all four is strictly more informative than
 either, and the field is an unordered digest of strings, so it costs nothing.
 
-Recommended: `--model-id deepseek-v4-flash --model-id glm-5.2 --model-id bge-m3
---model-id claude-opus-5`, with the roles written into the confirmation note —
-because the digest preserves the names and loses the roles.
+**DECIDED by the author, 2026-08-16: all four.**
+
+```
+--model-id deepseek-v4-flash   # main chain, the system under test
+--model-id glm-5.2             # judge, scoring route judge_calibrated
+--model-id bge-m3              # encoder; weights hashed separately
+--model-id claude-opus-5       # drafter; proposed 49 of the 61 gold sets
+--python-version 3.12.11
+```
+
+The roles belong in the confirmation note, because the digest preserves the
+names and loses the roles. Recording the drafter alongside the runtime models
+is also what makes the bias disclosure checkable rather than asserted: a reader
+can see from the spec itself that the model which proposed most of the gold is
+not the model being measured, and is not the model scoring it.
 
 then freeze-candidate / freeze-confirm as the W5 runbook describes, at a clean
 tree, with no sweep running. Nothing locked has executed, so no first-run
