@@ -164,13 +164,13 @@ The dev groups exist precisely so the locked ten are not the first thing this co
 git commit -m "feat: run a matched adversarial pair as one unit"
 ```
 
-### Task 3: Dress-Rehearse the Whole W6 Sweep on Dev — PARTLY DONE
+### Task 3: Dress-Rehearse the Whole W6 Sweep on Dev — DONE
 
-Everything not spending budget has run; see
-`docs/reports/2026-08-16-w6-dev-rehearsal.md`. Two driver defects found and
-fixed (worktree manifest resolution, a prompt-identity guard that passed
-against zero artifacts). Steps 1 and 2 are the live sweeps and belong to the
-author; the commands are in the report.
+All three live dev sweeps run — L1 12, L2 8, L2-adv 6 groups. Four driver
+defects found and fixed before any locked call (worktree manifest resolution,
+a prompt-identity guard that passed against zero artifacts, an interpreter that
+would have run the main checkout's code, a refusal that created a directory
+under `locked/`). See `docs/reports/2026-08-16-w6-dev-rehearsal.md`.
 
 **Files:**
 - Create: `docs/reports/2026-08-16-w6-dev-rehearsal.md`
@@ -195,7 +195,7 @@ One `compliance_prompt_sha256` and one `verifier_prompt_sha256` for every artifa
 
 The W5 gate was voided once for this. Record `git rev-parse HEAD` before and after.
 
-### Task 4: Implement Core Comparison A′ — Evidence Budget Allocation
+### Task 4: Implement Core Comparison A′ — Evidence Budget Allocation — DONE (`ee579a0`)
 
 **Files:**
 - Create: `src/specpilot/retrieval/expansion.py`
@@ -224,7 +224,7 @@ Report how many dev items `E-context` actually expands. If that number is small,
 git commit -m "feat: add the E-context evidence budget arm"
 ```
 
-### Task 5: Implement Core Comparison B — Verifier Gate-Only
+### Task 5: Implement Core Comparison B — Verifier Gate-Only — DONE (`711559d`)
 
 **Files:**
 - Create: `src/specpilot/verifier/gate_only.py`
