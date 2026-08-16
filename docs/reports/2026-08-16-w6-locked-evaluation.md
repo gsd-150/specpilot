@@ -2,8 +2,13 @@
 
 Status: DRAFT. Every number below was read back from the ledger, the
 artifacts, or the audit stores on 2026-08-16. Placeholders the author must
-fill are marked [AUTHOR]. This document is not the release until the author
-signs it.
+fill are marked [AUTHOR].
+
+There is no signature line. The configuration is attested where it can be
+checked — the run spec's author-confirmed `confirmation` block — and the
+author's own contribution is recorded as a list of specific acts rather than
+as an endorsement. A reader should trust the parts of this report that name
+what was done and by whom, and discount the rest accordingly.
 
 ## The first sentence the report owes its reader
 
@@ -46,10 +51,20 @@ it is a release blocker under section 8.6, not an embarrassment to soften.
   requires the client to associate responses by order sent. The governing
   clause was not among the disclosed evidence. This is the locked run's
   most serious finding.
-- Gold disclosure: 7 of 11 gold sets fully disclosed. The four undisclosed
-  sets are 004 (verdict wrong), 009, 010, 012 (verdicts right, but the
-  rationales rest on evidence that never left the machine — the
-  l2-dev-003 family, measured again on the locked set).
+- Gold disclosure, recomputed per case and recorded in each worksheet's
+  `evidence.gold_coverage`: **5 full, 3 partial, 3 none**. The method matters
+  because a first pass got it wrong: `clause_id` and `content_hash` are
+  different identifier spaces, and comparing them directly returns "none" for
+  every case — a uniform result that was itself the tell. The mapping is
+  `gold clause_id -> sha256(unit.text) -> disclosed content_hash`.
+  - **none**: 004 (verdict wrong), 009, 010 — verdicts right, rationales
+    resting on evidence that never left the machine, the l2-dev-003 family
+    measured again on the locked set.
+  - **partial**: 002 and 008, where the withheld gold restates a norm the
+    disclosed clause already carries (002) or covers the client branch of a
+    proxy scenario (008) — the governing clause reached the model in both, so
+    both read as well-founded; 012, where the withheld non-origin-role gold is
+    the rule the rationale calls absent.
 
 ### L2-adv locked — execution refused by the quota gate
 
@@ -62,10 +77,15 @@ selected by budget exhaustion. A gate verdict, not an omission.
 
 ## The quota account, exactly
 
-| document | lifetime unique bytes cap | used | remaining |
-|---|---|---|---|
-| ietf-rfc-9110 | 76,113 | 70,216 | 5,897 |
-| ietf-rfc-9112 | 16,069 | 15,801 | 268 |
+| document | lifetime unique bytes cap | used | remaining | excerpts |
+|---|---|---|---|---|
+| ietf-rfc-9110 | 76,113 | 71,968 (94.6%) | 4,145 | 237 / 314 |
+| ietf-rfc-9112 | 16,069 | 15,801 (98.3%) | 268 | 44 / 70 |
+
+Read back from `egress_corpus_ledger` at the release commit; the 9110 figure
+moved after the first draft because scoring and audit work disclosed further
+clauses. Any statement of remaining budget is true only as of its timestamp,
+which is the point of the lesson below.
 
 The caps are the one-fifth figures the section 3.2 authorization rests on;
 raising them would invalidate that recorded decision (it would have to be
@@ -127,10 +147,90 @@ the report says so in the same breath as each result.
   its own: the semantic gate verified the 004 false confirmation instead of
   catching it. The comparison itself remains unexecuted.
 
+## The L2-adv dimension distribution
+
+The plan requires this stated rather than left to a field. The ten locked
+groups distribute across the five distractor dimensions as:
+
+| dimension | locked groups |
+|---|---|
+| `normative_strength` | 6 |
+| `document_attribution` | 4 |
+| `role_attribution` | 0 |
+| `request_vs_response` | 0 |
+| `received_vs_generated` | 0 |
+
+Ten groups, ten distinct families. **The locked set covers two of five
+dimensions.** The three thin dimensions live entirely in the six dev groups,
+so ADR 0002's caution — that at `n=10` three dimensions hold two items or
+fewer and per-dimension results are not reportable — understates it here:
+in the locked set those three are empty and cannot be mentioned at all.
+
+The skew is the corpus showing through the construction rule rather than a
+sampling convenience. A group needs a real near-miss: a clause that appears
+to support the negative claim and does not. RFC 9110 and 9112 partition
+semantics from syntax and restate related obligations at different normative
+strengths, which manufactures such near-misses in quantity; HTTP core states
+the request/response asymmetry inside the clause carrying the obligation, so
+a scenario flipping it is obviously wrong rather than a near miss, and an
+obviously wrong negative tests nothing. Flattening the distribution would
+have meant inventing near-misses the corpus does not contain.
+
+Since the locked adversarial set never executed, this describes construction
+only. There are no results to stratify.
+
+## The re-freeze
+
+Taken before the locked run, at the commit that executed it.
+
+| | |
+|---|---|
+| run spec | `270f79570551d6be68f122b7ebd035c508baf953b827de259e3e618b28b7a5ac` |
+| git commit | `7650ebe` |
+| confirmed by | `chunxue` |
+| scoring route | `judge_calibrated` |
+
+Two inputs were decided rather than inherited. `models_sha256` now binds all
+four models — `deepseek-v4-flash` (main chain), `glm-5.2` (judge), `bge-m3`
+(encoder), `claude-opus-5` (drafter of 49 of 61 gold sets) — where the
+previous spec bound the drafter alone and so did not describe the run.
+`--python-version 3.12.11` was recovered by search over 336 candidates after
+an earlier attempt concluded the field was unreproducible; the new spec's
+`environment_sha256` is byte-identical to the old one, which confirms the
+recovery independently and makes the field rehashable by any reader.
+
+## What the author did personally
+
+This section replaces a signature line. A signature on a solo project attests
+nothing a reader can check, and the configuration already carries a real
+attestation — the run spec's `confirmation` block, author-confirmed and
+machine-verifiable. What no other record carries is which judgements in this
+report are the author's rather than the model's, and that is the one thing a
+reader of a largely model-authored evaluation needs.
+
+- Reviewed the sixteen drafted L2-adv groups clause by clause and **rejected
+  five** — dev-004 on a User-Agent MUST, dev-005 and dev-006 in §6.2,
+  locked-005 in §9.3, locked-006 on soft wording — each rejection requiring
+  the adjacent clauses to have been read. A 31% rejection rate on
+  model-drafted adversarial items is the strongest available evidence that
+  the human review layer is real.
+- Corrected the model's account of which excerpts case 002 was shown, from
+  the artifacts rather than from its summary.
+- Designed the audit ordering that makes `agreed_with_draft` meaningful:
+  judge from the answer and criteria first, open the drafts only afterwards.
+  Without that ordering the adoption rate measures nothing.
+- Decided the re-freeze, the four-model tuple, and the refusal to raise or
+  rebind the caps when the quota blocked the remaining work.
+
+- [AUTHOR] Anything else above that the author verified personally and wants
+  on the record — the list is the point, so it should be complete rather than
+  flattering.
+
 ## [AUTHOR] still to fill before release
 
-- [AUTHOR] The L2-adv dimension skew statement (the plan requires it and
-  why it reads as evidence the corpus was read).
-- [AUTHOR] The re-freeze decision and, if taken, the confirmed run spec id.
-- [AUTHOR] make w5-check transcript at the release commit; CI green.
-- [AUTHOR] The numbers for any résumé/demo use, with n and scope.
+- [AUTHOR] `make w5-check` transcript at the release commit, and a CI run
+  green at that same commit. The last green CI is at `7650ebe`, the freeze
+  commit; the report commit has not been checked.
+- [AUTHOR] The numbers for any résumé or demo use, with `n` and scope. Every
+  headline in this report is bounded — L1 `n=25`, L2 `n=12` of which one was
+  quota-refused, L2-adv `n=0`.
