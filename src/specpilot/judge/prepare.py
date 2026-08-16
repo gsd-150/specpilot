@@ -92,8 +92,14 @@ def _roots(
             continue
         if getattr(record, "schema_version", None) != schema:
             continue
-        if record.split is not split or record.expected_refusal:
+        if record.split is not split:
             continue
+        # An expected-refusal item normally has no answer file and is skipped
+        # by absence. If it WAS answered (a false trigger), the answer is an
+        # output the judge must score: the report's false-trigger metric needs
+        # the judge's verdict on those key points, not just the fact of the
+        # answer. Selection is therefore driven by answer/outcome presence,
+        # never by the refusal expectation.
         roots[record.item_id] = record
     return roots
 
