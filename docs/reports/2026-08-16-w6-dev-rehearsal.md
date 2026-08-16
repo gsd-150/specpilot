@@ -3,10 +3,10 @@
 Purpose: find the defects in the W6 sweep path while they are still free. The
 locked run is one-shot and spends real budget; this one is neither.
 
-**Status: partly complete.** Everything that does not spend budget has run and
-is recorded below. The three live dev sweeps are prepared and belong to the
-author — AGENTS.md reserves real provider calls, and the plan's own constraints
-repeat it. The commands are at the end.
+**Status: L1 done, L2 and L2-adv pending.** Everything not spending budget has
+run, and the author ran the live L1 dev sweep on 2026-08-16. The two remaining
+sweeps are prepared and belong to the author — AGENTS.md reserves real provider
+calls. The commands are at the end.
 
 ## Environment, checked 2026-08-16
 
@@ -111,18 +111,75 @@ Recorded here rather than omitted because Task 6 Step 4 requires operator events
 to be disclosed, and a discipline that only starts at the locked run is not a
 discipline.
 
-## Prepared but not run: the three live dev sweeps
+## L1 dev, run live 2026-08-16
 
-Author-owned. Run them in one session with the key exported. The script resolves
-its own tree, so it works from any directory — no `cd`, no `PYTHONPATH`. Expect
-roughly 35 provider round trips.
+Twelve answerable cases, twelve provider calls, twelve `succeeded` attempts in
+the ledger. Nothing was cached — the response cache is opt-in by argument and no
+argument was passed.
+
+**Item coverage is identical to the superseded driver's batch**: the same eight
+answered and the same four refused, with the same reason. That was Task 1 Step
+5's acceptance condition and it is met. Four of the eight answers are byte-
+identical to the earlier run and four differ, so the chain is substantially but
+not fully reproducible; a first sample of two happened to be identical and read
+as determinism, which it is not.
+
+### Cost and latency, measured
+
+| | |
+|---|---|
+| cases | 12 |
+| wall clock | 108 s, ≈ 9.0 s per case |
+| provider duration | p50 4.28 s, p95 6.07 s, range 3.39–6.08 s |
+| request tokens | avg 744, range 577–883, total 8,926 |
+| request bytes | avg ≈ 2,830, range 2,138–3,342 |
+
+Wall clock is roughly twice provider duration: about 5 s per case is local work —
+BGE-M3 encoding, BM25, and the Qdrant round trip — which no provider budget
+covers and no cache would shorten.
+
+**Extrapolation to locked L1 only**: 25 cases at 9.0 s ≈ 3.8 minutes and ≈ 18,600
+request tokens. L2 and L2-adv are multi-stage chains and cannot be extrapolated
+from a single-call level; their dev sweeps have to supply their own figures.
+
+### The four refusals split two and two, and the split is the finding
+
+All four cases were annotated answerable, so a refusal is a miss. Asking the
+ledger what actually left the machine — not what the model said about it —
+separates them cleanly:
+
+| item | verdict | gold clauses | disclosed | gold shown |
+|---|---|---|---|---|
+| l1-dev-002 | refused | 1 | 3 | **no** |
+| l1-dev-010 | refused | 2 | 5 | partial |
+| l1-dev-011 | refused | 1 | 5 | yes |
+| l1-dev-016 | refused | 1 | 5 | yes |
+| the other 8 | answered | 1 each | 3–5 | yes, all |
+
+Two are retrieval failures: the system never saw the clause it needed, and
+`evidence_insufficient` is the correct verdict on the evidence it had.
+
+Two are judgement failures: the gold clause was disclosed and the system still
+reported insufficient evidence. Those are false refusals, and they are the ones
+worth attention — retrieval can be improved without touching the frozen chain,
+a false refusal cannot.
+
+So on L1 dev: gold fully disclosed in 10 of 12, and given gold, answered 8 of
+10. Both figures belong in any statement of L1 behaviour, because quoting the
+8/12 answer rate alone attributes a retrieval miss to the model and a model
+miss to retrieval.
+
+Corroborating §8.5.2 A′ incidentally: three cases disclosed fewer than the five
+allowed excerpts (two at three, one at four). Idle quota is exactly what the
+E-narrow/E-context arm was rewritten to measure.
+
+## Prepared but not run: the two remaining live dev sweeps
+
+Author-owned. The script resolves its own tree, so it works from any directory —
+no `cd`, no `PYTHONPATH`. L1 is done; these two remain.
 
 ```bash
 export SPECPILOT_MAIN_API_KEY='...'
-```
-
-```bash
-bash scripts/run_sweep.sh --level l1 --split dev --expected 12
 ```
 
 ```bash
