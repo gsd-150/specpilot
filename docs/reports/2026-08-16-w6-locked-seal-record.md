@@ -37,9 +37,13 @@ Every number below was recomputed from the ledger, not quoted from memory.
   the case, zero spend on the block, and the two clauses its evidence step had
   selected (both RFC 9112, both never disclosed before) are exactly what the
   remaining quota cannot admit.
-- **012 was not run** because the sweep aborted at 011. 012 is bound to RFC
-  9110, which still has quota, so it is not itself blocked — it is a
-  not-executed case whose execution is an author decision, not a gate verdict.
+- **012 completed on the resume pass** (driver with the first-run guard and
+  --resume, head bf50828). Two transport retries first — provider_unreachable
+  once at compliance and once at planning, both classified as retryable by the
+  TLS fix and retried; the third attempt ran the full chain. Disclosed as an
+  operator event, not absorbed. Final verdict insufficient_evidence, unscored
+  here. The batch prompt identity held across all 12 artifacts including the
+  resumed one.
 
 ## The quota accounting, exactly
 
@@ -47,7 +51,7 @@ Current head epoch of the corpus ledger (policy 1dc8c5f2, the frozen policy):
 
 | document | lifetime unique bytes cap | used | remaining |
 |---|---|---|---|
-| ietf-rfc-9110 | 76,113 | 69,137 | 6,976 |
+| ietf-rfc-9110 | 76,113 | 70,216 | 5,897 |
 | ietf-rfc-9112 | 16,069 | 15,801 | **268** |
 
 The caps are the one-fifth figures the section 3.2 authorization rests on.
@@ -67,8 +71,8 @@ fit — measuring a subset selected by budget exhaustion, not by design.
 
 ## What this seal records, and what it does not
 
-It records that the locked default chain did not complete: L1 25/25, L2 10/12,
-L2-adv 0/10. The blocking condition is the system's own data-minimization gate
+It records that the locked default chain did not complete: L1 25/25, L2 11
+executed of 12 with one quota-refused, L2-adv 0/10. The blocking condition is the system's own data-minimization gate
 working as designed against a quota that development activity had already
 consumed. The gate's integrity is the product's claim; the report will state
 this plainly rather than soften it. Raising the caps (option C) would
