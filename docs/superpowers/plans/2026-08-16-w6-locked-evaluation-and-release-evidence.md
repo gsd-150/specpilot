@@ -26,6 +26,44 @@ The roadmap gives W6 three bullets: first-run the locked sets, run the two paire
 
 Executing locked before closing 1–4 means hand-driving 57 live invocations through unreviewed scripts against a one-shot boundary. That is the single largest avoidable risk in this milestone.
 
+## Found while doing Task 1: three frozen identities do not describe the freeze commit
+
+`evaluation freeze-candidate` reads `evaluation-identities.json` through
+`_read_pinned_file`, which is careful about the wrong thing. It proves the file
+is a bounded regular file whose identity did not change *during the read* — and
+never checks that its contents describe the current tree. The identity status
+was generated at 00:55 on 2026-08-16 and never regenerated; the freeze ran at
+06:47 and pinned it as written.
+
+Recomputed against the tree at `d2998ff`, three of the twelve fields disagree
+with the frozen run spec:
+
+| field | covers | why it is stale |
+|---|---|---|
+| `provider_sha256` | `src/specpilot/providers` | five commits between 03:51 and 06:14 — every L2 wire-contract repair, instance 7 included |
+| `scripts_sha256` | `evaluation`, `agents`, `runs` | stale independently of this plan's Task 1; recomputed with the two new files excluded, it still disagrees |
+| `sets_sha256` | annotation and group stores | one annotation record written at 01:02 |
+
+`prompts_sha256`, `policy_sha256`, `config_sha256`, `scoring_sha256` all match.
+
+**What this does and does not mean.** The L2 compliance and verifier instruction
+text lives in `providers/http.py`, which `_PROMPT_PATHS` does not cover and
+`_PROVIDER_PATHS` does — so the stale field is the one carrying the instructions
+those seven repairs rewrote. The independent protection held: every L2 outcome
+artifact records `compliance_prompt_sha256` at run time, and the sweep verifies
+one prompt identity across a batch. What is lost is the freeze's own claim, that
+the run spec names the configuration W6 is approved to execute.
+
+**Recommended remedy, author's call.** Regenerate the identity status and
+re-freeze at the head of Task 5, before Task 6 runs. Nothing locked has
+executed, so no first-run boundary is at stake, and a freeze taken at the
+commit that will actually run is worth more than a freeze taken earlier and
+explained afterwards. The alternative — run under the existing spec and disclose
+the three fields — leaves a report that has to explain a mismatch forever.
+
+Either way `freeze-candidate` should refuse an identity status that does not
+match the tree it is freezing. Reading a stale file carefully is not a check.
+
 ## Global Constraints
 
 - **The locked default chain runs first, once.** No comparison arm, no re-run, and no reading of locked output happens before that sweep completes and its artifacts are sealed. Everything else in W6 is downstream of that ordering.
@@ -41,7 +79,7 @@ Executing locked before closing 1–4 means hand-driving 57 live invocations thr
 
 ---
 
-### Task 1: Promote the Batch Drivers into the Repository
+### Task 1: Promote the Batch Drivers into the Repository — DONE (`567fa17`)
 
 **Files:**
 - Create: `src/specpilot/evaluation/sweep.py`
@@ -55,23 +93,23 @@ Executing locked before closing 1–4 means hand-driving 57 live invocations thr
 - Consumes: `AnnotationStore`, `AdversarialGroupStore`, a split, a level.
 - Produces: a deterministic, counted, split-labelled work list, and one artifact per case.
 
-- [ ] **Step 1: Write the failing selection tests**
+- [x] **Step 1: Write the failing selection tests**
 
 Assert, against synthetic stores: selection by `(level, split)` returns exactly the expected item ids; retired items and superseded records are excluded; an expected-refusal L1 item is included only under an explicit flag; a selection whose size differs from a caller-supplied `expected` refuses with `sweep_count_mismatch` rather than returning a short list; a selection of zero refuses.
 
 The count assertion is the point. `tmp/run_l1_dev.sh` computes `COUNT`, prints it, and never checks it.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.venv/bin/python -m pytest tests/unit/evaluation/test_sweep.py -q`
 
 Expected: FAIL, `specpilot.evaluation.sweep` does not exist.
 
-- [ ] **Step 3: Implement selection**
+- [x] **Step 3: Implement selection**
 
 `select_cases(store, *, level, split, expected, include_unanswerable=False)` returning an ordered tuple of case descriptors. Sorted by `item_id` so two invocations produce the same order and the ledger's roots stay comparable. No default for `split` — §8.5 keeps the locked splits unread until W6, and a split that can be omitted is one that gets omitted.
 
-- [ ] **Step 4: Write the shell driver, fixing both live defects**
+- [x] **Step 4: Write the shell driver, fixing both live defects**
 
 `scripts/run_sweep.sh` supersedes `tmp/run_l1_dev.sh` and `tmp/run_l2_dev.sh`. Carry over what those got right — a fresh evaluation root per case, retries only on transport-class failures, the batch prompt-identity coherence guard, refusals logged rather than written as answers — and fix what they got wrong:
 
@@ -79,7 +117,7 @@ Expected: FAIL, `specpilot.evaluation.sweep` does not exist.
 - pass `--expected N` through to selection so a miscounted sweep refuses before the first call;
 - take `--split` and `--level` as required arguments, echoed into the run log.
 
-- [ ] **Step 5: Verify against the dev split, then commit**
+- [x] **Step 5: Verify against the dev split, then commit**
 
 Re-run the L1 dev sweep through the new driver and diff the artifact set against the existing `artifacts/restricted/judge/answers`. Identical item coverage is the acceptance condition; answers themselves will differ and that is expected of a live route.
 
@@ -90,7 +128,7 @@ git add src/specpilot/evaluation/sweep.py scripts/run_sweep.sh tests AGENTS.md s
 git commit -m "feat: run an evaluation split from the repository, not from tmp"
 ```
 
-### Task 2: Execute an Adversarial Group
+### Task 2: Execute an Adversarial Group — DONE (`567fa17`)
 
 **Files:**
 - Create: `src/specpilot/evaluation/adversarial_run.py`
@@ -102,23 +140,23 @@ git commit -m "feat: run an evaluation split from the repository, not from tmp"
 - Consumes: an `AdversarialGroup`, the frozen L2 chain.
 - Produces: two outcomes per group, joined by `group_id`, plus a pair-level result.
 
-- [ ] **Step 1: Decide and record what a group run means**
+- [x] **Step 1: Decide and record what a group run means**
 
 A group is one independent unit and two invocations. The negative claim must reach `insufficient_evidence`; the positive claim must reach `proposed_verdict`. The pair result is `both`, `negative_only`, `positive_only`, or `neither` — reported as a matched-pair confusion matrix, never as 20 independent items (§8.5.4).
 
 Each claim gets its own `evaluation_root_id`: a root is one question (§3.2), and the ledger refuses a second question under a reused root.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Assert: a group produces exactly two outcomes with distinct roots and distinct run ids; the two outcomes are joinable by `group_id`; a group whose negative claim returns a determinate verdict is recorded as a false confirmation rather than an error; a missing outcome refuses the pair rather than scoring the half that ran.
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
 Expected: FAIL, no adversarial execution path.
 
-- [ ] **Step 4: Implement, and wire `--level l2-adv` into the sweep driver**
+- [x] **Step 4: Implement, and wire `--level l2-adv` into the sweep driver**
 
-- [ ] **Step 5: Rehearse on the six dev groups**
+- [x] **Step 5: Rehearse on the six dev groups**
 
 The dev groups exist precisely so the locked ten are not the first thing this code ever runs. Any defect found here is free; the same defect found on locked costs the first-run boundary.
 
