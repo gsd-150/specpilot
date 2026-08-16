@@ -4,7 +4,7 @@ Verified facts of the locked default chain's execution, read back from the
 artifacts and the ledger. No scoring here: this is the seal, not the report.
 Every number below was recomputed from the ledger, not quoted from memory.
 
-## L1 locked — 25/25 executed
+## L1 locked — 25/25 executed, across two passes
 
 - 21 answer files, 4 refusals recorded.
 - All 20 answerable items were answered; **l1-locked-023 (expected refusal)
@@ -15,6 +15,13 @@ Every number below was recomputed from the ledger, not quoted from memory.
   belonging to a different document than the authorized manifest. It refused
   (fail-closed held) but not with the reason its gold predicts, so the refusal
   metrics for the locked set are 3 designed refusals and 1 by-different-gate.
+- **The sweep did not run 001-025 in one pass.** The ledger timeline shows
+  the sweep's consecutive roots through 023, then nothing for 024 — its
+  refusal fired before any reservation, so it left no ledger row and, under
+  the driver then in place, aborted the batch. **025 ran 16 minutes later as
+  a separate manual invocation** (operator event; disclosed here, not hidden).
+  The driver change that makes a verdict-refusal a logged result instead of a
+  batch abort is the same one that adds the --resume guard.
 
 ## L2 locked — 10/12 executed, one blocked by the quota gate
 
