@@ -313,6 +313,36 @@ def test_l2_run_happy_path_writes_a_valid_outcome_artifact(
     assert artifact["parse_fault"] is None
     assert CLAUSE_MARKER not in outcome_path.read_text(encoding="utf-8")
 
+    pre_verifier_path = out_dir / "l2-dev-001.pre-verifier.json"
+    assert pre_verifier_path.exists()
+    assert stat.S_IMODE(os.stat(pre_verifier_path).st_mode) == 0o600
+    pre_verifier = json.loads(pre_verifier_path.read_text(encoding="utf-8"))
+    assert pre_verifier["schema_version"] == "l2-pre-verifier/v1"
+    assert pre_verifier["case_id"] == "l2-dev-001"
+    assert len(pre_verifier["candidates"]) == 1
+    assert pre_verifier["candidates"][0]["deterministic_passed"] is True
+    assert pre_verifier["candidates"][0]["proposed_verdict"] == "compliant"
+    # The hash covers the proposal: rereading the file and rehashing the
+    # candidate block must reproduce the recorded identity.
+    from specpilot.verifier.gate_only import (
+        PreVerifierCandidate,
+        pre_verifier_artifact_hash,
+    )
+
+    candidate = pre_verifier["candidates"][0]
+    assert pre_verifier_artifact_hash(
+        [
+            PreVerifierCandidate(
+                claim_id=candidate["claim_id"],
+                claim=candidate["claim"],
+                proposed_verdict=candidate["proposed_verdict"],
+                evidence_ids=tuple(candidate["evidence_ids"]),
+                rationale=candidate["rationale"],
+            )
+        ]
+    ) == pre_verifier["artifact_hash"]
+    assert CLAUSE_MARKER not in pre_verifier_path.read_text(encoding="utf-8")
+
 
 def test_l2_run_missing_credential_refuses(
     tmp_path: Path,

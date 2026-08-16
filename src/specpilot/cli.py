@@ -3338,6 +3338,51 @@ async def _l2_run_async(arguments: argparse.Namespace) -> int:
     except ValueError:
         return _refuse("invalid_l2_outcome")
 
+    if outcome.compliance is not None:
+        # The pre-verifier capture for comparison B (§8.5.3): the candidates
+        # exactly as they stood after the local identity checks and before the
+        # semantic gate, hashed, beside the outcome both arms are scored from.
+        from specpilot.verifier.gate_only import (
+            PreVerifierCandidate,
+            build_pre_verifier_artifact,
+            write_pre_verifier_artifact,
+        )
+
+        pre_verifier = build_pre_verifier_artifact(
+            arguments.case_id,
+            tuple(
+                PreVerifierCandidate(
+                    claim_id=item.claim_id,
+                    claim=item.candidate.claim,
+                    proposed_verdict=item.candidate.proposed_verdict.value,
+                    evidence_ids=tuple(item.candidate.evidence_ids),
+                    rationale=item.candidate.rationale,
+                )
+                for item in outcome.compliance.candidates
+            ),
+            tuple(
+                (
+                    claim_id,
+                    deterministic.passed,
+                    ",".join(
+                        check.fault.value
+                        for check in deterministic.checks
+                        if check.fault is not None
+                    )
+                    or None,
+                )
+                for claim_id, deterministic in outcome.deterministic_outcomes
+            ),
+        )
+        try:
+            write_pre_verifier_artifact(
+                arguments.out_dir, arguments.case_id, pre_verifier
+            )
+        except OSError:
+            return _refuse("outcome_not_written", EXIT_IO)
+        except ValueError:
+            return _refuse("invalid_pre_verifier_case_id")
+
     verdicts = [result["verdict"] for result in artifact["results"]]
     if (
         outcome.egress_error is None
