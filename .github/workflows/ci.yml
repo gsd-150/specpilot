@@ -61,6 +61,10 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check .
       - run: python -m mypy src
+      # §8.1 was enforced by remembering it until the first push, when a manual
+      # grep found two tracked fixtures holding clause sentences. The repository
+      # is public and the rule is also an IETF TLP condition, so it runs here.
+      - run: python scripts/check_clause_prose.py
 
   unit:
     name: unit and CLI tests

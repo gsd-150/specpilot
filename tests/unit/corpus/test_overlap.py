@@ -94,11 +94,11 @@ def test_an_item_with_no_gold_clause_has_no_overlap_figure() -> None:
         question_gold_jaccard("alpha beta", ())
 
 
-# Synthetic, not quoted. It carries the vocabulary these ratios were calibrated
-# against — field names are identifiers, not prose — but the sentence is written
-# here rather than taken from the specification. §8.1 keeps clause prose out of
-# anything git tracks, which is a licence condition as well as a hygiene rule,
-# and a fixture is tracked like everything else.
+# synthetic-spec-text: written here rather than taken from the specification.
+# It carries the vocabulary these ratios were calibrated against — field names
+# are identifiers, not prose. §8.1 keeps clause prose out of anything git
+# tracks, which is a licence condition as well as a hygiene rule, and a fixture
+# is tracked like everything else.
 CLAUSE = (
     "Where an intermediary is forwarding a message, it MUST first remove the "
     "received Content-Length field, then process the Transfer-Encoding, and "

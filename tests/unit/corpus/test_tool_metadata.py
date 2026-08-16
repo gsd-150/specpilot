@@ -20,6 +20,7 @@ from tests.helpers import rfc_factory
 
 CORPUS_ID = "a" * 64
 
+# synthetic-spec-text: a fabricated RFC 9999, not a quotation.
 TOOL_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Tools</title><date month="08" year="2026"/></front>

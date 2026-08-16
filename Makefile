@@ -35,6 +35,7 @@ integration-db: require-dsn
 
 lint:
 	$(SPECPILOT_PYTHON) -m ruff check .
+	$(SPECPILOT_PYTHON) scripts/check_clause_prose.py
 
 typecheck:
 	$(SPECPILOT_PYTHON) -m mypy src

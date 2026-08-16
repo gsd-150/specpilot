@@ -34,6 +34,7 @@ SAFE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+# synthetic-spec-text: a fabricated RFC 9999, not a quotation.
 NORMATIVE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Normative</title><date month="08" year="2026"/></front>
@@ -55,6 +56,7 @@ NORMATIVE_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+# synthetic-spec-text: a fabricated RFC 9999, not a quotation.
 UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Unwrapped</title><date month="08" year="2026"/></front>
@@ -76,6 +78,7 @@ UNWRAPPED_PROSE_XML = """<?xml version='1.0' encoding='utf-8'?>
 </rfc>
 """
 
+# synthetic-spec-text: a fabricated RFC 9999, not a quotation.
 QA_RFC_XML = """<?xml version='1.0' encoding='utf-8'?>
 <rfc number="9999" version="3">
   <front><title>Quality</title><date month="08" year="2026"/></front>
