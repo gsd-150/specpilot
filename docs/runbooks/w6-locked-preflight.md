@@ -50,6 +50,9 @@ groups / 20). Everything on this list is cheap or free; the run itself is not.
 - [ ] Judge payloads: specpilot judge prepare --level l1/l2 --expected <answered count>
       (9253ffa; count assertion refuses a short batch)
 - [ ] Author's judge-blind audit (section 8.4), then judge scoring
+      (bash tmp/run_judge_locked.sh; judge route = chatanywhere/glm-5.2 — if it
+      fails provider_unreachable while curl to the same host returns 401, it is
+      the macOS system proxy: run with NO_PROXY=api.chatanywhere.tech)
 - [ ] Comparison A': specpilot comparison e-context (ee579a0; dev validation
       already measured 12/12 expansion, 0 identical)
 - [ ] Comparison B: gate-only scorer over the persisted pre-verifier artifacts

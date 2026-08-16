@@ -188,6 +188,17 @@ before anything reaches a provider.
   `psql -d specpilot_live -x -c "SELECT evaluation_root_id, jsonb_pretty(usage_snapshot) FROM egress_evaluation_root;"`
 - `policy_snapshot_mismatch` → the caps changed under a corpus that already has
   recorded usage. Correct behaviour, and currently a dead end (Task 11).
+- `provider_unreachable` on the judge route (chatanywhere) while
+  `curl https://api.chatanywhere.tech/v1/models` returns 401 → **the macOS
+  system proxy**. httpx reads the system proxy through
+  `urllib.request.getproxies()`; curl does not. A VPN/ClashX/Surge "system
+  proxy" that cannot reach the provider fails every Python request while curl
+  looks healthy. Diagnose with
+  `python3 -c "import urllib.request; print(urllib.request.getproxies())"`,
+  and run with `NO_PROXY=api.chatanywhere.tech` (or `NO_PROXY='*'` for a
+  provider-only script). The same proxy is suspect in the deepseek SSL
+  mid-body fault of 2026-08-16 — treat every provider transport fault on this
+  machine as proxy-suspect until disproven.
 
 ## Testing, the way this project has been bitten
 
