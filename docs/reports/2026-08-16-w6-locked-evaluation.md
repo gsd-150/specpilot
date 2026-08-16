@@ -222,9 +222,43 @@ reader of a largely model-authored evaluation needs.
 - Decided the re-freeze, the four-model tuple, and the refusal to raise or
   rebind the caps when the quota blocked the remaining work.
 
-- [AUTHOR] Anything else above that the author verified personally and wants
-  on the record — the list is the point, so it should be complete rather than
-  flattering.
+### What the annotation stores record, including the part that is not flattering
+
+The four items above are drawn from this session. The annotation stores hold a
+longer and more mixed record, and it belongs here because a section about human
+review that reports only its successes is the endorsement this section exists
+to replace.
+
+| record | count |
+|---|---|
+| review decisions, all `reviewer_id: chunxue` | 41 |
+| of which adopted the model's proposal (`chose_proposal`) | **40** |
+| of which rejected it | 1 |
+| reviews that edited a key point (`key_points_edited`) | **0** |
+| items marked unanswerable during review | 8 |
+| deep reviews, all `gold_complete` | 13 |
+| clauses examined across them | 135, over 1,187 seconds |
+| items retired | 1 |
+
+**The adoption rate in annotation review is 40 of 41, and no key point was ever
+edited.** Against that, the L2-adv construction review rejected 5 of 16 groups.
+Both numbers are real and they describe different passes: accepting a proposed
+gold clause for an item, versus attacking a constructed adversarial pair to see
+whether its negative is genuinely unsupported.
+
+The pattern is the finding. Human review in this project is load-bearing where
+the reviewer is looking for a specific failure — a negative claim that a
+neighbouring MUST quietly supports — and close to pass-through where the task
+is to confirm a proposal that looks right. A reader should weight the two
+accordingly, and should not read "human-reviewed" as a uniform guarantee across
+the 61 items.
+
+This also bounds what the §8.4 numbers above can mean. The labels there were
+produced by the same model that drafted most of the gold; the annotation review
+that was supposed to be the independent check adopted 40 of 41 proposals. The
+one layer in this project that has demonstrably overturned model output at rate
+is adversarial construction review, and that layer never touched the locked
+evaluation labels.
 
 ## [AUTHOR] still to fill before release
 
