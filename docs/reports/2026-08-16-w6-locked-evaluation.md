@@ -51,12 +51,14 @@ it is a release blocker under section 8.6, not an embarrassment to soften.
   rationales rest on evidence that never left the machine — the
   l2-dev-003 family, measured again on the locked set).
 
-### L2-adv locked — not executed
+### L2-adv locked — execution refused by the quota gate
 
-0 of 10 groups. The groups span documents by construction and RFC 9112 has
-268 lifetime bytes left; any new 9112 disclosure is impossible. The partial
-option was rejected because it would spend irreplaceable quota to shrink n
-into whatever happens to fit — a subset selected by budget exhaustion.
+0 of 10 groups, and not because they were skipped: the gate refused the
+budget that would let them run. The groups span documents by construction
+and RFC 9112 has 268 lifetime bytes left; any new 9112 disclosure is
+impossible. The partial option was rejected because it would spend
+irreplaceable quota to shrink n into whatever happens to fit — a subset
+selected by budget exhaustion. A gate verdict, not an omission.
 
 ## The quota account, exactly
 
@@ -109,15 +111,21 @@ of the gold they audit, and every agreement number below inherits that.
 
 ## The comparison arms
 
+Both core comparisons are quota-blocked on the locked side — a gate verdict,
+not a schedule decision. What exists is build work and offline previews, and
+the report says so in the same breath as each result.
+
 - A' (E-context): built and dev-validated (12/12 dev items expand, 0 emit
-  byte-identical payloads). The locked-side live runs are impossible: they
-  would disclose new clauses against a spent budget. Reported as built
-  only.
-- B (gate-only): the off arm is computed from the 11 persisted
-  pre-verifier artifacts, no provider, no quota; on the locked L2 set every
-  pair is "same" — the gate changed nothing there, which is itself the
-  finding: the one determinate error the gate should have caught (004) it
-  verified instead.
+  byte-identical payloads). The locked-side live runs are refused by the
+  spent budget before they can start: they would disclose new clauses.
+- B (gate-only): the locked three-paired-run comparison did not execute —
+  the live ON arm would spend quota the gate has refused, and for L2-adv
+  there is nothing to pair with, because that set never ran. What exists is
+  an offline preview of the OFF arm over the 11 persisted pre-verifier
+  artifacts (free, no provider): every pair computes to "same" — the gate
+  changed nothing there. The preview's one determinate finding stands on
+  its own: the semantic gate verified the 004 false confirmation instead of
+  catching it. The comparison itself remains unexecuted.
 
 ## [AUTHOR] still to fill before release
 

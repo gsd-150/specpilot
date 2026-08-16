@@ -61,14 +61,15 @@ dev sweeps, the seven-round L2 diagnosis, the rehearsal, tonight's locked L1
 and L2. The quota is lifetime-unique: re-sending a clause already disclosed is
 free, and every clause disclosed for the first time is a permanent charge.
 
-## L2-adv locked — not executed
+## L2-adv locked — execution refused by the quota gate
 
 The adversarial groups span documents by construction. RFC 9112 has 268 bytes
 of lifetime quota left, which admits zero new 9112 clauses; the dev rehearsal
 measured exactly how much 9112 evidence these groups draw on. Running the set
 now would either refuse on the first 9112 disclosure or, in the partial form
 (option B), spend the remaining 9110 quota to shrink n to whatever happens to
-fit — measuring a subset selected by budget exhaustion, not by design.
+fit — measuring a subset selected by budget exhaustion, not by design. A gate
+verdict, not an omission.
 
 ## Judge scoring — 32/32 completed, one mid-run commit disclosed
 
@@ -107,7 +108,10 @@ l1-locked-023 false trigger.
 
 It records that the locked default chain did not complete: L1 25/25, L2 12
 accounted (11 outcomes with results, 1 empty outcome refused by the lifetime
-quota — its artifact exists with results: 0), L2-adv 0/10. The blocking condition is the system's own data-minimization gate
+quota — its artifact exists with results: 0), L2-adv 0/10 with execution
+refused by the quota gate. The core comparisons A' and B on the locked side
+are quota-blocked the same way: B's live paired runs never executed; only its
+offline OFF-arm preview exists. The blocking condition is the system's own data-minimization gate
 working as designed against a quota that development activity had already
 consumed. The gate's integrity is the product's claim; the report will state
 this plainly rather than soften it. Raising the caps (option C) would
