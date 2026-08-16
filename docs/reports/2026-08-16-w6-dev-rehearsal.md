@@ -61,7 +61,30 @@ Both failure modes are now covered by a stub run rather than an argument:
 | one artifact from a different prompt generation | mismatch, exit 1 | unchanged |
 | all artifacts coherent | `verified` | `verified across 12`, exit 0 |
 
-**3. All three levels run end to end under a stub provider.**
+**3. The driver would have run the wrong tree's code.** The same defect family
+as finding 1, and the most serious of the three. A git worktree carries no
+`.venv`; the environment lives in the main checkout as an editable install. So
+an unqualified `import specpilot` from that interpreter resolves to the **main
+checkout's** source — currently commit `7858002`, from before W5 began. Every
+superseded driver in `tmp/` set `PYTHONPATH="$PWD/src"` by hand for exactly this
+reason and the replacement did not.
+
+The script now resolves its own repository root from `${BASH_SOURCE[0]}`, changes
+into it, resolves the interpreter, exports `PYTHONPATH`, and then **asserts**
+that the interpreter's `specpilot` lives under that root, refusing otherwise.
+Verified by invoking it from an unrelated directory with no `cd` and no
+`PYTHONPATH`: it resolved the tree, loaded the weights, retrieved five clauses
+and reached the provider. There is no `cd` to remember.
+
+**4. A refused invocation created a directory under `locked/`.** The output
+directory was made before arguments were validated, and the default path carries
+the split — so `--split locked` with a missing `--source-manifest` left
+`artifacts/restricted/locked/l2-adv/` behind, in the namespace that must stay
+empty until W6 executes. The directory is now created only after every check and
+the plan have passed. Both refusal paths verified to leave the filesystem
+untouched.
+
+**5. All three levels run end to end under a stub provider.**
 
 - `l1` — 10 answered wrote one artifact each; 2 refusals went to `refusals.log`
   and wrote no answer file, which is what keeps the judge scoring answered cases
@@ -73,10 +96,26 @@ Both failure modes are now covered by a stub run rather than an argument:
   attempt completed. The predecessor died here with `CODE: unbound variable`.
 - `HEAD` compared before and after; a sweep spanning two trees fails.
 
+## One operator event, disclosed
+
+Verifying finding 3 meant invoking the real path with a placeholder key. It
+reached the provider and was rejected, and the fail-closed design behaved
+exactly as designed: one `egress_reservation` row for root
+`case-1786869178-l1-dev-002`, recorded `state = failed_known`, no attempt
+consumed, and `egress_corpus_ledger_head` still reading its previous
+`updated_at` of 2026-08-15 23:47 — so **no cap budget was drawn and no money
+was spent**. No answer artifact was written. Two empty directories it created
+were removed, restoring the prior state.
+
+Recorded here rather than omitted because Task 6 Step 4 requires operator events
+to be disclosed, and a discipline that only starts at the locked run is not a
+discipline.
+
 ## Prepared but not run: the three live dev sweeps
 
-Author-owned. Run them in one session, from this worktree, with the key
-exported. Expect roughly 35 provider round trips.
+Author-owned. Run them in one session with the key exported. The script resolves
+its own tree, so it works from any directory — no `cd`, no `PYTHONPATH`. Expect
+roughly 35 provider round trips.
 
 ```bash
 export SPECPILOT_MAIN_API_KEY='...'

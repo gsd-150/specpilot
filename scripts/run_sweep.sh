@@ -23,13 +23,20 @@
 #   PostgreSQL specpilot_live migrated
 #   export SPECPILOT_MAIN_API_KEY='...'
 #
-# Usage:
+# Usage (from anywhere — the script resolves its own tree):
 #   bash scripts/run_sweep.sh --level l1 --split dev --expected 12
 #   bash scripts/run_sweep.sh --level l1 --split locked --expected 25 \
 #       --include-unanswerable
 #   bash scripts/run_sweep.sh --level l2-adv --split locked --expected 10 \
 #       --source-manifest <id>
 set -u
+
+# Everything below is relative to the tree this script lives in, not to wherever
+# it was invoked from. The restricted artifacts, the model weights and the
+# renditions are all worktree-local, so a sweep run from the wrong directory
+# either fails on a path or — worse — succeeds against the wrong tree.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT" || { echo "cannot enter $REPO_ROOT" >&2; exit 3; }
 
 LEVEL=""
 SPLIT=""
@@ -57,7 +64,31 @@ done
 [ -n "$EXPECTED" ] || { echo "usage: --expected N" >&2; exit 4; }
 : "${SPECPILOT_MAIN_API_KEY:?set SPECPILOT_MAIN_API_KEY first}"
 
-PYTHON="${SPECPILOT_PYTHON:-.venv/bin/python}"
+# A git worktree carries no `.venv` — the environment lives in the main
+# checkout, installed there as an editable package. That has one consequence
+# worth stating plainly: an unqualified `import specpilot` from that interpreter
+# resolves to the *main checkout's* source, which is a different commit
+# entirely. Every superseded driver in `tmp/` set PYTHONPATH by hand for this
+# reason and the first version of this script did not.
+if [ -n "${SPECPILOT_PYTHON:-}" ]; then
+  PYTHON="$SPECPILOT_PYTHON"
+elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+  COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)"
+  PYTHON="$(cd "$COMMON_DIR/.." 2>/dev/null && pwd)/.venv/bin/python"
+fi
+[ -x "$PYTHON" ] || { echo "no interpreter at $PYTHON" >&2; exit 3; }
+export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# Assert it rather than trust it. Running the wrong tree's code is the failure
+# this project keeps finding in other forms — a value present in the source and
+# absent from what actually ran.
+IMPORTED=$("$PYTHON" -c 'import specpilot, pathlib; print(pathlib.Path(specpilot.__file__).resolve().parent)')
+if [ "$IMPORTED" != "$REPO_ROOT/src/specpilot" ]; then
+  echo "interpreter would run $IMPORTED, not $REPO_ROOT/src/specpilot" >&2
+  exit 3
+fi
 QDRANT="${SPECPILOT_QDRANT_URL:-http://localhost:6333}"
 LEDGER="${SPECPILOT_LEDGER_DSN:-postgresql:///specpilot_live}"
 MODEL_DIR="${SPECPILOT_MODEL_DIR:-data/cache/models/bge-m3}"
@@ -99,7 +130,10 @@ AUTHORIZED_9112="${SPECPILOT_AUTHORIZED_9112:-b74abd04e5887a44995a58e0895a6de34b
 if [ -z "$OUT_DIR" ]; then
   OUT_DIR="artifacts/restricted/${SPLIT}/${LEVEL}"
 fi
-mkdir -p "$OUT_DIR" && chmod 700 "$OUT_DIR"
+# Created after every check passes, not before. An earlier version made the
+# directory first, so a refused invocation still left one behind — and because
+# the default path carries the split, a refused `--split locked` created a
+# directory under the namespace that must stay empty until W6 executes.
 
 # A group spans documents by construction — document attribution is one of the
 # five distractor dimensions — so no single authorization follows from the
@@ -124,6 +158,8 @@ PLAN=$("$PYTHON" -m specpilot.cli "${PLAN_ARGS[@]}") || {
   exit 2
 }
 COUNT=$(printf '%s\n' "$PLAN" | sed '/^$/d' | wc -l | tr -d ' ')
+
+mkdir -p "$OUT_DIR" && chmod 700 "$OUT_DIR"
 
 HEAD_BEFORE=$(git rev-parse HEAD)
 echo "sweep  level=${LEVEL} split=${SPLIT} cases=${COUNT} out=${OUT_DIR}"

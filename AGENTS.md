@@ -117,12 +117,19 @@ checkout at a file that was never in it. Every override the script reads has a
 default naming the frozen corpus, and it refuses without a key or a question
 rather than spending budget on either mistake.
 
-One whole evaluation split, same posture:
+One whole evaluation split, same posture. It resolves its own repository root,
+interpreter and `PYTHONPATH`, so it runs from any directory:
 
 ```bash
 export SPECPILOT_MAIN_API_KEY='...' && \
   bash scripts/run_sweep.sh --level l2 --split locked --expected 12
 ```
+
+That self-resolution is not convenience. A git worktree carries no `.venv`, and
+the main checkout's editable install means an unqualified `import specpilot`
+from that interpreter resolves to **the main checkout's source, at a different
+commit**. The script asserts which tree it is about to run and refuses if it is
+the wrong one.
 
 `tmp/run_l1_dev.sh` and `tmp/run_l2_dev.sh` are superseded and should not be
 run. They were gitignored and untested, they hardcoded the dev split, they
