@@ -44,6 +44,7 @@ EXPECTED=""
 OUT_DIR=""
 INCLUDE_UNANSWERABLE=0
 ADV_SOURCE=""
+RESUME=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -53,6 +54,7 @@ while [ "$#" -gt 0 ]; do
     --out-dir)               OUT_DIR="$2"; shift 2 ;;
     --source-manifest)       ADV_SOURCE="$2"; shift 2 ;;
     --include-unanswerable)  INCLUDE_UNANSWERABLE=1; shift ;;
+    --resume)                RESUME=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 4 ;;
   esac
 done
@@ -159,6 +161,16 @@ PLAN=$("$PYTHON" -m specpilot.cli "${PLAN_ARGS[@]}") || {
 }
 COUNT=$(printf '%s\n' "$PLAN" | sed '/^$/d' | wc -l | tr -d ' ')
 
+# A locked sweep is a first run. Without this, invoking the same command twice
+# re-sends every case and overwrites its artifact, and the second set is
+# indistinguishable from the first. --resume is the only way to re-enter a
+# directory that already holds results, and it skips what is already there.
+if [ "$RESUME" = "0" ] && [ -d "$OUT_DIR" ] && \
+   [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
+  echo "$OUT_DIR already holds results; pass --resume to continue that sweep" >&2
+  exit 2
+fi
+
 mkdir -p "$OUT_DIR" && chmod 700 "$OUT_DIR"
 
 HEAD_BEFORE=$(git rev-parse HEAD)
@@ -197,6 +209,16 @@ run_l2_case() {
     --out-dir "$OUT_DIR" 2>&1 | grep -v "Loading weights"
 }
 
+# Already finished, from a previous attempt at this same sweep: an answer
+# artifact or a line in the refusal log. Both count — a refusal is a result.
+already_done() {
+  [ -f "$OUT_DIR/$1.json" ] && return 0
+  [ -f "$OUT_DIR/refusals.log" ] && grep -q "^$1	" "$OUT_DIR/refusals.log" && return 0
+  return 1
+}
+
+SKIPPED=0
+
 # Process substitution, not a pipe: the loop must run in this shell so a failed
 # case aborts the whole sweep instead of only its subshell.
 while IFS= read -r LINE; do
@@ -205,6 +227,11 @@ while IFS= read -r LINE; do
   QUESTION=$(field "$LINE" question)
   DOCUMENT=$(field "$LINE" document_id)
   GROUP_ID=$(field "$LINE" group_id)
+
+  if [ "$RESUME" = "1" ] && already_done "$CASE_ID"; then
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
 
   ATTEMPT=0
   STATUS=""
@@ -245,6 +272,16 @@ while IFS= read -r LINE; do
       *provider_unreachable*|*provider_timeout*|*invalid_tool_plan*)
         echo "retry ${ATTEMPT}/3 ${CASE_ID} (${CODE})"
         sleep 5
+        ;;
+      # The system declining to answer, printed as a bare code on stderr rather
+      # than as a refused status. It is a verdict, not a fault: the run reached
+      # a boundary and stopped, which is what fail-closed means. Aborting the
+      # sweep here loses the result and every case after it — which is what
+      # happened on l1-locked-024, at case 24 of a 25-case one-shot run.
+      *source_manifest_document_mismatch*|*no_evidence_retrieved*)
+        printf '%s\t%s\n' "$CASE_ID" "$CODE" >> "$OUT_DIR/refusals.log"
+        STATUS="refused"
+        break
         ;;
       *)
         echo "FAILED ${CASE_ID}: ${OUT}" >&2
