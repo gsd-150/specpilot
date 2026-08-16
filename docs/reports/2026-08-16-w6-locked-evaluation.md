@@ -113,6 +113,31 @@ of the gold they audit, and every agreement number below inherits that.
 - Severe flags on claims: both 1 (l2-locked-004's correlation-id claim),
   human-only 1 (l1-locked-023's false trigger), neither 33.
 
+**What the claims kappa of 0.293 can and cannot mean.** The two label sets do
+not decompose the answers the same way. The judge produced 56 claims the human
+pass never wrote, close to three times as many claims overall, because it split
+at a finer grain. So the 35 matched pairs compare verdicts on the subset where
+both sides happened to draw the same boundary, and the disagreement inside that
+subset mixes two things this design cannot separate: genuine disagreement about
+whether a claim is supported, and disagreement about where one claim ends and
+the next begins. A low kappa here is not evidence that the judge and the human
+pass disagree about the specification.
+
+Two further conditions bound it. The marginals are extremely unbalanced — 33 of
+35 human verdicts are `supported` — which is the arithmetic that collapses
+kappa while agreement stays at 0.886, the same paradox the dev calibration
+documented and the reason §8.3.2 requires all four numbers together. And the
+join runs through `labels-rekeyed`, a copy of the human labels whose claim ids
+were remapped onto the judge's numbering; verified here, the remapping changes
+identifiers only and leaves all 32 cases' verdict multisets identical to the
+worksheets. Every figure in this section was recomputed from
+`judge/locked/records` and the audit worksheets and reproduced exactly.
+
+Fixing this properly means pre-registering the claim decomposition so both
+sides label the same units. That is W7 work; it cannot be repaired after the
+fact without relabelling, and relabelling against a known judge output would
+destroy the blindness the audit was built for.
+
 ## What an L2 accuracy statement must carry
 
 - l2-dev-003's undisclosed-requirement reasoning (freeze disclosure §7): a
