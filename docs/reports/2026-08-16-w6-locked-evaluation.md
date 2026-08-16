@@ -233,6 +233,13 @@ reader of a largely model-authored evaluation needs.
 Run at `cbaad01` on the machine that holds the corpus. `HEAD` was recorded
 before and after and did not move; the tree was clean throughout.
 
+The commit that records this gate is not the commit the gate ran on, and
+cannot be: writing the result down changes the tree. The gap is one commit
+touching this file only — `cbaad01` is the tree that was tested, and every
+later commit named in this section edits documentation and nothing the gate
+covers. Closing the gap properly means stopping commits after the gate, which
+is what tagging a release is for, not something a re-run achieves.
+
 | target | result |
 |---|---|
 | ruff, mypy | clean |
