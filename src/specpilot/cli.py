@@ -1581,6 +1581,7 @@ def _judge_prepare(arguments: argparse.Namespace) -> int:
                 arguments.answers_dir,
                 arguments.out_dir,
                 xmls=xmls,
+                split=Split(arguments.split),
                 expected=arguments.expected,
             )
         else:
@@ -1592,6 +1593,7 @@ def _judge_prepare(arguments: argparse.Namespace) -> int:
                 arguments.answers_out,
                 arguments.out_dir,
                 xmls=xmls,
+                split=Split(arguments.split),
                 expected=arguments.expected,
             )
     except JudgePrepareError as error:
@@ -5059,6 +5061,10 @@ def _parser() -> argparse.ArgumentParser:
 
     judge_prepare = judge.add_parser("prepare")
     judge_prepare.add_argument("--level", choices=["l1", "l2"], required=True)
+    # Required and echoed, like every other command that reads annotations:
+    # locked stays unread until W6 has executed, and a split that can be
+    # omitted is one that gets omitted.
+    judge_prepare.add_argument("--split", choices=["dev", "locked"], required=True)
     judge_prepare.add_argument("--annotation-dir", type=Path, required=True)
     judge_prepare.add_argument("--out-dir", type=Path, required=True)
     judge_prepare.add_argument(

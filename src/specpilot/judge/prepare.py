@@ -75,6 +75,7 @@ def _roots(
     *,
     schema: str,
     with_retirements: bool,
+    split: Split,
 ) -> dict[str, Any]:
     store = AnnotationStore(annotation_dir)
     try:
@@ -91,7 +92,7 @@ def _roots(
             continue
         if getattr(record, "schema_version", None) != schema:
             continue
-        if record.split is not Split.DEV or record.expected_refusal:
+        if record.split is not split or record.expected_refusal:
             continue
         roots[record.item_id] = record
     return roots
@@ -153,6 +154,7 @@ def prepare_l1_payloads(
     out_dir: Path,
     *,
     xmls: Mapping[str, Path],
+    split: Split,
     expected: int | None = None,
 ) -> tuple[str, ...]:
     """One JudgePayload per answered L1 dev case, or a typed refusal.
@@ -163,7 +165,9 @@ def prepare_l1_payloads(
     Nothing is written until every payload is built and the count has been
     checked, so a refusal leaves no partial directory.
     """
-    roots = _roots(annotation_dir, schema=L1_SCHEMA, with_retirements=False)
+    roots = _roots(
+        annotation_dir, schema=L1_SCHEMA, with_retirements=False, split=split
+    )
     table = _clause_table(xmls)
     built: list[tuple[str, JudgePayload]] = []
     for item_id in sorted(roots):
@@ -223,6 +227,7 @@ def prepare_l2_payloads(
     out_dir: Path,
     *,
     xmls: Mapping[str, Path],
+    split: Split,
     expected: int | None = None,
 ) -> tuple[str, ...]:
     """One JudgePayload per completed L2 dev case, or a typed refusal.
@@ -232,7 +237,9 @@ def prepare_l2_payloads(
     rationale, then the final verdicts. The rendering is bounded and
     deterministic; no clause prose beyond what the model authored enters it.
     """
-    roots = _roots(annotation_dir, schema=L2_SCHEMA, with_retirements=True)
+    roots = _roots(
+        annotation_dir, schema=L2_SCHEMA, with_retirements=True, split=split
+    )
     table = _clause_table(xmls)
     built: list[tuple[str, JudgePayload, str]] = []
     for item_id in sorted(roots):
